@@ -1,0 +1,10 @@
+# results
+results/
+!results/mock_result_generator.py
+!results/20250820_1412_fitting_test
+
+# python cache files
+__pycache__/
+
+# jupyter cache files
+.ipynb_checkpoints/

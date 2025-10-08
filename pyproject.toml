@@ -1,0 +1,15 @@
+[project]
+name = "shg-measure-app-uv"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "crystaldatabase",
+    "matplotlib>=3.10.6",
+    "pyqt6>=6.9.1",
+    "sympy>=1.14.0",
+]
+
+[tool.uv.sources]
+crystaldatabase = { git = "https://github.com/ui-kurodai/202508_crystal_database.git", rev = "main" }
