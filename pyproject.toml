@@ -6,10 +6,17 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "crystaldatabase",
+    "elliptec",
     "matplotlib>=3.10.6",
+    "optosigma",
+    "pandas>=2.3.3",
     "pyqt6>=6.9.1",
+    "pyserial>=3.5",
+    "pyvisa>=1.15.0",
     "sympy>=1.14.0",
 ]
 
 [tool.uv.sources]
 crystaldatabase = { git = "https://github.com/ui-kurodai/202508_crystal_database.git", rev = "main" }
+elliptec = { git = "https://github.com/roesel/elliptec" }
+optosigma = { git = "https://github.com/elerac/optosigma" }
