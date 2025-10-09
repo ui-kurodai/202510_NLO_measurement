@@ -1,0 +1,45 @@
+{
+  "sample": "test",
+  "material": "SiO2",
+  "crystal_orientation": [
+    0,
+    1,
+    1
+  ],
+  "thickness_info": {
+    "t_at_thin_end_mm": 4.4775,
+    "wedge_angle_deg": 0.0
+  },
+  "beam_r_x": 200.0,
+  "beam_r_y": 200.0,
+  "method": "rotation",
+  "rot/trans_axis": [
+    1,
+    0,
+    0
+  ],
+  "wavelength_nm": 1064,
+  "input_polarization": 0,
+  "detected_polarization": 0,
+  "ref_ch": 1,
+  "sig_ch": 2,
+  "repetition": "1000 Hz",
+  "operator": "user",
+  "notes": "notes",
+  "start": -20,
+  "end": 20,
+  "step": 1,
+  "timestamp": "2025-08-20T15:22:20.410064",
+  "L_mm": 4.475733197423718,
+  "L_mm_std": 8.749881079382505e-05,
+  "k_scale": 3.007209959059195,
+  "k_scale_std": 0.006828759467439664,
+  "Lc_mean_mm": 0.019011658010458836,
+  "Lc_std_mm": 0.0011828386030384784,
+  "minima_count": 10,
+  "n_count": 8,
+  "Pm0": 3.0273210570180358,
+  "Pm0_stderr": 0.018613473768076635,
+  "n_peaks": 14,
+  "residual_rms": 0.06318074674313942
+}

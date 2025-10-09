@@ -1,0 +1,33 @@
+{
+  "sample": "test",
+  "material": "SiO2",
+  "crystal_orientation": [
+    0,
+    1,
+    1
+  ],
+  "thickness_info": {
+    "t_at_thin_end_mm": 4.4775,
+    "wedge_angle_deg": 0
+  },
+  "beam_r_x": 200,
+  "beam_r_y": 200,
+  "method": "rotation",
+  "rot/trans_axis": [
+    1,
+    0,
+    0
+  ],
+  "wavelength_nm": 1064,
+  "input_polarization": 0,
+  "detected_polarization": 0,
+  "ref_ch": 1,
+  "sig_ch": 2,
+  "repetition": "1000 Hz",
+  "operator": "user",
+  "notes": "notes",
+  "start": -20,
+  "end": 20,
+  "step": 1,
+  "timestamp": "2025-08-20T15:22:20.410064"
+}
