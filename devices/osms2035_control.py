@@ -73,6 +73,11 @@ class OSMS2035Controller(GSC02Controller):
             pulses = self.mm2pos(mm)
             self._set_position(pulses, self.axis)
             self.sleep_until_stop()
+
+            delta = mm - self.millimeter
+            if abs(delta) > 0.002:
+                logging.warning(f"Position error at {mm} mm by {delta} mm")
+                
         except Exception as e:
             logging.error(f"Failed to set position in mm: {e}")
 
