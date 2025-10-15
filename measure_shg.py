@@ -109,6 +109,8 @@ class SHGMeasurementRunner:
             writer.writerow(["position"] + [f"ch{ch}" for ch in channels])
 
         try:
+            self.stage_lin.reset()
+            self.stage_rot.reset()
             if method == "rotation":
                 # move to the center
                 self.stage_lin.millimeter = 17.5

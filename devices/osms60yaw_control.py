@@ -48,9 +48,8 @@ class OSMS60YAWController(GSC02Controller):
 
     def reset(self, direction='-') -> bool:
         try:
-            # return_to_origin doesn't work for osms60yaw because ORG: returns 0 for now.
-            # self.return_origin(direction, axis=self.axis)
-            self.move_to_angle(0, "auto")
+            self.return_origin(direction, axis=self.axis)
+            
         except (serial.SerialTimeoutException, serial.SerialException, UnicodeDecodeError) as e: # catch SerialTimeoutException before SerialException 
             logging.error(f'Failed to reset stage{self.axis}')
 

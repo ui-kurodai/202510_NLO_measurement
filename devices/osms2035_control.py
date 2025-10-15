@@ -49,10 +49,7 @@ class OSMS2035Controller(GSC02Controller):
     def reset(self, direction="-") -> bool:
         try:
             self.return_origin(direction, axis=self.axis)
-            # ret = self.return_origin(direction, axis=self.axis)
-            # if self.is_sleep_until_stop:
-            #     self.sleep_until_stop()
-            # return ret
+        
         except (serial.SerialTimeoutException, serial.SerialException, UnicodeDecodeError) as e: # catch SerialTimeoutException before SerialException 
             logging.error(f'Failed to reset stage{self.axis}')
 
