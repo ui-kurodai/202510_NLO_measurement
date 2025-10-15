@@ -109,9 +109,12 @@ class SHGMeasurementRunner:
             writer.writerow(["position"] + [f"ch{ch}" for ch in channels])
 
         try:
+            self.stage_lin.reset()
+            self.stage_rot.reset()
             if method == "rotation":
                 # move to the center
-                self.stage_lin.millimeter = 17.5
+                center = 17.5
+                self.stage_lin.millimeter = center
             for pos in scan_values:
                 if self._abort:
                     logging.warning("[SHG] Measurement aborted.")
@@ -120,15 +123,9 @@ class SHGMeasurementRunner:
 
                 if method == "rotation":
                     self.stage_rot.move_to_angle(pos, "ccw")
-                    delta = pos - self.stage_rot.degree
-                    if abs(delta) > 0.002:
-                        logging.warning(f"Angle error at {pos} deg by {delta} deg")
 
                 elif method == "wedge":
                     self.stage_lin.millimeter = pos
-                    delta = pos - self.stage_lin.millimeter
-                    if abs(delta) > 0.002:
-                        logging.warning(f"Position error at {pos} mm by {delta} mm")
                 else:
                     logging.error(f"Unknown method: {method}")
 
@@ -171,11 +168,13 @@ class SHGMeasurementRunner:
         self._abort = True
 
     def _make_scan_points(self, start: float, end: float, step: float) -> list:
-        vals = []
         if start > end:
-            end += 360
+            logging.error("The start angle should be smaller than the end")
+        if not (-180 <= start < 180 and -180 <= end < 180):
+            logging.error("Invalid target angle: -180 <= target < 180")        
+        vals = []
         val = start
         while val <= end:
-            vals.append(round(val % 360, 6))
+            vals.append(val)
             val += step
         return vals

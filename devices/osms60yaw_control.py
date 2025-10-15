@@ -48,9 +48,8 @@ class OSMS60YAWController(GSC02Controller):
 
     def reset(self, direction='-') -> bool:
         try:
-            # return_to_origin doesn't work for osms60yaw because ORG: returns 0 for now.
-            # self.return_origin(direction, axis=self.axis)
-            self.move_to_angle(0, "auto")
+            self.return_origin(direction, axis=self.axis)
+
         except (serial.SerialTimeoutException, serial.SerialException, UnicodeDecodeError) as e: # catch SerialTimeoutException before SerialException 
             logging.error(f'Failed to reset stage{self.axis}')
 
@@ -93,18 +92,22 @@ class OSMS60YAWController(GSC02Controller):
 
 
     def move_to_angle(self, target_deg: float, direction: str = "auto"):
+        """
+        target_deg :  -180 <= theta < 180
+        direction : "auto" or "ccw"
+        """
         try:
-            if not 0 <= target_deg <360:
-                logging.error("Invalid target angle: 0 <= target < 360")
+            if not -180 <= target_deg < 180:
+                logging.error("Invalid target angle: -180 <= target < 180")
+                return
+            if direction == "cw":
+                logging.error("Invalid direction: cw is not supported")
                 return
             
-            current_deg = self.degree
-            if current_deg < 0:
-                current_deg = 360 + current_deg
-            elif current_deg >= 360:
-                current_deg = current_deg % 360
+            current_deg_raw = self.degree
+            current_deg = (current_deg_raw + 180) % 360 -180
 
-            if not 0 <= current_deg <360:
+            if not -180 <= current_deg < 180:
                 logging.error(f"Unexpected current position returned: {self.degree}")
                 return
 
@@ -114,7 +117,15 @@ class OSMS60YAWController(GSC02Controller):
             while _:
                 if direction == "auto":
                     if -180 <= delta < 0:
-                        direction = "cw"
+                        if (target_deg + 2.5) * (current_deg + 2.5) < 0:
+                            direction = "ccw"
+                        else:
+                            direction = "cw"
+                    elif 180 < delta <= 360:
+                        if -2.5 < current_deg < 0:
+                            direction = "ccw"
+                        else:
+                            direction = "cw"
                     else:
                         direction = "ccw"
 
@@ -125,15 +136,10 @@ class OSMS60YAWController(GSC02Controller):
 
                 # cw is "-"
                 elif direction == "cw":
-                    if delta >= 0 or (357 < current_deg < 360):
-                        logging.exception("Cannot rotate cw across -2.5 deg")
-                        direction = "ccw"
-                    else:
-                        angle = delta
-                        _ = False
+                    angle = delta if delta < 0 else -360 + delta
 
                 else:
-                    logging.error("Invalid direction: choose from 'cw', 'ccw', or 'auto'")
+                    logging.error("Invalid direction: choose from 'ccw', or 'auto'")
                     angle = 0
                     _ = False
 
@@ -142,7 +148,12 @@ class OSMS60YAWController(GSC02Controller):
             logging.info(f"set relative pulse: {self.set_relative_pulse(pulse, axis=self.axis)}, axis: {self.axis}")
             logging.info(f"driving: {self.driving()}")
             self.sleep_until_stop()
-            logging.info(f"Moved to {target_deg:.2f}° (direction: {direction})")
+
+            delta = target_deg - ((self.degree + 180) % 360 - 180)
+            if abs(delta) > 0.002:
+                logging.warning(f"Angle error at {target_deg} deg by {delta} deg")
+            else:
+                logging.info(f"Moved to {target_deg:.2f}° (direction: {direction})")
         except Exception as e:
             logging.error(f"Failed to move to specified angle: {e}.")
 

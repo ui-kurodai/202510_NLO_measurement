@@ -124,10 +124,10 @@ class SHGMeasurementWidget(QGroupBox):
         # input parameter
         points_layout = QVBoxLayout()
         start_row = QHBoxLayout()
-        start_row.addWidget(QLabel("Start:"))
+        start_row.addWidget(QLabel("Start (-180, 180):"))
         start_row.addWidget(self.start_spin)
         end_row = QHBoxLayout()
-        end_row.addWidget(QLabel("End:"))
+        end_row.addWidget(QLabel("End (start, 180):"))
         end_row.addWidget(self.end_spin)
         step_row = QHBoxLayout()
         step_row.addWidget(QLabel("Step:"))
