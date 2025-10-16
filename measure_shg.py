@@ -30,6 +30,8 @@ class SHGMeasurementRunner:
 
     def run(self,
         sample: str,
+        material: str,
+        crystal_orientation: str,
         method: str,
         input_polarization: float,
         detected_polarization: float,
@@ -61,11 +63,18 @@ class SHGMeasurementRunner:
         csv_path = os.path.join(base_dir, base_filename + ".csv")
         meta_path = os.path.join(base_dir, base_filename + ".json")
 
+        class DummyDevice:
+            def __getattr__(self, name):
+                return None  # or some default dummy value
+            
+        if dry_run:
+            self.laser = DummyDevice()
+
         metadata = {
             # sample data
             "sample": sample,
-            # "material": material,
-            # "crystal_orientation": orientation,
+            "material": material,
+            "crystal_orientation": crystal_orientation,
             # "thickness_info": {
             #     "t_at_thin_end_mm": t_thin,
             #     "wedge_angle_deg": wedge,

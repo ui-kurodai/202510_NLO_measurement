@@ -15,10 +15,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - in
 
 class SHGMeasurementWidget(QGroupBox):
     def __init__(self,
-                 main_window=None,
+                 devices_tab=None,
                  parent=None):
         super().__init__("SHG Measurement", parent)
-        self.main_window = main_window
+        self.devices_tab = devices_tab
 
         self.runner = None
         self.thread = None
@@ -164,11 +164,11 @@ class SHGMeasurementWidget(QGroupBox):
         dry_run = self.dry_run_checkbox.isChecked()
         if self.runner is None:
             try:
-                laser = self.main_window.laser_widget.controller if not dry_run else None
-                stage_lin = self.main_window.stage1.controller
-                stage_rot = self.main_window.stage2.controller
-                boxcar = self.main_window.boxcar_widget.controller if not dry_run else None
-                elliptec = self.main_window.elliptec_widget.controller 
+                laser = self.devices_tab.laser_widget.controller if not dry_run else None
+                stage_lin = self.devices_tab.stage_lin_widget.controller
+                stage_rot = self.devices_tab.stage_rot_widget.controller
+                boxcar = self.devices_tab.boxcar_widget.controller if not dry_run else None
+                elliptec = self.devices_tab.elliptec_widget.controller 
             except AttributeError as e:
                 QMessageBox.warning(self, "Not Ready", "MainWindow does not have controller widgets.")
                 logging.error(f"{e}")
@@ -189,7 +189,7 @@ class SHGMeasurementWidget(QGroupBox):
             QMessageBox.warning(self, "Warning", "Measurement already in progress.")
             return
 
-        sample_info = self.sample_edit.text().strip("_")
+        sample_info = self.sample_edit.text().split("_")
         if not sample_info:
             QMessageBox.warning(self, "Input Error", "Please enter a sample ID.")
             return
@@ -249,22 +249,7 @@ class SHGMeasurementWidget(QGroupBox):
 
     def update_plot(self, pos, signal):
         self.ax.clear()
-
-        raw_x = self.runner.positions
-        plot_x = []
-        start = self.start_spin.value()
-        end = self.end_spin.value()
-        center = None
-        for i, val in enumerate(raw_x):
-            if i == 0:
-                plot_x.append(val) if start <= end else plot_x.append(val - 360)
-            else:
-                prev = raw_x[i-1]
-                if val < prev: center = i
-                if center == None and start > end:
-                    plot_x.append(val - 360)
-                else:
-                    plot_x.append(val)
+        plot_x = self.runner.positions
 
         sample_id = self.sample_edit.text()
         for ch_index, ch in enumerate(self.runner.channels):
@@ -280,7 +265,7 @@ class SHGMeasurementWidget(QGroupBox):
                 color = "gray"
             method = self.method_combo.currentText()
             if method == 'rotation':
-                self.ax.set_xlabel("Angle", fontsize=14)
+                self.ax.set_xlabel("Angle (deg)", fontsize=14)
             elif method == "wedge":
                 self.ax.set_xlabel("Position (mm)", fontsize=14)
             self.ax.set_ylabel("SHG intensity (a.u.)", fontsize=14)
