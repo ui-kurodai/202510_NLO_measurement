@@ -122,7 +122,7 @@ class SHGMeasurementRunner:
             self.stage_rot.reset()
             if method == "rotation":
                 # move to the center
-                center = 17.5
+                center = 18.05
                 self.stage_lin.millimeter = center
             for pos in scan_values:
                 if self._abort:
