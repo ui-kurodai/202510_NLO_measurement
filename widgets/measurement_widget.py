@@ -25,7 +25,7 @@ class SHGMeasurementWidget(QGroupBox):
 
         # --- UI Elements ---
         self.sample_edit = QLineEdit()
-        self.sample_edit.setPlaceholderText("<sample id>_<cut axis>_<others> ex.) 'BMF44_010_1'")
+        self.sample_edit.setPlaceholderText("<sample id>_<cut axis>_<measured coefficient> ex.) 'BMF44_010_d31'")
         self.material_combo = QComboBox()
         self.material_combo.addItems(CRYSTALS.keys())
         self.method_combo = QComboBox()
@@ -75,7 +75,7 @@ class SHGMeasurementWidget(QGroupBox):
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         sample_layout = QHBoxLayout()
-        sample_layout.addWidget(QLabel("Sample ID:"))
+        sample_layout.addWidget(QLabel("Measurement ID:"))
         sample_layout.addWidget(self.sample_edit)
         sample_layout.addWidget(QLabel("material:"))
         sample_layout.addWidget(self.material_combo)
@@ -196,6 +196,7 @@ class SHGMeasurementWidget(QGroupBox):
         sample_id = sample_info[0]
         crystal_orientation_str = sample_info[1]
         crystal_orientation = [int(i) for i in crystal_orientation_str]
+        measured_coefficient = sample_info[2]
         material = self.material_combo.currentText()
         method = self.method_combo.currentText()
         input_polarization = float(self.input_pol_spin.value())
@@ -222,6 +223,7 @@ class SHGMeasurementWidget(QGroupBox):
             sample=sample_id,
             material=material,
             crystal_orientation=crystal_orientation,
+            measured_coefficient=measured_coefficient,
             method=method,
             input_polarization=input_polarization,
             detected_polarization=detected_polarization,
