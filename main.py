@@ -39,7 +39,7 @@ class DevicesPanel(QWidget):
 
         # Instantiate device widgets (same as before)
         self.laser_widget = CrylasQlaserWidget()
-        self.stage_tr_widget = OSMS2035Widget(axis=1)   # translation stage
+        self.stage_lin_widget = OSMS2035Widget(axis=1)   # translation stage
         self.stage_rot_widget = OSMS60YAWWidget(axis=2) # rotation stage
         self.boxcar_widget = BoxcarWidget()
         self.elliptec_widget = ElliptecRotatorWidget()
@@ -47,7 +47,7 @@ class DevicesPanel(QWidget):
         # Ordered list of (name, widget)
         self._devices = [
             ("Laser", self.laser_widget),
-            ("Stage (Translation)", self.stage_tr_widget),
+            ("Stage (Translation)", self.stage_lin_widget),
             ("Stage (Rotation)", self.stage_rot_widget),
             ("Boxcar", self.boxcar_widget),
             ("Analyzer", self.elliptec_widget),
@@ -85,7 +85,7 @@ class DevicesPanel(QWidget):
         """Return all instantiated device widgets for unified shutdown."""
         return [
             self.laser_widget,
-            self.stage_tr_widget,
+            self.stage_lin_widget,
             self.stage_rot_widget,
             self.boxcar_widget,
             self.elliptec_widget,
@@ -111,12 +111,12 @@ class MainWindow(QWidget):
         # Central tabs (Workflow + Devices)
         self.tabs = QTabWidget()
 
-        # Workflow tabs
-        self.home_widget = SHGMeasurementWidget(main_window=self)
-        self.analysis_widget = FittingAnalysisWidget()
-
         # Devices tab (menu + content)
         self.devices_tab = DevicesPanel()
+
+        # Workflow tabs
+        self.home_widget = SHGMeasurementWidget(devices_tab=self.devices_tab)
+        self.analysis_widget = FittingAnalysisWidget()
 
         # Add tabs in the requested order
         self.tabs.addTab(self.home_widget, "Home")

@@ -30,6 +30,9 @@ class SHGMeasurementRunner:
 
     def run(self,
         sample: str,
+        material: str,
+        crystal_orientation,
+        measured_coefficient: str,
         method: str,
         input_polarization: float,
         detected_polarization: float,
@@ -55,17 +58,24 @@ class SHGMeasurementRunner:
         self.is_running = True
             
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        base_dir = os.path.join("results", f"{timestamp}_{sample}_{method}")
+        base_dir = os.path.join("results", f"{timestamp}_{sample}_{measured_coefficient}_{method}")
         os.makedirs(base_dir, exist_ok=True)
         base_filename = f"in{input_polarization}_out{detected_polarization}"
         csv_path = os.path.join(base_dir, base_filename + ".csv")
         meta_path = os.path.join(base_dir, base_filename + ".json")
 
+        class DummyDevice:
+            def __getattr__(self, name):
+                return None  # or some default dummy value
+            
+        if dry_run:
+            self.laser = DummyDevice()
+
         metadata = {
             # sample data
             "sample": sample,
-            # "material": material,
-            # "crystal_orientation": orientation,
+            "material": material,
+            "crystal_orientation": crystal_orientation,
             # "thickness_info": {
             #     "t_at_thin_end_mm": t_thin,
             #     "wedge_angle_deg": wedge,
@@ -113,7 +123,7 @@ class SHGMeasurementRunner:
             self.stage_rot.reset()
             if method == "rotation":
                 # move to the center
-                center = 17.5
+                center = 18.05
                 self.stage_lin.millimeter = center
             for pos in scan_values:
                 if self._abort:
