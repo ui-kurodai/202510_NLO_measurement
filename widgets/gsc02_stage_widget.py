@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QPushButton, QLabel, QVBoxLayout, QHBoxLayout,
     QMessageBox, QComboBox
 )
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from devices.osms2035_control import OSMS2035Controller
 from devices.osms60yaw_control import OSMS60YAWController
 import serial.tools.list_ports
@@ -67,6 +67,7 @@ class StageCommonWidget(QGroupBox):
 
         # Layout
         layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self.scan_port_btn)
         layout.addWidget(self.ports_combo)
         layout.addWidget(self.connect_btn)
