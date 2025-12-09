@@ -31,7 +31,8 @@ class SHGMeasurementRunner:
     def run(self,
         sample: str,
         material: str,
-        crystal_orientation: str,
+        crystal_orientation,
+        measured_coefficient: str,
         method: str,
         input_polarization: float,
         detected_polarization: float,
@@ -57,7 +58,7 @@ class SHGMeasurementRunner:
         self.is_running = True
             
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        base_dir = os.path.join("results", f"{timestamp}_{sample}_{method}")
+        base_dir = os.path.join("results", f"{timestamp}_{sample}_{measured_coefficient}_{method}")
         os.makedirs(base_dir, exist_ok=True)
         base_filename = f"in{input_polarization}_out{detected_polarization}"
         csv_path = os.path.join(base_dir, base_filename + ".csv")
