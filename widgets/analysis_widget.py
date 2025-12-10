@@ -84,7 +84,7 @@ class MplCanvas(FigureCanvas):
 # ------------------------------- Main Tab -------------------------------
 class FittingAnalysisWidget(QWidget):
     folderLoaded = pyqtSignal(str)   # emits folder path when a folder has been loaded
-    fitFinished = pyqtSignal(dict)   # emits result dict when a fit has finished
+    # fitFinished = pyqtSignal(dict)   # emits result dict when a fit has finished
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -403,9 +403,11 @@ class FittingAnalysisWidget(QWidget):
         # Run fit
         try:
             analysis = SHGDataAnalysis(str(self._current_dir))
-            strategy = StrategyCls(analysis)
-            results = strategy.fit_all()  # strategy expected to write back JSON/CSV
-            self._last_fit_result = dict(results) if isinstance(results, dict) else {"result": str(results)}
+            results = analysis.run(StrategyCls)
+            if results is None:
+                QMessageBox.critical(self, "Fitting error", f"{analysis.last_error}")
+                return
+            # self._last_fit_result = dict(results) if isinstance(results, dict) else {"result": str(results)}
         except Exception as e:
             QMessageBox.critical(self, "Fit failed", str(e))
             return
@@ -415,7 +417,7 @@ class FittingAnalysisWidget(QWidget):
         if not ok:
             QMessageBox.warning(self, "Reload failed", msg)
         self._render_from_csv()
-        self.fitFinished.emit(self._last_fit_result or {})
+        # self.fitFinished.emit(self._last_fit_result or {})
 
     # ------------------------------ Table/plots ------------------------------
     def _populate_table_from_json(self, meta: Dict):

@@ -3,7 +3,10 @@ import numpy as np
 class SHGFittingStrategy:
     """Abstract base class for SHG fitting algorithms."""
 
-    def fit_all(self, analysis):
+    def __init__(self, analysis):
+        self.analysis = analysis
+
+    def fit_all(self):
         """Run the full fitting procedure.
 
         Parameters
@@ -93,3 +96,9 @@ class SHGFittingStrategy:
             R = R_rot @ R
 
         return R
+
+
+# Error handling
+class FittingConfigurationError(Exception):
+    """Raised when the fitting configuration (meta, pol, axis, etc.) is invalid."""
+    pass

@@ -5,6 +5,10 @@ import pandas as pd
 from scipy.optimize import curve_fit
 import math
 
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - in %(filename)s - %(message)s')
+from fitting_strategies.base import FittingConfigurationError
+
 class SHGDataAnalysis:
     def __init__(self, base_path):
         """Initialize with paths and crystal database"""
@@ -52,6 +56,12 @@ class SHGDataAnalysis:
         else:
             raise ValueError(f"Unknown method: {self.meta['method']}")
 
-    def run(self, strategy):
+    def run(self, strategy_cls):
         """Run a fitting strategy that implements fit_all(meta, data, crystal_db)."""
-        return strategy.fit_all(strategy, self)
+        try:
+            strategy = strategy_cls(self)
+            return strategy.fit_all()
+        except FittingConfigurationError as e:
+            logging.error(f"Fitting configuration error: {e}")
+            self.last_error = str(e)
+            return None
