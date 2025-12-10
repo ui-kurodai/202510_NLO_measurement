@@ -13,11 +13,7 @@
   "beam_r_x": 200,
   "beam_r_y": 200,
   "method": "rotation",
-  "rot/trans_axis": [
-    1,
-    0,
-    0
-  ],
+  "rot/trans_axis": "100",
   "wavelength_nm": 1064,
   "input_polarization": 0,
   "detected_polarization": 0,
