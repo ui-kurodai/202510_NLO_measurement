@@ -4,6 +4,7 @@ import json
 from scipy.optimize import curve_fit
 from scipy.signal import argrelextrema
 from fitting_strategies.base import SHGFittingStrategy
+from fitting_strategies.base import FittingConfigurationError
 
 # self made database
 from crystaldatabase import CRYSTALS
@@ -13,7 +14,57 @@ from crystaldatabase import *
 class Jerphagnon1970Strategy(SHGFittingStrategy):
     """Fitting strategy based on Jerphagnon et al., 1970."""
     def __init__(self, analysis):
-        self.analysis = analysis
+        super().__init__(analysis)
+
+    # n_w and n_2w for specific setup (extend angle dependent n_e if needed)
+    def n_eff(self, pol_deg, wav_nm, theta_deg=0):
+        """Return n for a given polarization angle and crystal setting.
+
+        Parameters
+        ----------
+        pol_deg : float
+            Polarization angle in lab frame [deg], 0 or 90 only (for now).
+        wav_nm : float
+            Vacuum wavelength [nm].
+        theta_deg : float
+            Incidence angle (for future angle-dependent n_e).
+
+        Returns
+        -------
+        float
+            Effective refractive index n(wav_nm, pol_deg, theta_deg).
+        """
+        meta = self.analysis.meta
+        crystal = CRYSTALS[meta["material"]]()
+
+        if meta["rot/trans_axis"]=="001":
+            if np.isclose(pol_deg, 0, atol=1e-3):
+                n = crystal.get_n(wav_nm, polarization="e")
+            elif np.isclose(pol_deg, 90, atol=1e-3):
+                n = crystal.get_n(wav_nm, polarization="o")
+            else:
+                raise FittingConfigurationError(
+                    f"Input polarization of {pol_deg} deg is not supported. Only 0 or 90 deg is available."
+                )
+            
+        elif meta["rot/trans_axis"] in ("100", "010"):
+            if np.isclose(pol_deg, 0, atol=1e-3):
+                n = crystal.get_n(wav_nm, polarization="o")
+            elif np.isclose(pol_deg, 90, atol=1e-3):
+                # angle dependent
+                raise FittingConfigurationError(
+                    "Angle dependent refractive index is not supported."
+                )
+            else:
+                raise FittingConfigurationError(
+                    f"Input polarization of {pol_deg} deg is not supported. Only 0 or 90 deg is available."
+                )
+        else:
+            raise FittingConfigurationError(
+            f"Unexpected rotation axis: {meta['rot/trans_axis']}. "
+            "Supported values are '001', '100', '010'."
+        )
+        return n
 
     def _maker_fringes(self, override: dict = {}, envelope=False):
         """Full Maker fringes SHG model with Fresnel coefficients and projection factor.
@@ -31,8 +82,8 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         meta = self.analysis.meta
         wl1_nm = meta["wavelength_nm"]
         wl1_mm = wl1_nm * 1e-6
-        pol_in = meta["input_polarization"]
-        pol_out = meta["detected_polarization"]
+        pol_in = meta["input_polarization"] # 0-90 deg
+        pol_out = meta["detected_polarization"] # 0-90 deg
         crystal = CRYSTALS[meta["material"]]()
         data = self.analysis.data
         theta_deg = np.asarray(data.get("position_centered", data["position"]))
@@ -40,10 +91,9 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         beam_r_x = meta["beam_r_x"]
         beam_r_y = meta["beam_r_y"]
         beam_r = np.sqrt(beam_r_x * beam_r_y)
-
-        # Refractive indices (extend to o/e as needed)
-        n_w = crystal.get_n(wl1_nm, polarization="o")
-        n_2w = crystal.get_n(wl1_nm / 2, polarization="o")
+        
+        n_w = self.n_eff(pol_in, wl1_nm)
+        n_2w = self.n_eff(pol_out, wl1_nm / 2.0)
 
         def refraction_angle(theta):
             theta_p_w = np.arcsin(np.sin(theta) / n_w)
@@ -314,8 +364,10 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         th_neg = np.sort(th_min[th_min < 0.0])
         wl1_nm = meta["wavelength_nm"]
         crystal = CRYSTALS[meta["material"]]()
-        n_w = crystal.get_n(wl1_nm, polarization="o")
-        n_2w = crystal.get_n(wl1_nm / 2, polarization="o")
+        pol_in = meta["input_polarization"] # 0-90 deg
+        pol_out = meta["detected_polarization"] # 0-90 deg
+        n_w = self.n_eff(pol_in, wl1_nm)
+        n_2w = self.n_eff(pol_out, wl1_nm / 2.0)
 
         # def refraction_angle(theta):
         #     theta_p_w = np.arcsin(np.sin(theta) / n_w)
