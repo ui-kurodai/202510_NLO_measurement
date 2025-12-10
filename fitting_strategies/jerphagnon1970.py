@@ -121,23 +121,23 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
 
             Parameters
             ----------
-            pol : str
-                'perp' for nonlinear polarization perpendicular to the plane of incidence
-                'para' for nonlinear polarization parallel to the plane of incidence
+            pol : float
+                0 for nonlinear polarization perpendicular to the plane of incidence
+                90 for nonlinear polarization parallel to the plane of incidence
             """
             theta_p_w = refraction_angle(theta)["w"]
             theta_p_2w = refraction_angle(theta)["2w"]
 
-            if pol == "perp":
+            if np.isclose(pol, 0.0, atol=1e-3):
                 T = 2* n_2w * np.cos(theta_p_2w) * \
                     (np.cos(theta) + n_w * np.cos(theta_p_w))* (n_w*np.cos(theta_p_w) + n_2w*np.cos(theta_p_2w)) / \
                     ((n_2w*np.cos(theta_p_2w) + np.cos(theta))**3)
-            elif pol == "para":
+            elif np.isclose(pol, 90.0, atol=1e-3):
                 T = 2* n_2w * np.cos(theta_p_2w) * \
                     (np.cos(theta_p_w) + n_w * np.cos(theta))* (n_w*np.cos(theta_p_2w) + n_2w*np.cos(theta_p_w)) / \
                     ((n_2w*np.cos(theta) + np.cos(theta_p_2w))**3)
             else:
-                raise ValueError("pol must be 'para' or 'perp'")
+                raise ValueError("pol must be 0 or 90 degree")
             
             return T
         
@@ -196,7 +196,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         # normalized envelope (P"_cw / Pm(0))
         pol = "perp"
         P_env = (fresnel_t(theta, pol_in) / fresnel_t(0, pol_in))**4 * \
-                (T_at_back(theta, pol) / T_at_back(0, pol)) * \
+                (T_at_back(theta, pol_out) / T_at_back(0, pol_out)) * \
                 (projection_factor(theta, pol_in) / projection_factor(0, pol_in))**2 * \
                 (beam_size_correction(L, beam_r, theta) / beam_size_correction(L, beam_r, 0))
         P_N = P_env * np.sin(Psi)**2
