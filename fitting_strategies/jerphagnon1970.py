@@ -16,6 +16,26 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
     def __init__(self, analysis):
         super().__init__(analysis)
 
+    GEOMETRY_P_FUNCTIONS = {
+        # returns p(\theta) for possible combination
+        # key configuration is:("material", (cut), "rot axis", pol_in, pol_out)
+
+        # quartz d11
+        ("SiO2", (0,1,0), "001", 90, 90): lambda theta_p_w: np.cos(3 * theta_p_w),
+
+        # KDP d36
+        ("KH2PO4", (1,1,0), "001", 90, 0): lambda theta_p_w: np.sin(2*theta_p_w - (np.pi/2)),
+
+        # BMF d31
+        ("BaMgF4", (0,1,0), "001", 0, 0): lambda theta_p_w: np.cos(theta_p_w),
+
+        # BMF d33
+        ("BaMgF4", (0,1,0), "001", 0, 0): lambda _:1.0,
+
+        # BMF d33
+        ("BaMgF4", (1,0,0), "001", 0, 0): lambda _:1.0
+    }
+
     # n_w and n_2w for specific setup (extend angle dependent n_e if needed)
     def n_eff(self, pol_deg, wav_nm, theta_deg=0):
         """Return n for a given polarization angle and crystal setting.
@@ -148,18 +168,26 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
             R = 1
             return R
         
-        def projection_factor(theta, pol_in):
-            # Projection factor (placeholder; replace with exact form per geometry)
+        def projection_factor(theta):
+            meta = self.analysis.meta
             theta_p_w = refraction_angle(theta)["w"]
-            theta_p_2w = refraction_angle(theta)["2w"]
 
-            if pol_in == 90 and pol_out == "p": # p-pol -> 90 deg
-                p_factor = np.cos(theta_p_w) * np.cos(theta_p_2w)
-            elif pol_in == 0 and pol_out == "s":    # s-pol -> 0 deg
-                p_factor = 1.0
-            else:
-                p_factor = 1.0
-            return p_factor
+            key = (
+                meta["material"],
+                tuple(meta["crystal_orientation"]),
+                meta["rot/trans_axis"],
+                int(round(meta["input_polarization"])),
+                int(round(meta["detected_polarization"])),
+            )
+
+            try:
+                p_func = self.GEOMETRY_P_FUNCTIONS[key]
+            except KeyError:
+                raise FittingConfigurationError(
+                    f"This geometry is not supported: {key}"
+                )
+
+            return p_func(theta_p_w)
         
         def beam_size_correction(L_mm, w_um, theta):
             """
@@ -194,10 +222,9 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
                 (n_w * np.cos(theta_p_w) - n_2w * np.cos(theta_p_2w))    
 
         # normalized envelope (P"_cw / Pm(0))
-        pol = "perp"
         P_env = (fresnel_t(theta, pol_in) / fresnel_t(0, pol_in))**4 * \
                 (T_at_back(theta, pol_out) / T_at_back(0, pol_out)) * \
-                (projection_factor(theta, pol_in) / projection_factor(0, pol_in))**2 * \
+                (projection_factor(theta) / projection_factor(0))**2 * \
                 (beam_size_correction(L, beam_r, theta) / beam_size_correction(L, beam_r, 0))
         P_N = P_env * np.sin(Psi)**2
 
@@ -311,6 +338,9 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         # Initial guess: thickness derived from metadata
         L_guess = meta["thickness_info"]["t_at_thin_end_mm"]
         k_guess = float(np.nanmax(I_small) or 1.0)
+        # Fallback / clip
+        if not np.isfinite(k_guess) or k_guess <= 0:
+            k_guess = 1.0
 
         def model_small(theta_deg, L, k):
             override = {
