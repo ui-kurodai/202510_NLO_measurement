@@ -241,42 +241,80 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
 
         if n < 10:
             # fallback: not enough points to be fancy
-            c_best = np.median(x)
+            c_best = 0
             out = data.copy()
             out["position_centered"] = data["position"] - c_best
             return out
-
-        # candidate centers: coarse → fine search
-        c_candidates = np.linspace(x.min(), x.max(), 301)
-
+        
         def antisym_cost(c):
             # reflect xg around c; keep only points whose mirror is in-range
-            xr = 2*c - x
+            xr = 2.0 *c - x
             valid = (xr >= x[0]) & (xr <= x[-1])
-            if not np.any(valid) or np.sum(valid) < 10:
+            if not np.any(valid) or np.sum(valid) < 10: # excluding data points on the side 
                 return np.inf
             yr = np.interp(xr[valid], x, y)
             return np.mean((y[valid] - yr)**2)
+        
+        # Check if measurement range crosses 0 deg
+        crosses_zero = (x.min() <= 0.0) and (x.max() >= 0.0)
+        
+        # Case 1: range does NOT cross 0 → cannot determine center reliably
+        if not crosses_zero:
+            c_best = 0.0
+            fit_data = {
+                "c_candidates": None,
+                "costs": None,
+                "c0": c_best,
+                "c_local": None,
+                "costs_local": None,
+                "c_best": c_best,
+            }
 
-        # rough search
-        costs = np.array([antisym_cost(c) for c in c_candidates])
-        idx = np.argmin(costs)
-        c0 = c_candidates[idx]
+        # Case 2: range crosses 0 → search only around 0 deg
+        else:
+            L = x.max() - x.min()
 
-        # refined search around c0
-        span = (x.max() - x.min()) * 0.02 or 1e-9
-        c_local = np.linspace(max(x.min(), c0 - span), min(x.max(), c0 + span), 101)
-        costs_local = np.array([antisym_cost(c) for c in c_local])
-        c_best = c_local[np.argmin(costs_local)]
+            # Coarse search window around 0 (e.g. ±20% of total span, clipped to data)
+            coarse_span = 0.2 * L  # "around 0 deg" range; adjust if needed
+            c_lo = max(x.min(), -coarse_span)
+            c_hi = min(x.max(), +coarse_span)
 
-        fit_data = {
-            "c_candidates" : c_candidates,
-            "costs" : costs,
-            "c0" : c0,
-            "c_local" : c_local,
-            "costs_local" : costs_local,
-            "c_best" : c_best
-        }
+            # If data range is very narrow, avoid zero-width window
+            if c_hi <= c_lo:
+                c_lo, c_hi = x.min(), x.max()
+
+            # Coarse candidates around 0
+            c_candidates = np.linspace(c_lo, c_hi, 201)
+            costs = np.array([antisym_cost(c) for c in c_candidates])
+
+            # If everything failed (all inf), just fall back to 0
+            if not np.isfinite(costs).any():
+                c0 = 0.0
+            else:
+                c0 = c_candidates[np.argmin(costs)]
+
+            # Refined search around c0 (still close to 0)
+            local_span = 0.02 * L  # 2% of total span
+            local_span = max(local_span, 1e-6)  # avoid zero-span
+
+            c_local_lo = max(x.min(), c0 - local_span)
+            c_local_hi = min(x.max(), c0 + local_span)
+            c_local = np.linspace(c_local_lo, c_local_hi, 101)
+            costs_local = np.array([antisym_cost(c) for c in c_local])
+
+            if not np.isfinite(costs_local).any():
+                c_best = c0
+            else:
+                c_best = c_local[np.argmin(costs_local)]
+
+            fit_data = {
+                "c_candidates" : c_candidates,
+                "costs" : costs,
+                "c0" : c0,
+                "c_local" : c_local,
+                "costs_local" : costs_local,
+                "c_best" : c_best
+            }
 
         out = data.copy()
         out["position_centered"] = data["position"] - c_best
