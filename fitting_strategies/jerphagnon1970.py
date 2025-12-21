@@ -3,6 +3,11 @@ import pandas as pd
 import json
 from scipy.optimize import curve_fit
 from scipy.signal import argrelextrema
+from scipy.signal import find_peaks, savgol_filter  # <-- add
+from scipy.optimize import minimize
+from dataclasses import dataclass
+from typing import Optional, Tuple, Dict, Any
+
 from fitting_strategies.base import SHGFittingStrategy
 from fitting_strategies.base import FittingConfigurationError
 
@@ -26,8 +31,17 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         # KDP d36
         ("KH2PO4", (1,1,0), "001", 90, 0): lambda theta_p_w: np.sin(2*theta_p_w - (np.pi/2)),
 
+        # LiNbO3 d33
+        ("LiNbO3", (0,1,0), "001", 0, 0): lambda _: 1.0,
+
+        # LiNbO3 d31
+        ("LiNbO3", (0,1,0), "001", 90, 0): lambda _: 1.0,
+
         # BMF d31
-        ("BaMgF4", (0,1,0), "001", 0, 0): lambda theta_p_w: np.cos(theta_p_w),
+        ("BaMgF4", (0,1,0), "100", 0, 90): lambda theta_p_w: np.cos(theta_p_w),
+
+        # BMF d32
+        ("BaMgF4", (1,0,0), "010", 0, 90): lambda theta_p_w: np.cos(theta_p_w),
 
         # BMF d33
         ("BaMgF4", (0,1,0), "001", 0, 0): lambda _:1.0,
@@ -37,7 +51,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
     }
 
     # n_w and n_2w for specific setup (extend angle dependent n_e if needed)
-    def n_eff(self, pol_deg, wav_nm, theta_deg=0):
+    def n_eff(self, pol_deg, wav_nm, theta_deg=None):
         """Return n for a given polarization angle and crystal setting.
 
         Parameters
@@ -106,14 +120,26 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         pol_out = meta["detected_polarization"] # 0-90 deg
         crystal = CRYSTALS[meta["material"]]()
         data = self.analysis.data
-        theta_deg = np.asarray(data.get("position_centered", data["position"]))
 
         beam_r_x = meta["beam_r_x"]
         beam_r_y = meta["beam_r_y"]
         beam_r = np.sqrt(beam_r_x * beam_r_y)
+
+        if "L" in override.keys():
+            L = override["L"]
+        else:
+            L = meta["thickness_info"]["t_at_thin_end_mm"] # or analysis.calc_thickness_array
+
+        if "theta_deg" in override.keys():
+            theta = np.radians(override["theta_deg"])
+            n_w = self.n_eff(pol_in, wl1_nm, theta)
+            n_2w = self.n_eff(pol_out, wl1_nm / 2.0, theta)
+        else:
+            theta_deg = np.asarray(data.get("position_centered", data["position"]))
+            theta = np.radians(theta_deg)
         
-        n_w = self.n_eff(pol_in, wl1_nm)
-        n_2w = self.n_eff(pol_out, wl1_nm / 2.0)
+            n_w = self.n_eff(pol_in, wl1_nm, theta)
+            n_2w = self.n_eff(pol_out, wl1_nm / 2.0, theta)
 
         def refraction_angle(theta):
             theta_p_w = np.arcsin(np.sin(theta) / n_w)
@@ -131,7 +157,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
             elif pol == 90: #p-pol
                 t = 2 * n_in * np.cos(theta) / (n_out * np.cos(theta) + n_in * np.cos(theta_p_w))
             else:
-                raise ValueError("pol must be 's' or 'p'")
+                raise ValueError("pol must be 0 or 90 deg")
             return t
         
         def T_at_back(theta, pol):
@@ -205,18 +231,12 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
             B = np.exp(-((L_mm/w_mm) * np.cos(theta) * (np.tan(theta_p_w) - np.tan(theta_p_2w)))**2)
             return B
                
-        if "L" in override.keys():
-            L = override["L"]
-        else:
-            L = meta["thickness_info"]["t_at_thin_end_mm"] # or analysis.calc_thickness_array
-
-        if "theta_deg" in override.keys():
-            theta = np.radians(override["theta_deg"])
-        else:
-            theta_deg = np.asarray(data.get("position_centered", data["position"]))
-            theta = np.radians(theta_deg)
+        
         theta_p_w = refraction_angle(theta)["w"]
         theta_p_2w = refraction_angle(theta)["2w"]
+
+        n_w_0 = self.n_eff(pol_in, wl1_nm, 0)
+        n_2w_0 = self.n_eff(pol_out, wl1_nm/2.0, 0)
 
         Psi = (np.pi * L / 2) * (4 / wl1_mm) * \
                 (n_w * np.cos(theta_p_w) - n_2w * np.cos(theta_p_2w))    
@@ -225,13 +245,98 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         P_env = (fresnel_t(theta, pol_in) / fresnel_t(0, pol_in))**4 * \
                 (T_at_back(theta, pol_out) / T_at_back(0, pol_out)) * \
                 (projection_factor(theta) / projection_factor(0))**2 * \
-                (beam_size_correction(L, beam_r, theta) / beam_size_correction(L, beam_r, 0))
+                (beam_size_correction(L, beam_r, theta) / beam_size_correction(L, beam_r, 0)) * \
+                (n_w_0**2 - n_2w_0**2)**2 / (n_w**2 - n_2w**2)**2
         P_N = P_env * np.sin(Psi)**2
 
         if envelope:
             return P_env
         else:
             return P_N
+
+
+    def estimate_fringe_period(self, x, y):
+        # Remove mean to suppress DC component
+        y_detrended = y - np.mean(y)
+        dx = x[1] - x[0]
+
+        # FFT
+        fft = np.fft.rfft(y_detrended)
+        freq = np.fft.rfftfreq(len(y_detrended), d=dx)
+
+        # Ignore zero frequency
+        fft[0] = 0.0
+        fft[1] = 0.0
+
+        # Dominant frequency (lowest non-zero peak)
+        idx = np.argmax(np.abs(fft))
+        dominant_freq = freq[idx]
+
+        if dominant_freq == 0:
+            return None
+
+        # Period in x-unit
+        period = 1.0 / dominant_freq
+
+        return period, idx, freq, fft
+    
+    def detect_minima(self, x, y, threshold_ratio=0.01, order=3):
+        # Find local minima indices
+        idx_min = argrelextrema(y, np.less, order=order)[0]
+
+        # Global maximum - min
+        A = np.max(y) - np.min(y)
+
+        # Filter by intensity threshold
+        valid = (y[idx_min] - np.min(y)) < threshold_ratio * A
+
+        return idx_min[valid], idx_min
+    
+    def detect_extrema(self, x, y, mode, threshold_ratio=0.01, order=3):
+        '''
+        parameters
+        mode : str
+            "maxima" or "minima"
+        '''
+        # Estimate fringe period
+        period, idx, freq, fft = self.estimate_fringe_period(x,y)
+
+        if period is None:
+            raise RuntimeError("Failed to estimate fringe period")
+
+        # Convert period to number of samples
+        dx = x[1] - x[0]
+        window = int(period / dx / 3)
+
+        # Window length must be odd and >= 5
+        if window < 5:
+            window = 5
+        if window % 2 == 0:
+            window += 1
+
+        # Smooth data
+        y_smooth = savgol_filter(y, window_length=window, polyorder=3)
+
+        void = []
+        if mode == "maxima":
+            # Find local maxima
+            idx_max = argrelextrema(y_smooth, np.greater, order=order)[0]
+            
+            return idx_max, y_smooth, void
+
+        elif mode == "minima":
+            # Find local minima indices
+            idx_min = argrelextrema(y_smooth, np.less, order=order)[0]
+            # Global maximum - min
+            A = np.max(y) - np.min(y)
+
+            # Filter by intensity threshold
+            valid = (y[idx_min] - np.min(y)) < threshold_ratio * A
+            return idx_min[valid], y_smooth, idx_min
+        
+        else:
+            raise ValueError("mode must be 'maxima' or 'minima'")
+
 
     # ---------- stage C/D pipeline ----------
     def _position_centering(self, data):
@@ -275,7 +380,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
             L = x.max() - x.min()
 
             # Coarse search window around 0 (e.g. ±20% of total span, clipped to data)
-            coarse_span = 0.2 * L  # "around 0 deg" range; adjust if needed
+            coarse_span = 10  # "around 0 deg" range; adjust if needed
             c_lo = max(x.min(), -coarse_span)
             c_hi = min(x.max(), +coarse_span)
 
@@ -323,6 +428,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
     def _subtract_offset(self, data):
         """
         III C-1: Fit and subtract minima offset due to angular averaging.
+        according to III D-1:
         Parameters
         ----------
         data : dict
@@ -338,7 +444,9 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         y = np.asarray(data["intensity_corrected"])
 
         # Find local minima indices
-        minima_idx = argrelextrema(y, np.less, order=5)[0]
+        th_step = self.analysis.meta["step"]
+        order = max(int(1.0 / th_step), 1)
+        minima_idx = argrelextrema(y, np.less, order=order)[0]
 
         # Exclude points near the center (e.g. ±5°)
         exclude_range = 5.0
@@ -365,7 +473,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         return out, fit_data
 
     def _fit_L_small_angle(self, meta, data):
-        """III D-1 (a): Fit L at small angles to adjust nominal thickness."""
+        """III D-1 (a): Fit L at small angles (not specified) to adjust nominal thickness."""
         pos = np.asarray(data.get("position_centered", data["position"]))
         I = np.asarray(data["offset_corrected"])
         # Small-angle mask (|θ| < 5 deg)
@@ -386,7 +494,8 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
                 "L": L
             }
             return k* self._maker_fringes(override=override)
-        bounds = ([0.0, 0.0],[20, np.inf])   # range of estimated L, k
+        # range of estimated L(L +/- 10 um), k(0~inf)
+        bounds = ([L_guess - 0.01, 0.0],[L_guess + 0.01, np.inf])
         popt, pcov = curve_fit(model_small,
                             theta_small,
                             I_small, 
@@ -424,7 +533,9 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
             raise ValueError("No data points in the specified theta window.")
 
         # find minima
-        minima_idx = argrelextrema(I, np.less, order=5)[0]
+        th_step = meta["step"]
+        order = max(int(1.0 / th_step), 1)
+        minima_idx = argrelextrema(I, np.less, order=order)[0]
         valid_minima_idx = minima_idx[m[minima_idx]]
         
         th_min = theta_deg[valid_minima_idx]
@@ -434,8 +545,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         crystal = CRYSTALS[meta["material"]]()
         pol_in = meta["input_polarization"] # 0-90 deg
         pol_out = meta["detected_polarization"] # 0-90 deg
-        n_w = self.n_eff(pol_in, wl1_nm)
-        n_2w = self.n_eff(pol_out, wl1_nm / 2.0)
+
 
         # def refraction_angle(theta):
         #     theta_p_w = np.arcsin(np.sin(theta) / n_w)
@@ -449,12 +559,15 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
             
             th_rad = np.radians(th_list)
             lc_list = []
-            for i in range(len(th_rad) - 1):
-                lc = fitted_L_mm * (np.sin(th_rad[i+1])**2 - np.sin(th_rad[i])**2) / (4 * n_2w * n_w)
-                lc = abs(lc)
-                lc_list.append(lc)
+            for i in range(th_rad.size - 1):
+                # Use midpoint refractive indices between adjacent angles
+                n_w = self.n_eff(pol_in, wl1_nm, th_list[i])
+                n_2w = self.n_eff(pol_out, wl1_nm / 2.0, th_list[i])
 
-            return lc_list
+                lc = fitted_L_mm * (np.sin(th_rad[i + 1])**2 - np.sin(th_rad[i])**2) / (4.0 * n_2w * n_w)
+                lc_list.append(abs(lc))
+
+            return np.asarray(lc_list, dtype=float)
         
             # apparent L list
             # L_app = fitted_L_mm / np.cos(np.deg2rad(th_list))
@@ -531,7 +644,9 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         I_meas = np.asarray(data.get("offset_corrected", data["intensity_corrected"]))
 
         # Find local maxima (peaks)
-        maxima_idx = argrelextrema(I_meas, np.greater, order=5)[0]
+        th_step = self.analysis.meta["step"]
+        order = max(int(1.0 / th_step), 1)
+        maxima_idx = argrelextrema(I_meas, np.greater, order=order)[0]
         if maxima_idx.size == 0:
             raise RuntimeError("No maxima found in data. Check preprocessing or order parameter.")
 
