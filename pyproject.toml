@@ -22,4 +22,4 @@ dependencies = [
 [tool.uv.sources]
 elliptec = { git = "https://github.com/roesel/elliptec" }
 optosigma = { git = "https://github.com/elerac/optosigma" }
-crystaldatabase = { git = "https://github.com/ui-kurodai/202508_crystal_database.git" }
+crystaldatabase = { git = "https://github.com/ui-kurodai/202508_crystal_database" }

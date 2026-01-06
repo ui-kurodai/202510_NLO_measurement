@@ -164,7 +164,7 @@ wheels = [
 [[package]]
 name = "crystaldatabase"
 version = "0.1"
-source = { git = "https://github.com/ui-kurodai/202508_crystal_database.git#2f1cbae102404ece989c08a78098ed25fe8cdebc" }
+source = { git = "https://github.com/ui-kurodai/202508_crystal_database#4922d9b0cc617f3265c4b88d4a6ec4056d24b3b4" }
 
 [[package]]
 name = "cycler"
@@ -1075,7 +1075,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "crystaldatabase", git = "https://github.com/ui-kurodai/202508_crystal_database.git" },
+    { name = "crystaldatabase", git = "https://github.com/ui-kurodai/202508_crystal_database" },
     { name = "elliptec", git = "https://github.com/roesel/elliptec" },
     { name = "ipykernel", specifier = ">=6.30.1" },
     { name = "ipywidgets", specifier = ">=8.1.8" },
