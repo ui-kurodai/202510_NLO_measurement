@@ -50,6 +50,55 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         ("BaMgF4", (1,0,0), "001", 0, 0): lambda _:1.0
     }
 
+    def normalize_axis(self, axis):
+        """
+        Normalize axis representation to string '100', '010', or '001'.
+
+        Accepted inputs:
+            '100', '010', '001'
+            [1,0,0], [0,1,0], [0,0,1]
+            (1,0,0), (0,1,0), (0,0,1)
+        """
+        # String case
+        if isinstance(axis, str):
+            axis = axis.strip()
+            if axis in ("100", "010", "001"):
+                return axis
+            raise ValueError(f"Invalid axis string: {axis}")
+
+        # Sequence case
+        try:
+            a = list(axis)
+        except TypeError:
+            raise ValueError(f"Invalid axis type: {axis}")
+
+        if len(a) != 3:
+            raise ValueError(f"Axis must have length 3: {axis}")
+
+        # Allow int / bool / float close to 0 or 1
+        tol = 1e-6
+        vec = [1 if abs(x - 1) < tol else 0 if abs(x) < tol else None for x in a]
+
+        if vec == [1, 0, 0]:
+            return "100"
+        if vec == [0, 1, 0]:
+            return "010"
+        if vec == [0, 0, 1]:
+            return "001"
+
+        raise ValueError(f"Invalid axis vector: {axis}")
+
+    def _third_axis(self, cut_axis: str, rot_axis: str) -> str:
+        """Return the remaining principal axis label among {'100','010','001'}."""
+        axes = {"100", "010", "001"}
+        if cut_axis not in axes or rot_axis not in axes or cut_axis == rot_axis:
+            raise ValueError(f"Invalid axes: cut_axis={cut_axis}, rot_axis={rot_axis}")
+        third = list(axes - {cut_axis, rot_axis})
+        if len(third) != 1:
+            raise ValueError("Failed to determine third axis.")
+        
+        return third[0]
+
     # n_w and n_2w for specific setup (extend angle dependent n_e if needed)
     def n_eff(self, pol_deg, wav_nm, theta_deg=None):
         """Return n for a given polarization angle and crystal setting.
@@ -100,7 +149,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         )
         return n
 
-    def _maker_fringes(self, override: dict = {}, envelope=False):
+    def _maker_fringes(self, override: dict = {}, envelope=False, return_aux=False):
         """Full Maker fringes SHG model with Fresnel coefficients and projection factor.
             
         Parameters
@@ -108,7 +157,10 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         analysis : SHGDataAnalysis
             Analysis instance containing meta, data, and utilities.
         override : dict, optional
-            If given, overrides the default angle array or thickness.
+            If given, overrides the default:
+                angle array (deg)
+                thickness (mm)
+                n_w, n_2w
         envelope : bool, optional
             If True, return envelope values.
         """
@@ -131,17 +183,25 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
             L = meta["thickness_info"]["t_at_thin_end_mm"] # or analysis.calc_thickness_array
 
         if "theta_deg" in override.keys():
-            theta = np.radians(override["theta_deg"])
-            n_w = self.n_eff(pol_in, wl1_nm, theta)
-            n_2w = self.n_eff(pol_out, wl1_nm / 2.0, theta)
+            theta_deg = override["theta_deg"]
         else:
             theta_deg = np.asarray(data.get("position_centered", data["position"]))
-            theta = np.radians(theta_deg)
         
-            n_w = self.n_eff(pol_in, wl1_nm, theta)
-            n_2w = self.n_eff(pol_out, wl1_nm / 2.0, theta)
+        if "n" in override.keys():
+            # n = override["n"]
+            # if np.isclose(pol_in, 0):
+            #     n_w = n["n_w"]
+            n_w = self.n_eff(pol_in, wl1_nm, theta_deg)
+            n_2w = self.n_eff(pol_out, wl1_nm / 2.0, theta_deg)
+        else:
+            n_w = self.n_eff(pol_in, wl1_nm, theta_deg)
+            n_2w = self.n_eff(pol_out, wl1_nm / 2.0, theta_deg)
+        
 
         def refraction_angle(theta):
+            n_w = self.n_eff(pol_in, wl1_nm, np.rad2deg(theta))
+            n_2w = self.n_eff(pol_out, wl1_nm / 2.0, np.rad2deg(theta))
+
             theta_p_w = np.arcsin(np.sin(theta) / n_w)
             theta_p_2w = np.arcsin(np.sin(theta) / n_2w)
             angles = {"w": theta_p_w, "2w": theta_p_2w}
@@ -150,7 +210,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         def fresnel_t(theta, pol):
             """Amplitude transmission coefficient at a planar interface. Eq.(4-5)"""
             n_in = 1
-            n_out = n_w
+            n_out = self.n_eff(pol_in, wl1_nm, np.rad2deg(theta))
             theta_p_w = refraction_angle(theta)["w"]
             if pol == 0: # s-pol
                 t = 2 * n_in * np.cos(theta) / (n_in * np.cos(theta) + n_out * np.cos(theta_p_w))
@@ -173,6 +233,9 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
             """
             theta_p_w = refraction_angle(theta)["w"]
             theta_p_2w = refraction_angle(theta)["2w"]
+
+            n_w = self.n_eff(pol_in, wl1_nm, np.rad2deg(theta))
+            n_2w = self.n_eff(pol_out, wl1_nm / 2.0, np.rad2deg(theta))
 
             if np.isclose(pol, 0.0, atol=1e-3):
                 T = 2* n_2w * np.cos(theta_p_2w) * \
@@ -230,8 +293,8 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
 
             B = np.exp(-((L_mm/w_mm) * np.cos(theta) * (np.tan(theta_p_w) - np.tan(theta_p_2w)))**2)
             return B
-               
         
+        theta = np.deg2rad(theta_deg)
         theta_p_w = refraction_angle(theta)["w"]
         theta_p_2w = refraction_angle(theta)["2w"]
 
@@ -249,10 +312,25 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
                 (n_w_0**2 - n_2w_0**2)**2 / (n_w**2 - n_2w**2)**2
         P_N = P_env * np.sin(Psi)**2
 
+        # env_peak is propotional to d**2 * d_factor.
+        d_factor = fresnel_t(0, pol_in)**4 *\
+                T_at_back(0, pol_out) * \
+                projection_factor(0)**2 * \
+                beam_size_correction(L, beam_r, 0) / (n_w_0**2 - n_2w_0**2)**2
+
         if envelope:
-            return P_env
+            model = P_env
         else:
-            return P_N
+            model =  P_N
+
+        if not return_aux:
+            return model
+        aux = {
+            "d_factor": d_factor,
+            "t": fresnel_t(0, pol_in),
+            "T": T_at_back(0, pol_out)
+        }
+        return model, aux
 
 
     def estimate_fringe_period(self, x, y):
@@ -280,8 +358,20 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
 
         return period, idx, freq, fft
     
-    def detect_minima(self, x, y, threshold_ratio=0.01, order=3):
+    def detect_minima(self, x, y, threshold_ratio=0.02, order=None):
+        '''
+        Docstring for detect_minima
+        
+        :param x: Position
+        :param y: SHG intensity
+        :param threshold_ratio: error ratio to max(y) allowed around y=0
+        :param order: Number of datapoints to be compared for detecting minima.
+        '''
         # Find local minima indices
+        step = np.abs(x[0] - x[1])
+        if not order:
+            # order is about 1 mm or 1 deg
+            order = max(int(1.0/step), 1.0)
         idx_min = argrelextrema(y, np.less, order=order)[0]
 
         # Global maximum - min
@@ -444,9 +534,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         y = np.asarray(data["intensity_corrected"])
 
         # Find local minima indices
-        th_step = self.analysis.meta["step"]
-        order = max(int(1.0 / th_step), 1)
-        minima_idx = argrelextrema(y, np.less, order=order)[0]
+        minima_idx, _ = self.detect_minima(x, y)
 
         # Exclude points near the center (e.g. ±5°)
         exclude_range = 5.0
@@ -533,9 +621,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
             raise ValueError("No data points in the specified theta window.")
 
         # find minima
-        th_step = meta["step"]
-        order = max(int(1.0 / th_step), 1)
-        minima_idx = argrelextrema(I, np.less, order=order)[0]
+        minima_idx, _ = self.detect_minima(theta_deg, I)
         valid_minima_idx = minima_idx[m[minima_idx]]
         
         th_min = theta_deg[valid_minima_idx]
@@ -554,6 +640,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         #     return angles        
 
         def differential_L(th_list):
+            th_list = np.asarray(th_list)
             if th_list.size < 2:
                 return np.array([], dtype=float)
             
@@ -640,7 +727,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
             "residual_rms": float,
             }
         """
-        theta = np.asarray(data.get("position_centered", data["position"]))
+        theta_deg = np.asarray(data.get("position_centered", data["position"]))
         I_meas = np.asarray(data.get("offset_corrected", data["intensity_corrected"]))
 
         # Find local maxima (peaks)
@@ -649,8 +736,11 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         maxima_idx = argrelextrema(I_meas, np.greater, order=order)[0]
         if maxima_idx.size == 0:
             raise RuntimeError("No maxima found in data. Check preprocessing or order parameter.")
-
-        theta_pk = theta[maxima_idx]
+        # remove the peak aroung 0 deg (usually detected mistakenly)
+        valid = np.abs(theta_deg[maxima_idx]) > 3.0
+        maxima_idx = maxima_idx[valid]
+        
+        theta_pk = theta_deg[maxima_idx]
         I_pk = I_meas[maxima_idx]
 
         # Theoretical normalized envelope at maxima positions
@@ -697,7 +787,11 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         data, _centering = self._position_centering(self.analysis.data)
         data, _offset = self._subtract_offset(data)
         L_fit = self._fit_L_small_angle(self.analysis.meta, data)
-        Lc, _Lc = self._calc_Lc_large_angle(self.analysis.meta, data, [15, 180], L_fit["L_mm"])
+        try:
+            Lc, _Lc = self._calc_Lc_large_angle(self.analysis.meta, data, [15, 180], L_fit["L_mm"])
+        except Exception as e:
+            print(f"Error: {e}")
+            Lc = []
         Pm0_fit, _Pm0 = self._fit_Pm0(data)
 
         # add fitted theoretical values to csv
