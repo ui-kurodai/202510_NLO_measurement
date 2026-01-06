@@ -602,6 +602,196 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
             "k_scale_std": float(perr[1]),
             # "theta_window_deg": [mask[0], mask[-1]]
         }
+    
+    def _fit_n_large_angle(
+        self,
+        meta,
+        data,
+        theta_window=(15.0, 60.0),
+        L_mm=None,
+        side="auto",                 # "auto" | "pos" | "neg"
+        threshold_ratio=0.02,
+        order=None,
+        max_jump=3,                  # allow missing minima: ΔΨ can be k*pi, k=1..max_jump
+        bounds_rel=0.05,             # +/- relative bounds around database n
+    ):
+        """
+        Fit (n_w, n_2w) from large-angle minima positions.
+        Robust against missing minima by allowing ΔΨ ≈ k*pi (k=1..max_jump).
+
+        Parameters
+        ----------
+        theta_window : (float, float)
+            Use minima with theta_window[0] <= |theta| <= theta_window[1].
+        L_mm : float or None
+            If None, use meta["thickness_info"]["t_at_thin_end_mm"].
+        side : str
+            "pos", "neg", or "auto" (choose the side with more minima).
+        threshold_ratio, order :
+            Passed to detect_minima().
+        max_jump : int
+            Maximum allowed integer multiple for ΔΨ/pi (handles skipped minima).
+        bounds_rel : float
+            Relative bounds around initial n guesses.
+
+        Returns
+        -------
+        result : dict
+            Contains fitted n_w_fit, n_2w_fit and diagnostics.
+        fit_data : dict
+            Minima info for debugging.
+        """
+        theta_deg = np.asarray(data.get("position_centered", data["position"]), dtype=float)
+        I = np.asarray(data.get("intensity_corrected", data.get("offset_corrected")), dtype=float)
+
+        finite = np.isfinite(theta_deg) & np.isfinite(I)
+        if not np.any(finite):
+            raise ValueError("No finite data for n fitting.")
+
+        # --- choose thickness ---
+        if L_mm is None:
+            L_mm = float(meta["thickness_info"]["t_at_thin_end_mm"])
+        else:
+            L_mm = float(L_mm)
+
+        wl1_nm = float(meta["wavelength_nm"])
+        wl1_mm = wl1_nm * 1e-6
+
+        pol_in = meta["input_polarization"]
+        pol_out = meta["detected_polarization"]
+
+        # --- detect minima using your existing function ---
+        idx_valid, idx_all = self.detect_minima(theta_deg, I, threshold_ratio=threshold_ratio, order=order)
+
+        # --- apply angular window ---
+        th_min = theta_deg[idx_valid]
+        in_win = (np.abs(th_min) >= float(theta_window[0])) & (np.abs(th_min) <= float(theta_window[1]))
+        idx_valid = idx_valid[in_win]
+        if idx_valid.size < 2:
+            raise RuntimeError("Not enough minima in the specified large-angle window.")
+
+        th_min = theta_deg[idx_valid]
+        th_pos = np.sort(th_min[th_min > 0.0])
+        th_neg = np.sort(th_min[th_min < 0.0])
+
+        # --- select one side only (avoid crossing 0 deg) ---
+        if side == "pos":
+            th_use = th_pos
+            side_used = "pos"
+        elif side == "neg":
+            th_use = th_neg
+            side_used = "neg"
+        elif side == "auto":
+            # prefer side with more minima; tie -> pos
+            if th_pos.size >= 2 and th_pos.size >= th_neg.size:
+                th_use = th_pos
+                side_used = "pos"
+            elif th_neg.size >= 2:
+                th_use = th_neg
+                side_used = "neg"
+            else:
+                raise RuntimeError("Not enough minima on either side for n-fitting.")
+        else:
+            raise ValueError("side must be 'auto', 'pos', or 'neg'.")
+
+        if th_use.size < 2:
+            raise RuntimeError("Not enough minima on the selected side for n-fitting.")
+
+        theta_use_rad = np.radians(th_use)
+
+        # --- initial guesses from database (current n_eff implementation) ---
+        n_w_init = float(self.n_eff(pol_in, wl1_nm, 0.0))
+        n_2w_init = float(self.n_eff(pol_out, wl1_nm / 2.0, 0.0))
+
+        # --- compute Psi(theta; n_w, n_2w) consistent with your _maker_fringes phase term ---
+        def compute_psi(theta_rad, n_w, n_2w):
+            s = np.sin(theta_rad)
+            arg_w = np.clip(s / n_w, -1.0, 1.0)
+            arg_2w = np.clip(s / n_2w, -1.0, 1.0)
+            theta_p_w = np.arcsin(arg_w)
+            theta_p_2w = np.arcsin(arg_2w)
+
+            delta = n_w * np.cos(theta_p_w) - n_2w * np.cos(theta_p_2w)
+            psi = (np.pi * L_mm / 2.0) * (4.0 / wl1_mm) * delta
+            return psi
+
+        # --- robust cost: allow ΔΨ ≈ k*pi (k=1..max_jump) ---
+        max_jump = int(max_jump)
+        if max_jump < 1:
+            max_jump = 1
+
+        def cost(params):
+            n_w, n_2w = float(params[0]), float(params[1])
+            if n_w <= 1.0 or n_2w <= 1.0:
+                return 1e12
+
+            psi = compute_psi(theta_use_rad, n_w, n_2w)
+            dpsi = np.diff(psi)
+            q = np.abs(dpsi) / np.pi  # should be close to integer (1 usually; 2 if one minimum skipped)
+
+            # nearest integer in [1, max_jump]
+            k = np.rint(q)
+            k = np.clip(k, 1, max_jump)
+
+            # residual to nearest allowed integer
+            r = q - k
+
+            # mild preference for k=1 (consecutive minima) to avoid degeneracy
+            w = 1.0 / k
+            return float(np.sum((w * r) ** 2))
+
+        x0 = np.array([n_w_init, n_2w_init], dtype=float)
+        lo = np.array([(1.0 - bounds_rel) * n_w_init, (1.0 - bounds_rel) * n_2w_init], dtype=float)
+        hi = np.array([(1.0 + bounds_rel) * n_w_init, (1.0 + bounds_rel) * n_2w_init], dtype=float)
+
+        res = minimize(
+            cost,
+            x0,
+            method="L-BFGS-B",
+            bounds=[(lo[0], hi[0]), (lo[1], hi[1])],
+        )
+
+        if not res.success:
+            n_w_fit, n_2w_fit = n_w_init, n_2w_init
+            success = False
+            message = str(res.message)
+        else:
+            n_w_fit, n_2w_fit = float(res.x[0]), float(res.x[1])
+            success = True
+            message = "OK"
+
+        # --- diagnostics: how many jumps were inferred ---
+        psi_fit = compute_psi(theta_use_rad, n_w_fit, n_2w_fit)
+        q_fit = np.abs(np.diff(psi_fit)) / np.pi
+        k_fit = np.clip(np.rint(q_fit), 1, max_jump).astype(int)
+        r_fit = q_fit - k_fit
+        rms = float(np.sqrt(np.mean(r_fit**2))) if r_fit.size else float("nan")
+
+        result = {
+            "n_w_fit": float(n_w_fit),
+            "n_2w_fit": float(n_2w_fit),
+            "n_w_init": float(n_w_init),
+            "n_2w_init": float(n_2w_init),
+            "n_fit_success": bool(success),
+            "n_fit_message": message,
+            "n_fit_side": side_used,
+            "n_fit_theta_window_deg": (float(theta_window[0]), float(theta_window[1])),
+            "n_fit_minima_used": int(th_use.size),
+            "n_fit_phase_rms": rms,
+            "n_fit_jump_hist": {int(j): int(np.sum(k_fit == j)) for j in range(1, max_jump + 1)},
+        }
+
+        fit_data = {
+            "minima_idx_valid": idx_valid,
+            "minima_idx_all": idx_all,
+            "theta_minima_used_deg": th_use,
+            "q_fit": q_fit,
+            "k_fit": k_fit,
+            "r_fit": r_fit,
+        }
+        return result, fit_data
+    
+    
 
     def _calc_Lc_large_angle(self, meta, data, mask, fitted_L_mm):
         """
