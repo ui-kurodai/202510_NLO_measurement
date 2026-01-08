@@ -44,17 +44,6 @@ class SHGDataAnalysis:
         self.data = pd.read_csv(self.csv_path)
         self.data["intensity_corrected"] = self.data.iloc[:, 2] / self.data.iloc[:, 1]
 
-    def calc_thickness_array(self):
-        """Calculate crystal thickness array from metadata"""
-        t_thin = self.meta["thickness_info"]["t_at_thin_end_mm"]
-        wedge_angle_deg = self.meta["thickness_info"]["wedge_angle_deg"]
-
-        if self.meta["method"] == "rotation":
-            return np.full_like(self.data["position"], t_thin, dtype=float)
-        elif self.meta["method"] == "wedge":
-            return t_thin + self.data["position"] * np.tan(np.radians(wedge_angle_deg))
-        else:
-            raise ValueError(f"Unknown method: {self.meta['method']}")
 
     def run(self, strategy_cls):
         """Run a fitting strategy that implements fit_all(meta, data, crystal_db)."""
