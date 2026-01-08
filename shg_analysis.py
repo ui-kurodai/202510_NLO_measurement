@@ -19,6 +19,8 @@ class SHGDataAnalysis:
             analysis = SHGDataAnalysis(mock_input={"meta":meta, "data":data})
         """
         if base_path is not None:
+            if mock_input is not None:
+                raise ValueError("Specify either base_path or mock, not both")
             self.base_path = base_path
         else:
             mock_input = {} if mock_input is None else mock_input
