@@ -8,7 +8,7 @@ from scipy.optimize import minimize
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any
 
-from fitting_strategies.base import SHGFittingStrategy
+from fitting_strategies.base import BaseRotationStrategy
 from fitting_strategies.base import FittingConfigurationError
 
 # self made database
@@ -16,7 +16,7 @@ from crystaldatabase import CRYSTALS
 from crystaldatabase import *
 
 
-class Jerphagnon1970Strategy(SHGFittingStrategy):
+class Jerphagnon1970Strategy(BaseRotationStrategy):
     """Fitting strategy based on Jerphagnon et al., 1970."""
     def __init__(self, analysis):
         super().__init__(analysis)
@@ -50,54 +50,6 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         ("BaMgF4", (1,0,0), "001", 0, 0): lambda _:1.0
     }
 
-    def normalize_axis(self, axis):
-        """
-        Normalize axis representation to string '100', '010', or '001'.
-
-        Accepted inputs:
-            '100', '010', '001'
-            [1,0,0], [0,1,0], [0,0,1]
-            (1,0,0), (0,1,0), (0,0,1)
-        """
-        # String case
-        if isinstance(axis, str):
-            axis = axis.strip()
-            if axis in ("100", "010", "001"):
-                return axis
-            raise ValueError(f"Invalid axis string: {axis}")
-
-        # Sequence case
-        try:
-            a = list(axis)
-        except TypeError:
-            raise ValueError(f"Invalid axis type: {axis}")
-
-        if len(a) != 3:
-            raise ValueError(f"Axis must have length 3: {axis}")
-
-        # Allow int / bool / float close to 0 or 1
-        tol = 1e-6
-        vec = [1 if abs(x - 1) < tol else 0 if abs(x) < tol else None for x in a]
-
-        if vec == [1, 0, 0]:
-            return "100"
-        if vec == [0, 1, 0]:
-            return "010"
-        if vec == [0, 0, 1]:
-            return "001"
-
-        raise ValueError(f"Invalid axis vector: {axis}")
-
-    def _third_axis(self, cut_axis: str, rot_axis: str) -> str:
-        """Return the remaining principal axis label among {'100','010','001'}."""
-        axes = {"100", "010", "001"}
-        if cut_axis not in axes or rot_axis not in axes or cut_axis == rot_axis:
-            raise ValueError(f"Invalid axes: cut_axis={cut_axis}, rot_axis={rot_axis}")
-        third = list(axes - {cut_axis, rot_axis})
-        if len(third) != 1:
-            raise ValueError("Failed to determine third axis.")
-        
-        return third[0]
 
     # n_w and n_2w for specific setup (extend angle dependent n_e if needed)
     def n_eff(self, pol_deg, wav_nm, theta_deg=None):
@@ -115,7 +67,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         Returns
         -------
         float
-            Effective refractive index n(wav_nm, pol_deg, theta_deg).
+            Refractive index n for the designated setup (polarization, cut plane, AOI...)
         """
         meta = self.analysis.meta
         crystal = CRYSTALS[meta["material"]]()
@@ -177,11 +129,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         beam_r_y = meta["beam_r_y"]
         beam_r = np.sqrt(beam_r_x * beam_r_y)
 
-        if "L" in override.keys():
-            L = override["L"]
-        else:
-            L = meta["thickness_info"]["t_at_thin_end_mm"] # or analysis.calc_thickness_array
-
+        L = override.get("L", meta["thickness_info"]["t_center_mm"])
         if "theta_deg" in override.keys():
             theta_deg = override["theta_deg"]
         else:
@@ -357,164 +305,9 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         period = 1.0 / dominant_freq
 
         return period, idx, freq, fft
-    
-    def detect_minima(self, x, y, threshold_ratio=0.02, order=None):
-        '''
-        Docstring for detect_minima
-        
-        :param x: Position
-        :param y: SHG intensity
-        :param threshold_ratio: error ratio to max(y) allowed around y=0
-        :param order: Number of datapoints to be compared for detecting minima.
-        '''
-        # Find local minima indices
-        step = np.abs(x[0] - x[1])
-        if not order:
-            # order is about 1 mm or 1 deg
-            order = max(int(1.0/step), 1.0)
-        idx_min = argrelextrema(y, np.less, order=order)[0]
-
-        # Global maximum - min
-        A = np.max(y) - np.min(y)
-
-        # Filter by intensity threshold
-        valid = (y[idx_min] - np.min(y)) < threshold_ratio * A
-
-        return idx_min[valid], idx_min
-    
-    def detect_extrema(self, x, y, mode, threshold_ratio=0.01, order=3):
-        '''
-        parameters
-        mode : str
-            "maxima" or "minima"
-        '''
-        # Estimate fringe period
-        period, idx, freq, fft = self.estimate_fringe_period(x,y)
-
-        if period is None:
-            raise RuntimeError("Failed to estimate fringe period")
-
-        # Convert period to number of samples
-        dx = x[1] - x[0]
-        window = int(period / dx / 3)
-
-        # Window length must be odd and >= 5
-        if window < 5:
-            window = 5
-        if window % 2 == 0:
-            window += 1
-
-        # Smooth data
-        y_smooth = savgol_filter(y, window_length=window, polyorder=3)
-
-        void = []
-        if mode == "maxima":
-            # Find local maxima
-            idx_max = argrelextrema(y_smooth, np.greater, order=order)[0]
-            
-            return idx_max, y_smooth, void
-
-        elif mode == "minima":
-            # Find local minima indices
-            idx_min = argrelextrema(y_smooth, np.less, order=order)[0]
-            # Global maximum - min
-            A = np.max(y) - np.min(y)
-
-            # Filter by intensity threshold
-            valid = (y[idx_min] - np.min(y)) < threshold_ratio * A
-            return idx_min[valid], y_smooth, idx_min
-        
-        else:
-            raise ValueError("mode must be 'maxima' or 'minima'")
 
 
     # ---------- stage C/D pipeline ----------
-    def _position_centering(self, data):
-        x = np.asarray(data["position"])
-        y = np.asarray(data["intensity_corrected"])
-        n = len(x)
-
-        if n < 10:
-            # fallback: not enough points to be fancy
-            c_best = 0
-            out = data.copy()
-            out["position_centered"] = data["position"] - c_best
-            return out
-        
-        def antisym_cost(c):
-            # reflect xg around c; keep only points whose mirror is in-range
-            xr = 2.0 *c - x
-            valid = (xr >= x[0]) & (xr <= x[-1])
-            if not np.any(valid) or np.sum(valid) < 10: # excluding data points on the side 
-                return np.inf
-            yr = np.interp(xr[valid], x, y)
-            return np.mean((y[valid] - yr)**2)
-        
-        # Check if measurement range crosses 0 deg
-        crosses_zero = (x.min() <= 0.0) and (x.max() >= 0.0)
-        
-        # Case 1: range does NOT cross 0 → cannot determine center reliably
-        if not crosses_zero:
-            c_best = 0.0
-            fit_data = {
-                "c_candidates": None,
-                "costs": None,
-                "c0": c_best,
-                "c_local": None,
-                "costs_local": None,
-                "c_best": c_best,
-            }
-
-        # Case 2: range crosses 0 → search only around 0 deg
-        else:
-            L = x.max() - x.min()
-
-            # Coarse search window around 0 (e.g. ±20% of total span, clipped to data)
-            coarse_span = 10  # "around 0 deg" range; adjust if needed
-            c_lo = max(x.min(), -coarse_span)
-            c_hi = min(x.max(), +coarse_span)
-
-            # If data range is very narrow, avoid zero-width window
-            if c_hi <= c_lo:
-                c_lo, c_hi = x.min(), x.max()
-
-            # Coarse candidates around 0
-            c_candidates = np.linspace(c_lo, c_hi, 201)
-            costs = np.array([antisym_cost(c) for c in c_candidates])
-
-            # If everything failed (all inf), just fall back to 0
-            if not np.isfinite(costs).any():
-                c0 = 0.0
-            else:
-                c0 = c_candidates[np.argmin(costs)]
-
-            # Refined search around c0 (still close to 0)
-            local_span = 0.02 * L  # 2% of total span
-            local_span = max(local_span, 1e-6)  # avoid zero-span
-
-            c_local_lo = max(x.min(), c0 - local_span)
-            c_local_hi = min(x.max(), c0 + local_span)
-            c_local = np.linspace(c_local_lo, c_local_hi, 101)
-            costs_local = np.array([antisym_cost(c) for c in c_local])
-
-            if not np.isfinite(costs_local).any():
-                c_best = c0
-            else:
-                c_best = c_local[np.argmin(costs_local)]
-
-            fit_data = {
-                "c_candidates" : c_candidates,
-                "costs" : costs,
-                "c0" : c0,
-                "c_local" : c_local,
-                "costs_local" : costs_local,
-                "c_best" : c_best
-            }
-
-        out = data.copy()
-        out["position_centered"] = data["position"] - c_best
-        return out, fit_data
-
     def _subtract_offset(self, data):
         """
         III C-1: Fit and subtract minima offset due to angular averaging.
@@ -534,7 +327,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         y = np.asarray(data["intensity_corrected"])
 
         # Find local minima indices
-        minima_idx, _ = self.detect_minima(x, y)
+        minima_idx = self.detect_minima(x, y)
 
         # Exclude points near the center (e.g. ±5°)
         exclude_range = 5.0
@@ -570,7 +363,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         I_small = I[mask]
 
         # Initial guess: thickness derived from metadata
-        L_guess = meta["thickness_info"]["t_at_thin_end_mm"]
+        L_guess = meta["thickness_info"]["t_center_mm"]
         k_guess = float(np.nanmax(I_small) or 1.0)
         # Fallback / clip
         if not np.isfinite(k_guess) or k_guess <= 0:
@@ -624,7 +417,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         theta_window : (float, float)
             Use minima with theta_window[0] <= |theta| <= theta_window[1].
         L_mm : float or None
-            If None, use meta["thickness_info"]["t_at_thin_end_mm"].
+            If None, use meta["thickness_info"]["t_center_mm"].
         side : str
             "pos", "neg", or "auto" (choose the side with more minima).
         threshold_ratio, order :
@@ -650,7 +443,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
 
         # --- choose thickness ---
         if L_mm is None:
-            L_mm = float(meta["thickness_info"]["t_at_thin_end_mm"])
+            L_mm = float(meta["thickness_info"]["t_center_mm"])
         else:
             L_mm = float(L_mm)
 
@@ -661,7 +454,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         pol_out = meta["detected_polarization"]
 
         # --- detect minima using your existing function ---
-        idx_valid, idx_all = self.detect_minima(theta_deg, I, threshold_ratio=threshold_ratio, order=order)
+        idx_valid, idx_all = self.detect_minima(theta_deg, I, threshold_ratio=threshold_ratio, order=order, aux=True)
 
         # --- apply angular window ---
         th_min = theta_deg[idx_valid]
@@ -791,7 +584,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
         }
         return result, fit_data
     
-    
+
 
     def _calc_Lc_large_angle(self, meta, data, mask, fitted_L_mm):
         """
@@ -811,7 +604,7 @@ class Jerphagnon1970Strategy(SHGFittingStrategy):
             raise ValueError("No data points in the specified theta window.")
 
         # find minima
-        minima_idx, _ = self.detect_minima(theta_deg, I)
+        minima_idx = self.detect_minima(theta_deg, I)
         valid_minima_idx = minima_idx[m[minima_idx]]
         
         th_min = theta_deg[valid_minima_idx]

@@ -9,121 +9,10 @@ from crystaldatabase import CRYSTALS
 from crystaldatabase import *
 
 class Ishidate1974Strategy(Jerphagnon1970Strategy):
+    def __init__(self, analysis):
+        super().__init__(analysis)
 
     INDEX_TO_AXIS = {"100": "a", "010": "b", "001": "c"}
-
-    # def normalize_axis(self, axis):
-    #     """
-    #     Normalize axis representation to string '100', '010', or '001'.
-
-    #     Accepted inputs:
-    #         '100', '010', '001'
-    #         [1,0,0], [0,1,0], [0,0,1]
-    #         (1,0,0), (0,1,0), (0,0,1)
-    #     """
-    #     # String case
-    #     if isinstance(axis, str):
-    #         axis = axis.strip()
-    #         if axis in ("100", "010", "001"):
-    #             return axis
-    #         raise ValueError(f"Invalid axis string: {axis}")
-
-    #     # Sequence case
-    #     try:
-    #         a = list(axis)
-    #     except TypeError:
-    #         raise ValueError(f"Invalid axis type: {axis}")
-
-    #     if len(a) != 3:
-    #         raise ValueError(f"Axis must have length 3: {axis}")
-
-    #     # Allow int / bool / float close to 0 or 1
-    #     tol = 1e-6
-    #     vec = [1 if abs(x - 1) < tol else 0 if abs(x) < tol else None for x in a]
-
-    #     if vec == [1, 0, 0]:
-    #         return "100"
-    #     if vec == [0, 1, 0]:
-    #         return "010"
-    #     if vec == [0, 0, 1]:
-    #         return "001"
-
-    #     raise ValueError(f"Invalid axis vector: {axis}")
-
-    # def _third_axis(self, cut_axis: str, rot_axis: str) -> str:
-    #     """Return the remaining principal axis label among {'100','010','001'}."""
-    #     axes = {"100", "010", "001"}
-    #     if cut_axis not in axes or rot_axis not in axes or cut_axis == rot_axis:
-    #         raise ValueError(f"Invalid axes: cut_axis={cut_axis}, rot_axis={rot_axis}")
-    #     third = list(axes - {cut_axis, rot_axis})
-    #     if len(third) != 1:
-    #         raise ValueError("Failed to determine third axis.")
-        
-    #     return third[0]
-
-    # # override n_eff function for biaxial crystals
-    # def n_eff(self, pol_deg, wav_nm, theta_deg=None):
-    #     """Return n for a given polarization angle and crystal setting.
-
-    #     Parameters
-    #     ----------
-    #     pol_deg : float
-    #         Polarization angle in lab frame [deg], 0 or 90 only (for now).
-    #     wav_nm : float
-    #         Vacuum wavelength [nm].
-    #     theta_deg : float
-    #         Incidence angle (for future angle-dependent n_e).
-
-    #     Returns
-    #     -------
-    #     float
-    #         Effective refractive index n(wav_nm, pol_deg, theta_deg).
-    #     """
-
-    #     meta = self.analysis.meta
-    #     crystal = CRYSTALS[meta["material"]]()
-    #     axiality = crystal.axiality
-    #     if axiality != "biaxial":
-    #         raise FittingConfigurationError(
-    #             f"This strategy is for biaxial crystals. Please use another strategy for {axiality} crystals."
-    #         )
-        
-    #     geometry = {"rot_axis": meta["rot/trans_axis"],
-    #                 "cut_axis": meta["crystal_orientation"]
-    #     }
-
-    #     cut_axis = self.normalize_axis(geometry["cut_axis"])
-    #     rot_axis = self.normalize_axis(geometry["rot_axis"])
-
-
-    #     third_axis = self._third_axis(cut_axis, rot_axis)
-
-    #     # Principal indices at the wavelength
-    #     n_rot = crystal.get_n(wav_nm, polarization=self.INDEX_TO_AXIS[rot_axis])
-    #     n_cut = crystal.get_n(wav_nm, polarization=self.INDEX_TO_AXIS[cut_axis])
-    #     n_third = crystal.get_n(wav_nm, polarization=self.INDEX_TO_AXIS[third_axis])
-        
-    #     tol = 1e-3  #tolerance for np.isclose()
-
-    #     if np.isclose(pol_deg, 0, atol=tol):
-    #         n = n_rot
-
-    #     elif np.isclose(pol_deg, 90, atol=tol):
-    #         if theta_deg is None:
-    #             raise FittingConfigurationError(
-    #                 "n is angle dependent. Add theta_deg in the argument of def n_eff"
-    #             )
-    #         theta = np.deg2rad(theta_deg)
-    #         n_to_2 = n_third **2 + (1 - (n_third/n_cut)**2)* (np.sin(theta))**2
-    #         n = np.sqrt(n_to_2)
-
-    #     else:
-    #         raise FittingConfigurationError(
-    #             f"Unexpected polarization degree: {pol_deg}. "
-    #             "Supported values are 0 or 90 degree."
-    #         )
-        
-    #     return n
 
     def n_eff(self, pol_deg, wav_nm, theta_deg=None, aux=False):
         """Return n for a given polarization angle and crystal setting.
@@ -144,8 +33,6 @@ class Ishidate1974Strategy(Jerphagnon1970Strategy):
             If theta_deg is scalar -> float, if array-like -> np.ndarray.
             For pol_deg=0, n is angle-independent but is broadcast to match theta_deg shape if provided.
         """
-        import numpy as np
-
         meta = self.analysis.meta
         crystal = CRYSTALS[meta["material"]]()
         axiality = crystal.axiality
@@ -233,7 +120,7 @@ class Ishidate1974Strategy(Jerphagnon1970Strategy):
             raise ValueError("No data points in the specified theta window.")
 
         # find minima
-        minima_idx, _ = self.detect_minima(theta_deg, I)
+        minima_idx = self.detect_minima(theta_deg, I)
         valid_minima_idx = minima_idx[m[minima_idx]]
         
         th_min = theta_deg[valid_minima_idx]
