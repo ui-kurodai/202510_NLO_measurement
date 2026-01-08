@@ -10,9 +10,25 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - in
 from fitting_strategies.base import FittingConfigurationError
 
 class SHGDataAnalysis:
-    def __init__(self, base_path):
-        """Initialize with paths and crystal database"""
-        self.base_path = base_path
+    def __init__(self, base_path, mock_input: dict|None=None):
+        """
+        Initialize with paths and crystal database
+        when using data from folder:
+            analysis = SHGDataAnalysis(path)
+        when using mock data:
+            analysis = SHGDataAnalysis(mock_input={"meta":meta, "data":data})
+        """
+        if base_path is not None:
+            self.base_path = base_path
+        else:
+            mock_input = {} if mock_input is None else mock_input
+            self.base_path = base_path
+            self.json_path = None
+            self.csv_path = None
+            self.meta = mock_input.get("meta", None)
+            self.data = mock_input.get("data", None)
+            return
+        
         json_path = [file for file in os.listdir(base_path) if file.endswith(".json")]
         if len(json_path) == 1:
             self.json_path = os.path.join(base_path, json_path[0])
