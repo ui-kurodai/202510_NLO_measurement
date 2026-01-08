@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - in
 from fitting_strategies.base import FittingConfigurationError
 
 class SHGDataAnalysis:
-    def __init__(self, base_path, mock_input: dict|None=None):
+    def __init__(self, base_path=None, mock_input: dict|None=None):
         """
         Initialize with paths and crystal database
         when using data from folder:
