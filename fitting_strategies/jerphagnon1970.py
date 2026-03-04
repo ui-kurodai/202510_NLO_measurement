@@ -27,6 +27,7 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
 
         # quartz d11
         ("SiO2", (0,1,0), "001", 90, 90): lambda theta_p_w: np.cos(3 * theta_p_w),
+        ("SiO2", (0,1,0), "100", 0, 0): lambda _: 1.0,
 
         # KDP d36
         ("KH2PO4", (1,1,0), "001", 90, 0): lambda theta_p_w: np.sin(2*theta_p_w - (np.pi/2)),
@@ -125,8 +126,8 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
         crystal = CRYSTALS[meta["material"]]()
         data = self.analysis.data
 
-        beam_r_x = meta["beam_r_x"]
-        beam_r_y = meta["beam_r_y"]
+        beam_r_x = meta["beam_r_x"]/2.0
+        beam_r_y = meta["beam_r_y"]/2.0
         beam_r = np.sqrt(beam_r_x * beam_r_y)
 
         L = override.get("L", meta["thickness_info"]["t_center_mm"])
@@ -586,7 +587,7 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
     
 
 
-    def _calc_Lc_large_angle(self, meta, data, mask, fitted_L_mm):
+    def _calc_Lc_large_angle(self, meta, data, mask, fitted_L_mm, minima_threshold=None):
         """
         III D-1 (a): Calculate Lc from large angles (e.g., θ > 30 deg).
         Parameters
@@ -604,7 +605,10 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
             raise ValueError("No data points in the specified theta window.")
 
         # find minima
-        minima_idx = self.detect_minima(theta_deg, I)
+        if minima_threshold is not None:
+            minima_idx = self.detect_minima(theta_deg, I, threshold_ratio=minima_threshold)
+        else:
+            minima_idx = self.detect_minima(theta_deg, I)
         valid_minima_idx = minima_idx[m[minima_idx]]
         
         th_min = theta_deg[valid_minima_idx]

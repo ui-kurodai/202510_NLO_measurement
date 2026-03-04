@@ -8,11 +8,33 @@ from fitting_strategies.jerphagnon1970 import Jerphagnon1970Strategy
 from crystaldatabase import CRYSTALS
 from crystaldatabase import *
 
-class Ishidate1974Strategy(Jerphagnon1970Strategy):
+class Bechthold1977Strategy(Jerphagnon1970Strategy):
+    """
+    Maker fringe theory for biaxial crystals 
+    """
     def __init__(self, analysis):
         super().__init__(analysis)
 
     INDEX_TO_AXIS = {"100": "a", "010": "b", "001": "c"}
+
+    GEOMETRY_FUNCTIONS = {
+        # returns a number in string that indicate one set of experimental configuration shown in Bechthold's paper.
+        # key configuration is:("material", (cut), "rot axis", pol_in, pol_out)
+
+        # BMF d31
+        ("BaMgF4", "010", "100", 0, 90): "7",
+        # BMF d32
+        ("BaMgF4", "100", "010", 0, 90): "9",
+
+        # BMF d33
+        ("BaMgF4", "010", "001", 0, 0): "12",
+
+        # BMF d15
+        ("BaMgF4", "010", "100", 45, 0): "13",
+
+        # BMF d24
+        ("BaMgF4", "100", "010", 45, 0): "15"
+    }
 
     def n_eff(self, pol_deg, wav_nm, theta_deg=None, aux=False):
         """Return n for a given polarization angle and crystal setting.
@@ -25,6 +47,9 @@ class Ishidate1974Strategy(Jerphagnon1970Strategy):
             Vacuum wavelength [nm].
         theta_deg : float or array-like, optional
             Incidence angle(s) [deg]. Required for pol_deg=90.
+
+        aux : bool
+            returns all three principle indices if True.
 
         Returns
         -------
@@ -99,8 +124,115 @@ class Ishidate1974Strategy(Jerphagnon1970Strategy):
             raise FittingConfigurationError(
                 f"Unexpected polarization degree: {pol_deg}. Supported values are 0 or 90 degree."
             )
+        
 
+    def _maker_fringes(self, override: dict = {}, envelope=False, return_aux=False):
+        
+        # loading data
+        override = {} if override is None else override
+        meta = override.get("meta", "auto")
+        data = override.get("data", "auto")
+        meta, data = self._resolve_input_info(meta=meta, data=data)
 
+        # basic parameters
+        wl1_nm = meta["wavelength_nm"]
+        wl1_mm = wl1_nm * 1e-6
+        pol_in = meta["input_polarization"] # 0-90 deg
+        pol_out = meta["detected_polarization"] # 0-90 deg
+        crystal = CRYSTALS[meta["material"]]()
+
+        beam_r_x = meta["beam_r_x"]/2.0
+        beam_r_y = meta["beam_r_y"]/2.0
+
+        L = override.get("L", meta["thickness_info"]["t_center_mm"])
+        if "theta_deg" in override.keys():
+            theta_deg = override["theta_deg"]
+        else:
+            theta_deg = np.asarray(data.get("position_centered", data["position"]))
+        
+        theta = np.deg2rad(theta_deg)
+
+        principle_n_w = self.n_eff(pol_in, wl1_nm, aux=True)
+        n_w_third = principle_n_w["n_third"]
+        n_w_rot = principle_n_w["n_rot"]
+        n_w_cut = principle_n_w["n_cut"]
+
+        principle_n_2w = self.n_eff(pol_in, wl1_nm / 2.0, aux=True)
+        n_2w_third = principle_n_2w["n_third"]
+        n_2w_rot = principle_n_2w["n_rot"]
+        n_2w_cut = principle_n_2w["n_cut"]
+
+        v_w = lambda th : (n_w_third / n_w_cut) * np.sqrt(n_w_cut**2 - np.sin(th)**2)
+        v_2w = lambda th : (n_2w_third / n_2w_cut) * np.sqrt(n_2w_cut**2 - np.sin(th)**2)
+
+        w_w = lambda th: np.sqrt(n_w_rot**2 - np.sin(th)**2)
+        w_2w = lambda th : np.sqrt(n_2w_rot**2 - np.sin(th)**2)
+        if isinstance(meta["crystal_orientation"], list):
+            meta["crystal_orientation"] = "".join(map(str, meta["crystal_orientation"]))
+
+        key = (
+                meta["material"],
+                meta["crystal_orientation"],
+                meta["rot/trans_axis"],
+                int(round(meta["input_polarization"])),
+                int(round(meta["detected_polarization"])),
+            )
+        try:
+            exp_config = self.GEOMETRY_FUNCTIONS[key]
+        except KeyError:
+            raise FittingConfigurationError(
+                f"This geometry is not supported: {key}"
+            )
+        
+        if exp_config in ["7", "9"]:
+            Psi = 2*np.pi*L *(v_2w(theta) - w_w(theta)) / wl1_mm
+            P_nl = lambda theta=theta: 4 * np.cos(theta)**2 /(w_w(theta) + np.cos(theta))**2
+
+            I_2w_env = (P_nl(theta)**2) * (w_w(theta) * (n_2w_third**2) * np.cos(theta) + v_2w(theta)**2) / \
+                (((v_2w(theta) - w_w(theta))**2) * (v_2w(theta) + w_w(theta)) * ((v_2w(theta) + (n_2w_third**2) *np.cos(theta))**3))
+            
+            I_2w_0 = (P_nl(0)**2) * (w_w(0) * (n_2w_third**2) * np.cos(0) + v_2w(0)**2) / \
+                (((v_2w(0) - w_w(0))**2) * (v_2w(0) + w_w(0)) * ((v_2w(0) + (n_2w_third**2) *np.cos(0))**3))
+        
+        elif exp_config in ["11", "12"]:
+            Psi = 2*np.pi*L *(w_2w(theta) - w_w(theta)) / wl1_mm
+            P_nl = lambda theta=theta: 4 * np.cos(theta)**2 /(w_w(theta) + np.cos(theta))**2
+
+            I_2w_env = (P_nl(theta)**2) * w_2w(theta) * (w_w(theta) + np.cos(theta)) / \
+                (((w_2w(theta) - w_w(theta))**2) * (w_2w(theta) + w_w(theta)) * ((w_2w(theta) + np.cos(theta))**3))
+            
+            I_2w_0 = (P_nl(0)**2) * w_2w(0) * (w_w(0) + np.cos(0)) / \
+                (((w_2w(0) - w_w(0))**2) * (w_2w(0) + w_w(0)) * ((w_2w(0) + np.cos(0))**3))
+        
+
+        elif exp_config in ["13", "15"]:
+            Psi = 2*np.pi*L *(w_2w(theta) - ((v_w(theta) + w_w(theta))/2.0)) / wl1_mm
+            P_nl = lambda theta=theta: 4 *v_w(theta)* np.cos(theta)**2 /((v_w(theta) + np.cos(theta)*n_w_third**2) * (w_w(theta) + np.cos(theta)))
+
+            I_2w_env = (P_nl(theta)**2) * w_2w(theta) * (((v_w(theta) + w_w(theta))/2.0) + np.cos(theta)) / \
+                (((w_2w(theta) - ((v_w(theta) + w_w(theta))/2.0))**2) * (w_2w(theta) + ((v_w(theta) + w_w(theta))/2.0)) * ((w_2w(theta) + np.cos(theta))**3))
+            
+            I_2w_0 = (P_nl(0)**2) * w_2w(0) * (((v_w(0) + w_w(0))/2.0) + np.cos(0)) / \
+                (((w_2w(0) - ((v_w(0) + w_w(0))/2.0))**2) * (w_2w(0) + ((v_w(0) + w_w(0))/2.0)) * ((w_2w(0) + np.cos(0))**3))
+        else:
+            raise FittingConfigurationError(
+                "This geometry is not supported"
+            )
+        
+        I_2w_N = I_2w_env/I_2w_0
+
+        if envelope:
+                model = I_2w_N
+        else:
+            model = I_2w_N * np.sin(Psi)**2
+
+        if not return_aux:
+            return model
+        aux = {
+            "d_factor": I_2w_0
+        }
+        return model, aux
+    
 
     def _calc_Lc_large_angle(self, meta, data, mask, fitted_L_mm, minima_threshold=None):
         """
