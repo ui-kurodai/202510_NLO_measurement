@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.signal import argrelextrema
 
+from fitting_strategies.base import BaseWedgeStrategy
 from fitting_strategies.base import FittingConfigurationError
 from fitting_strategies.jerphagnon1970 import Jerphagnon1970Strategy
 
@@ -136,8 +137,12 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
 
         if not return_aux:
             return model
+        with np.errstate(divide="ignore", invalid="ignore"):
+            delta_k = 2.0 * Psi / L
         aux = {
-            "d_factor": I_2w_0
+            "d_factor": I_2w_0,
+            "Psi": Psi,
+            "delta_k": delta_k,
         }
         return model, aux
     
@@ -241,3 +246,79 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
         }
 
         return result, fit_data
+
+
+class Bechthold1977WedgeStrategy(Bechthold1977Strategy, BaseWedgeStrategy):
+    def __init__(self, analysis):
+        super().__init__(analysis)
+
+    GEOMETRY_FUNCTIONS = {
+        # returns a number in string that indicate one set of experimental configuration shown in Bechthold's paper.
+        # this configurations are for Bechthold's equations to be adapted to wedge measurements.
+        # key configuration is:("material", (cut), "trans_axis", pol_in, pol_out)
+
+        # BMF d31
+        ("BaMgF4", "010", "100", 90, 0): "7",
+
+        # BMF d32
+        ("BaMgF4", "100", "001", 0, 90): "9",
+
+        # BMF d33
+        ("BaMgF4", "010", "100", 0, 0): "12",
+
+        # BMF d15
+        ("BaMgF4", "010", "100", 45, 90): "13",
+
+        # BMF d24
+        ("BaMgF4", "100", "001", 45, 0): "15"
+    }
+
+    def _maker_fringes(self, override: dict | None = None, return_aux=False):
+        """
+        Adapt Bechthold's rotation formula to wedge scans by fixing theta=0
+        and evaluating the model on the wedge thickness profile.
+        """
+        override = {} if override is None else override
+        meta = override.get("meta", "auto")
+        data = override.get("data", "auto")
+        meta, data = self._resolve_input_info(meta=meta, data=data)
+
+        L_array = self.calc_thickness_array(override=override, meta=meta, data=data)
+
+        rotation_override = dict(override)
+        rotation_override.update(
+            {
+                "meta": meta,
+                "data": data,
+                "L": L_array,
+                "theta_deg": 0.0,
+            }
+        )
+
+        model, rot_aux = super()._maker_fringes(
+            override=rotation_override,
+            envelope=False,
+            return_aux=True,
+        )
+
+        model = np.asarray(model, dtype=float)
+        if model.ndim == 0:
+            model = np.full(L_array.shape, float(model), dtype=float)
+
+        if not return_aux:
+            return model
+
+        delta_k_values = np.asarray(rot_aux["delta_k"], dtype=float).reshape(-1)
+        finite_delta_k = delta_k_values[np.isfinite(delta_k_values)]
+        delta_k = float(finite_delta_k[0]) if finite_delta_k.size else float("nan")
+        if np.isfinite(delta_k) and not np.isclose(delta_k, 0.0):
+            lc = float(np.pi / delta_k)
+        else:
+            lc = float("nan")
+
+        aux = {
+            "d_factor": rot_aux["d_factor"],
+            "L_array": L_array,
+            "Lc": lc,
+        }
+        return model, aux
