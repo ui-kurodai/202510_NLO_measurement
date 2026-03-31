@@ -51,57 +51,6 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
         ("BaMgF4", (1,0,0), "001", 0, 0): lambda _:1.0
     }
 
-
-    # n_w and n_2w for specific setup (extend angle dependent n_e if needed)
-    def n_eff(self, pol_deg, wav_nm, theta_deg=None):
-        """Return n for a given polarization angle and crystal setting.
-
-        Parameters
-        ----------
-        pol_deg : float
-            Polarization angle in lab frame [deg], 0 or 90 only (for now).
-        wav_nm : float
-            Vacuum wavelength [nm].
-        theta_deg : float
-            Incidence angle (for future angle-dependent n_e).
-
-        Returns
-        -------
-        float
-            Refractive index n for the designated setup (polarization, cut plane, AOI...)
-        """
-        meta = self.analysis.meta
-        crystal = CRYSTALS[meta["material"]]()
-
-        if meta["rot/trans_axis"]=="001":
-            if np.isclose(pol_deg, 0, atol=1e-3):
-                n = crystal.get_n(wav_nm, polarization="e")
-            elif np.isclose(pol_deg, 90, atol=1e-3):
-                n = crystal.get_n(wav_nm, polarization="o")
-            else:
-                raise FittingConfigurationError(
-                    f"Input polarization of {pol_deg} deg is not supported. Only 0 or 90 deg is available."
-                )
-            
-        elif meta["rot/trans_axis"] in ("100", "010"):
-            if np.isclose(pol_deg, 0, atol=1e-3):
-                n = crystal.get_n(wav_nm, polarization="o")
-            elif np.isclose(pol_deg, 90, atol=1e-3):
-                # angle dependent
-                raise FittingConfigurationError(
-                    "Angle dependent refractive index is not supported."
-                )
-            else:
-                raise FittingConfigurationError(
-                    f"Input polarization of {pol_deg} deg is not supported. Only 0 or 90 deg is available."
-                )
-        else:
-            raise FittingConfigurationError(
-            f"Unexpected rotation axis: {meta['rot/trans_axis']}. "
-            "Supported values are '001', '100', '010'."
-        )
-        return n
-
     def _maker_fringes(self, override: dict = {}, envelope=False, return_aux=False):
         """Full Maker fringes SHG model with Fresnel coefficients and projection factor.
             

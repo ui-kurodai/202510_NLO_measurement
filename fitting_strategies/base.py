@@ -1,6 +1,8 @@
 import numpy as np
 from scipy.signal import argrelextrema
 
+from crystaldatabase import CRYSTALS
+
 class BaseFittingStrategy:
     """Abstract base class for SHG fitting algorithms."""
 
@@ -212,8 +214,77 @@ class BaseFittingStrategy:
 
 # Common functions for Rotation Maker fringes
 class BaseRotationStrategy(BaseFittingStrategy):
+    UNIAXIAL_N = {"100": "o", "010": "o", "001": "e"}
+    BIAXIAL_N = {"100": "a", "010": "b", "001": "c"}
+
     def __init__(self, analysis=None):
         super().__init__(analysis)
+
+    def n_eff(self, pol_deg, wav_nm, theta_deg=None, aux=False):
+        """Return effective refractive index for rotation Maker fringe geometry."""
+        meta = self.analysis.meta
+        crystal = CRYSTALS[meta["material"]]()
+
+        geometry = {
+            "rot_axis": meta["rot/trans_axis"],
+            "cut_axis": meta["crystal_orientation"],
+        }
+
+        cut_axis = self.normalize_axis(geometry["cut_axis"])
+        rot_axis = self.normalize_axis(geometry["rot_axis"])
+        third_axis = self._third_axis(cut_axis, rot_axis)
+
+        axiality = crystal.axiality
+        if axiality == "uniaxial":
+            index_to_n = self.UNIAXIAL_N
+        elif axiality == "biaxial":
+            index_to_n = self.BIAXIAL_N
+        else:
+            raise FittingConfigurationError(
+                f"Unsupported crystal axiality: {axiality}."
+            )
+
+        n_rot = crystal.get_n(wav_nm, polarization=index_to_n[rot_axis])
+        n_cut = crystal.get_n(wav_nm, polarization=index_to_n[cut_axis])
+        n_third = crystal.get_n(wav_nm, polarization=index_to_n[third_axis])
+
+        tol = 1e-3
+        theta_is_none = theta_deg is None
+        theta_is_scalar = False
+        theta_arr = None
+        if not theta_is_none:
+            theta_arr = np.asarray(theta_deg, dtype=float)
+            theta_is_scalar = theta_arr.ndim == 0
+
+        if aux:
+            return {
+                "n_rot": n_rot,
+                "n_cut": n_cut,
+                "n_third": n_third,
+            }
+
+        if np.isclose(pol_deg, 0, atol=tol):
+            if theta_is_none or theta_is_scalar:
+                return float(n_rot)
+            return np.full(theta_arr.shape, float(n_rot), dtype=float)
+
+        if np.isclose(pol_deg, 90, atol=tol):
+            if theta_is_none:
+                raise FittingConfigurationError(
+                    "n is angle dependent. Add theta_deg in the argument of def n_eff"
+                )
+
+            theta_rad = np.deg2rad(theta_arr)
+            n_sq = (n_third ** 2) + (1.0 - (n_third / n_cut) ** 2) * (np.sin(theta_rad) ** 2)
+            n = np.sqrt(n_sq)
+
+            if theta_is_scalar:
+                return float(n)
+            return np.asarray(n, dtype=float)
+
+        raise FittingConfigurationError(
+            f"Unexpected polarization degree: {pol_deg}. Supported values are 0 or 90 degree."
+        )
 
     def _position_centering(self, data):
         """
@@ -311,11 +382,62 @@ class BaseRotationStrategy(BaseFittingStrategy):
 
 # Common functions for Wedge Maker fringes
 class BaseWedgeStrategy(BaseFittingStrategy):
+    UNIAXIAL_N = {"100": "o", "010": "o", "001": "e"}
+    BIAXIAL_N = {"100": "a", "010": "b", "001": "c"}
+
     def __init__(self, analysis=None):
         super().__init__(analysis)
 
         # stage position where the laser hit the center of the sample holder 
         self.center_pos = 18.05
+
+    def n_eff(self, pol_deg, wav_nm, meta="auto", aux=False):
+        """Return effective refractive index for wedge Maker fringe geometry."""
+        meta = self._resolve_input_info(meta=meta)
+        crystal = CRYSTALS[meta["material"]]()
+
+        geometry = {
+            "trans_axis": meta["rot/trans_axis"],
+            "cut_axis": meta["crystal_orientation"],
+        }
+
+        cut_axis = self.normalize_axis(geometry["cut_axis"])
+        trans_axis = self.normalize_axis(geometry["trans_axis"])
+        third_axis = self._third_axis(cut_axis, trans_axis)
+
+        axiality = crystal.axiality
+        if axiality == "uniaxial":
+            index_to_n = self.UNIAXIAL_N
+        elif axiality == "biaxial":
+            index_to_n = self.BIAXIAL_N
+        else:
+            raise FittingConfigurationError(
+                f"Unsupported crystal axiality: {axiality}."
+            )
+
+        n_trans = crystal.get_n(wav_nm, polarization=index_to_n[trans_axis])
+        n_cut = crystal.get_n(wav_nm, polarization=index_to_n[cut_axis])
+        n_third = crystal.get_n(wav_nm, polarization=index_to_n[third_axis])
+
+        tol = 1e-3
+
+        if aux:
+            return {
+                "n_trans": n_trans,
+                "n_cut": n_cut,
+                "n_third": n_third,
+            }
+
+        if np.isclose(pol_deg, 0, atol=tol):
+            return float(n_third)
+
+        if np.isclose(pol_deg, 90, atol=tol):
+            return float(n_trans)
+
+        raise FittingConfigurationError(
+            f"Unexpected polarization degree: {pol_deg}."
+            "Supported values are 0 or 90 degree."
+        )
 
     def calc_thickness_array(self, override: dict = {}, meta="auto", data="auto"):
         """

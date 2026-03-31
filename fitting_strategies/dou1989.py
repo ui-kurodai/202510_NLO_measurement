@@ -9,97 +9,11 @@ from crystaldatabase import CRYSTALS
 from crystaldatabase import *
 
 class Dou1989Strategy(Jerphagnon1970Strategy):
+    """
+    Maker fringe theory for biaxial crystals by S. X. Dou, 1989
+    """
     def __init__(self, analysis):
         super().__init__(analysis)
-
-    INDEX_TO_AXIS = {"100": "a", "010": "b", "001": "c"}
-
-    def n_eff(self, pol_deg, wav_nm, theta_deg=None, aux=False):
-        """Return n for a given polarization angle and crystal setting.
-
-        Parameters
-        ----------
-        pol_deg : float
-            Polarization angle in lab frame [deg], 0 or 90 only (for now).
-        wav_nm : float
-            Vacuum wavelength [nm].
-        theta_deg : float or array-like, optional
-            Incidence angle(s) [deg]. Required for pol_deg=90.
-
-        Returns
-        -------
-        float or np.ndarray
-            Effective refractive index n(wav_nm, pol_deg, theta_deg).
-            If theta_deg is scalar -> float, if array-like -> np.ndarray.
-            For pol_deg=0, n is angle-independent but is broadcast to match theta_deg shape if provided.
-        """
-        meta = self.analysis.meta
-        crystal = CRYSTALS[meta["material"]]()
-        axiality = crystal.axiality
-        if axiality != "biaxial":
-            raise FittingConfigurationError(
-                f"This strategy is for biaxial crystals. Please use another strategy for {axiality} crystals."
-            )
-
-        geometry = {
-            "rot_axis": meta["rot/trans_axis"],
-            "cut_axis": meta["crystal_orientation"],
-        }
-
-        cut_axis = self.normalize_axis(geometry["cut_axis"])
-        rot_axis = self.normalize_axis(geometry["rot_axis"])
-        third_axis = self._third_axis(cut_axis, rot_axis)
-
-        # Principal indices at the wavelength
-        n_rot = crystal.get_n(wav_nm, polarization=self.INDEX_TO_AXIS[rot_axis])
-        n_cut = crystal.get_n(wav_nm, polarization=self.INDEX_TO_AXIS[cut_axis])
-        n_third = crystal.get_n(wav_nm, polarization=self.INDEX_TO_AXIS[third_axis])
-
-        tol = 1e-3  # tolerance for np.isclose()
-
-        # Decide whether we should return scalar or array
-        theta_is_none = (theta_deg is None)
-        theta_is_scalar = False
-        theta_arr = None
-        if not theta_is_none:
-            theta_arr = np.asarray(theta_deg, dtype=float)
-            theta_is_scalar = (theta_arr.ndim == 0)
-
-        if aux == True:
-            return {
-                "n_rot" : n_rot,
-                "n_cut" : n_cut,
-                "n_third" : n_third
-            }
-
-        if np.isclose(pol_deg, 0, atol=tol):
-            # Angle-independent, but broadcast to match theta shape if provided
-            if theta_is_none:
-                return float(n_rot)
-            if theta_is_scalar:
-                return float(n_rot)
-            return np.full(theta_arr.shape, float(n_rot), dtype=float)
-
-        elif np.isclose(pol_deg, 90, atol=tol):
-            if theta_is_none:
-                raise FittingConfigurationError(
-                    "n is angle dependent. Add theta_deg in the argument of def n_eff"
-                )
-
-            theta_rad = np.deg2rad(theta_arr)
-            # Elementwise computation; works for both scalar and array
-            n_to_2 = (n_third ** 2) + (1.0 - (n_third / n_cut) ** 2) * (np.sin(theta_rad) ** 2)
-            n = np.sqrt(n_to_2)
-
-            if theta_is_scalar:
-                return float(n)
-            return np.asarray(n, dtype=float)
-
-        else:
-            raise FittingConfigurationError(
-                f"Unexpected polarization degree: {pol_deg}. Supported values are 0 or 90 degree."
-            )
-        
 
     def _maker_fringes(self, override: dict = {}, envelope=False, return_aux=False):
         

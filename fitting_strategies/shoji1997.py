@@ -2,6 +2,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from fitting_strategies.base import BaseWedgeStrategy
+from fitting_strategies.base import BaseRotationStrategy
 from fitting_strategies.base import FittingConfigurationError
 
 # self made database
@@ -10,76 +11,9 @@ from crystaldatabase import *
 
 class Shoji1997WedgeStrategy(BaseWedgeStrategy):
 
-    UNIAXIAL_N = {"100": "o", "010": "o", "001": "e"}
-    BIAXIAL_N = {"100": "a", "010": "b", "001": "c"}
-
     """Fitting strategy based on Shoji et al., 1997."""
     def __init__(self, analysis):
         super().__init__(analysis)
-
-
-    # n_w and n_2w for specific setup
-    def n_eff(self, pol_deg, wav_nm, meta="auto", aux=False):
-        """Return n for a given polarization angle and crystal setting.
-
-        Parameters
-        ----------
-        pol_deg : float
-            Polarization angle in lab frame [deg], 0 or 90 only (for now).
-        wav_nm : float
-            Vacuum wavelength [nm].
-
-        Returns
-        -------
-        float
-            Refractive index n for the designated setup (polarization, cut plane, AOI...)
-        """
-        meta = self._resolve_input_info(meta=meta)
-        crystal = CRYSTALS[meta["material"]]()
-
-
-        geometry = {
-            "trans_axis": meta["rot/trans_axis"],
-            "cut_axis": meta["crystal_orientation"],
-        }
-
-        cut_axis = self.normalize_axis(geometry["cut_axis"])
-        trans_axis = self.normalize_axis(geometry["trans_axis"])
-        third_axis = self._third_axis(cut_axis, trans_axis)
-
-        # Principal indices at the wavelength
-        axiality = crystal.axiality
-        if axiality == "uniaxial":
-            INDEX_TO_N = self.UNIAXIAL_N
-        elif axiality =="biaxial":
-            INDEX_TO_N = self.BIAXIAL_N
-        else:
-            INDEX_TO_N = None
-
-        n_trans = crystal.get_n(wav_nm, polarization=INDEX_TO_N[trans_axis])
-        n_cut = crystal.get_n(wav_nm, polarization=INDEX_TO_N[cut_axis])
-        n_third = crystal.get_n(wav_nm, polarization=INDEX_TO_N[third_axis])
-
-        tol = 1e-3  # tolerance for np.isclose()
-
-        if aux == True:
-            return {
-                "n_trans" : n_trans,
-                "n_cut" : n_cut,
-                "n_third" : n_third
-            }
-
-        if np.isclose(pol_deg, 0, atol=tol):
-            return float(n_third)
-
-        elif np.isclose(pol_deg, 90, atol=tol):
-            return float(n_trans)
-
-        else:
-            raise FittingConfigurationError(
-                f"Unexpected polarization degree: {pol_deg}."
-                "Supported values are 0 or 90 degree."
-            )
 
     def _maker_fringes(self, mode="single_path", override: dict | None = None, return_aux=False):
         
@@ -212,14 +146,11 @@ class Shoji1997WedgeStrategy(BaseWedgeStrategy):
 
 
 
-class Shoji1997RotationStrategy(BaseWedgeStrategy):
+class Shoji1997RotationStrategy(BaseRotationStrategy):
 
     """Fitting strategy based on Shoji et al., 1997."""
     def __init__(self, analysis):
         super().__init__(analysis)
-
-    UNIAXIAL_N = {"100": "o", "010": "o", "001": "e"}
-    BIAXIAL_N = {"100": "a", "010": "b", "001": "c"}
 
     GEOMETRY_FUNCTIONS = {
         # returns an equation number in string that fits the configuration.
@@ -231,96 +162,6 @@ class Shoji1997RotationStrategy(BaseWedgeStrategy):
         # BMF d24
         ("BaMgF4", "100", "010", 45, 0): "20"
     }
-
-    def n_eff(self, pol_deg, wav_nm, theta_deg=None, aux=False):
-        """Return n for a given polarization angle and crystal setting.
-
-        Parameters
-        ----------
-        pol_deg : float
-            Polarization angle in lab frame [deg], 0 or 90 only (for now).
-        wav_nm : float
-            Vacuum wavelength [nm].
-        theta_deg : float or array-like, optional
-            Incidence angle(s) [deg]. Required for pol_deg=90.
-
-        aux : bool
-            returns all three principle indices if True.
-
-        Returns
-        -------
-        float or np.ndarray
-            Effective refractive index n(wav_nm, pol_deg, theta_deg).
-            If theta_deg is scalar -> float, if array-like -> np.ndarray.
-            For pol_deg=0, n is angle-independent but is broadcast to match theta_deg shape if provided.
-        """
-        meta = self.analysis.meta
-        crystal = CRYSTALS[meta["material"]]()
-        axiality = crystal.axiality
-        if axiality != "biaxial":
-            raise FittingConfigurationError(
-                f"This strategy is for biaxial crystals. Please use another strategy for {axiality} crystals."
-            )
-
-        geometry = {
-            "rot_axis": meta["rot/trans_axis"],
-            "cut_axis": meta["crystal_orientation"],
-        }
-
-        cut_axis = self.normalize_axis(geometry["cut_axis"])
-        rot_axis = self.normalize_axis(geometry["rot_axis"])
-        third_axis = self._third_axis(cut_axis, rot_axis)
-
-        # Principal indices at the wavelength
-        n_rot = crystal.get_n(wav_nm, polarization=self.BIAXIAL_N[rot_axis])
-        n_cut = crystal.get_n(wav_nm, polarization=self.BIAXIAL_N[cut_axis])
-        n_third = crystal.get_n(wav_nm, polarization=self.BIAXIAL_N[third_axis])
-
-        tol = 1e-3  # tolerance for np.isclose()
-
-        # Decide whether we should return scalar or array
-        theta_is_none = (theta_deg is None)
-        theta_is_scalar = False
-        theta_arr = None
-        if not theta_is_none:
-            theta_arr = np.asarray(theta_deg, dtype=float)
-            theta_is_scalar = (theta_arr.ndim == 0)
-
-        if aux == True:
-            return {
-                "n_rot" : n_rot,
-                "n_cut" : n_cut,
-                "n_third" : n_third
-            }
-
-        if np.isclose(pol_deg, 0, atol=tol):
-            # Angle-independent, but broadcast to match theta shape if provided
-            if theta_is_none:
-                return float(n_rot)
-            if theta_is_scalar:
-                return float(n_rot)
-            return np.full(theta_arr.shape, float(n_rot), dtype=float)
-
-        elif np.isclose(pol_deg, 90, atol=tol):
-            if theta_is_none:
-                raise FittingConfigurationError(
-                    "n is angle dependent. Add theta_deg in the argument of def n_eff"
-                )
-
-            theta_rad = np.deg2rad(theta_arr)
-            # Elementwise computation; works for both scalar and array
-            n_to_2 = (n_third ** 2) + (1.0 - (n_third / n_cut) ** 2) * (np.sin(theta_rad) ** 2)
-            n = np.sqrt(n_to_2)
-
-            if theta_is_scalar:
-                return float(n)
-            return np.asarray(n, dtype=float)
-
-        else:
-            raise FittingConfigurationError(
-                f"Unexpected polarization degree: {pol_deg}. Supported values are 0 or 90 degree."
-            )
-        
 
     def _maker_fringes(self, override: dict = {}, envelope=False, return_aux=False):
         
