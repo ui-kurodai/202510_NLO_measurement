@@ -223,8 +223,12 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
 
         if not return_aux:
             return model
+        with np.errstate(divide="ignore", invalid="ignore"):
+            delta_k = 2.0 * Psi / L
         aux = {
             "d_factor": d_factor,
+            "Psi": Psi,
+            "delta_k": delta_k,
             "t": fresnel_t(0, pol_in),
             "T": T_at_back(0, pol_out)
         }
