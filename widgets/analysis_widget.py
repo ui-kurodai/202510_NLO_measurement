@@ -446,6 +446,21 @@ class FittingAnalysisWidget(QWidget):
             if k in meta:
                 rows.append((k, meta.get(k)))
 
+        boxcar = meta.get("boxcar_sensitivity")
+        if isinstance(boxcar, dict):
+            if "label" in boxcar:
+                rows.append(("boxcar_sensitivity", boxcar.get("label")))
+            if "magnification" in boxcar:
+                rows.append(("boxcar_magnification", boxcar.get("magnification")))
+
+        filters = meta.get("filters")
+        if isinstance(filters, dict):
+            if filters:
+                for filter_id, transmission in filters.items():
+                    rows.append((f"filter:{filter_id}", transmission))
+            else:
+                rows.append(("filters", "(none)"))
+
         self.tbl.setRowCount(len(rows))
         for i, (k, v) in enumerate(rows):
             self.tbl.setItem(i, 0, QTableWidgetItem(str(k)))

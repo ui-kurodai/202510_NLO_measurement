@@ -4,6 +4,7 @@ import json
 import time
 from datetime import datetime
 import logging
+from measurement_metadata import apply_condition_metadata
 
 # from devices.laser_control import CrylasQLaserController, CrylasQLaserDecoder
 # from devices.osms2035_control import OSMS2035Controller
@@ -44,6 +45,8 @@ class SHGMeasurementRunner:
         step: float,
         channels: list[int],
         axis: str,
+        boxcar_sensitivity_text: str,
+        nd_filter_entries: list[dict],
         dry_run: bool = False,
         on_progress=None    # emit the latest signal for realtime GUI display
     ) -> dict:
@@ -100,7 +103,13 @@ class SHGMeasurementRunner:
             "end": end,
             "step": step,
             "timestamp": datetime.now().isoformat()
-        }        
+        }
+        metadata, condition_warnings = apply_condition_metadata(
+            metadata=metadata,
+            boxcar_sensitivity_text=boxcar_sensitivity_text,
+            selected_filters=nd_filter_entries,
+            fundamental_wavelength_nm=self.laser.wavelength_nm,
+        )
 
         if not dry_run:
             with open(meta_path, "w") as meta_file:
@@ -170,7 +179,8 @@ class SHGMeasurementRunner:
                 "signals": self.signals,
                 "channels": self.channels,
                 "csv_path": csv_path if not dry_run else None,
-                "meta_path": meta_path if not dry_run else None
+                "meta_path": meta_path if not dry_run else None,
+                "condition_warnings": condition_warnings,
             }
     
     def abort(self):

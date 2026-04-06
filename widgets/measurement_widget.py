@@ -1,12 +1,19 @@
 from PyQt6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QDoubleSpinBox, QLineEdit, QComboBox, QMessageBox, QCheckBox, QPlainTextEdit, QListWidget
+    QDoubleSpinBox, QLineEdit, QComboBox, QMessageBox, QCheckBox, QPlainTextEdit, QListWidget, QListWidgetItem,
+    QScrollArea, QWidget
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from measure_shg import SHGMeasurementRunner
 import logging
+from measurement_metadata import (
+    COMMON_BOXCAR_SENSITIVITIES,
+    format_filter_display,
+    load_nd_filter_catalog,
+    parse_boxcar_sensitivity,
+)
 # self made database
 from crystaldatabase import CRYSTALS
 from crystaldatabase import *
@@ -65,13 +72,41 @@ class SHGMeasurementWidget(QGroupBox):
         self.notes_edit.setPlaceholderText("Experiment notes (optional)...")
         self.notes_edit.setFixedHeight(60)
 
+        self.boxcar_sensitivity_combo = QComboBox()
+        self.boxcar_sensitivity_combo.setEditable(True)
+        self.boxcar_sensitivity_combo.addItems(COMMON_BOXCAR_SENSITIVITIES)
+        self.boxcar_sensitivity_combo.setCurrentText("1 V / 0.1 V")
+
+        self.no_filter_checkbox = QCheckBox("No ND filter")
+        self.no_filter_checkbox.setChecked(True)
+        self.no_filter_checkbox.toggled.connect(self._toggle_filter_selection)
+
+        self.reload_filters_btn = QPushButton("Reload Catalog")
+        self.reload_filters_btn.clicked.connect(self.reload_filter_catalog)
+
+        self.filter_list = QListWidget()
+        self.filter_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self.filter_list.setFixedHeight(110)
+        self.filter_list.itemSelectionChanged.connect(self._sync_filter_checkbox)
+        self._filter_catalog_map = {}
+        self.reload_filter_catalog()
+
         # --- Plot area ---
         self.figure = Figure(figsize=(5, 3))
         self.canvas = FigureCanvas(self.figure)
+        self.canvas.setMinimumHeight(320)
         self.ax = self.figure.add_subplot(111)
 
         # --- Layout ---
-        layout = QVBoxLayout()
+        root_layout = QVBoxLayout()
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        root_layout.addWidget(scroll_area)
+
+        content = QWidget()
+        scroll_area.setWidget(content)
+
+        layout = QVBoxLayout(content)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         sample_layout = QHBoxLayout()
@@ -142,6 +177,19 @@ class SHGMeasurementWidget(QGroupBox):
         parameter_layout.addLayout(pol_layout)
         layout.addLayout(parameter_layout)
 
+        sensitivity_row = QHBoxLayout()
+        sensitivity_row.addWidget(QLabel("Boxcar sensitivity:"))
+        sensitivity_row.addWidget(self.boxcar_sensitivity_combo, 1)
+        layout.addLayout(sensitivity_row)
+
+        filter_header = QHBoxLayout()
+        filter_header.addWidget(QLabel("ND filters:"))
+        filter_header.addStretch(1)
+        filter_header.addWidget(self.reload_filters_btn)
+        layout.addLayout(filter_header)
+        layout.addWidget(self.no_filter_checkbox)
+        layout.addWidget(self.filter_list)
+
         # dry-run
         self.dry_run_checkbox = QCheckBox("Dry Run")
         self.dry_run_checkbox.setChecked(False)
@@ -153,7 +201,41 @@ class SHGMeasurementWidget(QGroupBox):
         layout.addWidget(self.abort_btn)
         layout.addWidget(self.canvas)
 
-        self.setLayout(layout)
+        self.setLayout(root_layout)
+
+    def reload_filter_catalog(self):
+        catalog = load_nd_filter_catalog()
+        self._filter_catalog_map = {entry["filter_id"]: entry for entry in catalog["filters"]}
+        self.filter_list.clear()
+        for entry in catalog["filters"]:
+            item = QListWidgetItem(format_filter_display(entry))
+            item.setData(Qt.ItemDataRole.UserRole, entry["filter_id"])
+            self.filter_list.addItem(item)
+        self._toggle_filter_selection(self.no_filter_checkbox.isChecked())
+
+    def _toggle_filter_selection(self, checked: bool):
+        if checked:
+            self.filter_list.clearSelection()
+        self.filter_list.setEnabled(not checked)
+
+    def _sync_filter_checkbox(self):
+        if self.filter_list.selectedItems():
+            self.no_filter_checkbox.blockSignals(True)
+            self.no_filter_checkbox.setChecked(False)
+            self.no_filter_checkbox.blockSignals(False)
+            self.filter_list.setEnabled(True)
+
+    def _selected_filter_entries(self):
+        if self.no_filter_checkbox.isChecked():
+            return []
+
+        selected_entries = []
+        for item in self.filter_list.selectedItems():
+            filter_id = item.data(Qt.ItemDataRole.UserRole)
+            entry = self._filter_catalog_map.get(filter_id)
+            if entry is not None:
+                selected_entries.append(entry)
+        return selected_entries
 
 
 
@@ -213,6 +295,13 @@ class SHGMeasurementWidget(QGroupBox):
 
         axis = self.main_axis_edit.text()
         notes = self.notes_edit.toPlainText()
+        boxcar_sensitivity_text = self.boxcar_sensitivity_combo.currentText().strip()
+        try:
+            parse_boxcar_sensitivity(boxcar_sensitivity_text)
+        except ValueError as e:
+            QMessageBox.warning(self, "Input Error", str(e))
+            return
+        selected_filters = self._selected_filter_entries()
 
 
         self.ax.clear()
@@ -235,6 +324,8 @@ class SHGMeasurementWidget(QGroupBox):
             step=step,
             channels=channels,
             axis=axis,
+            boxcar_sensitivity_text=boxcar_sensitivity_text,
+            nd_filter_entries=selected_filters,
             dry_run=dry_run
         )
         self.thread.progress_updated.connect(self.update_plot)
@@ -287,7 +378,12 @@ class SHGMeasurementWidget(QGroupBox):
             fig_path = csv_path.with_suffix(".png")
             self.figure.savefig(str(fig_path), dpi=300, bbox_inches='tight')
             logging.info(f"Plot saved to {fig_path}")
-        QMessageBox.information(self, "Done", "Measurement complete.")
+        warnings = result_dict.get("condition_warnings") or []
+        if warnings:
+            warning_text = "\n".join(f"- {warning}" for warning in warnings)
+            QMessageBox.warning(self, "Done with warnings", f"Measurement complete.\n\n{warning_text}")
+        else:
+            QMessageBox.information(self, "Done", "Measurement complete.")
 
 
 

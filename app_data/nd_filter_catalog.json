@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "filters": [
+    {
+      "filter_id": "thorlabs_NE10A-A_#1",
+      "product_name": "thorlabs_NE10A-A",
+      "instance_id": "#1",
+      "nominal_od": 1.0,
+      "transmission_csv_path": "C:/Users/ui/Documents/ikz/experiment/coding/202510_NLO_measurement/app_data/20260326_thorlabs_NE10A-A/NE10-A_#1.Probe.Raw.csv",
+      "notes": ""
+    },
+    {
+      "filter_id": "thorlabs_NE10A-A_#2",
+      "product_name": "thorlabs_NE10A-A",
+      "instance_id": "#2",
+      "nominal_od": 1.0,
+      "transmission_csv_path": "C:/Users/ui/Documents/ikz/experiment/coding/202510_NLO_measurement/app_data/20260326_thorlabs_NE10A-A/NE10-A_#2.Probe.Raw.csv",
+      "notes": ""
+    },
+    {
+      "filter_id": "thorlabs_NE10A-A_#3",
+      "product_name": "thorlabs_NE10A-A",
+      "instance_id": "#3",
+      "nominal_od": 1.0,
+      "transmission_csv_path": "C:/Users/ui/Documents/ikz/experiment/coding/202510_NLO_measurement/app_data/20260326_thorlabs_NE10A-A/NE10-A_#3.Probe.Raw.csv",
+      "notes": ""
+    },
+    {
+      "filter_id": "thorlabs_NE20A-A_#1",
+      "product_name": "thorlabs_NE20A-A",
+      "instance_id": "",
+      "nominal_od": 2.0,
+      "transmission_csv_path": null,
+      "notes": ""
+    },
+    {
+      "filter_id": "thorlabs_NE30A-A",
+      "product_name": "thorlabs_NE30A-A",
+      "instance_id": "",
+      "nominal_od": 3.0,
+      "transmission_csv_path": null,
+      "notes": ""
+    }
+  ]
+}
