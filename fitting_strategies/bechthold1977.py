@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.signal import argrelextrema
+from scipy.optimize import least_squares
 
 from fitting_strategies.base import BaseWedgeStrategy
 from fitting_strategies.base import FittingConfigurationError
@@ -322,3 +323,83 @@ class Bechthold1977WedgeStrategy(Bechthold1977Strategy, BaseWedgeStrategy):
             "Lc": lc,
         }
         return model, aux
+    
+    def _fit_L(self, meta="auto", data="auto"):
+        """
+        Fit sample thickness L [mm] near the micrometer value using least squares.
+
+        Requirements:
+        - meta must contain a nominal thickness L0 in mm (see below).
+        - the class must provide a model function that returns y_model given (x, L_mm, meta, data).
+
+        Returns
+        -------
+        fit : dict
+            {
+                "L0_mm": float,
+                "L_fit_mm": float,
+                "dL_um": float,
+                "cost": float,
+                "success": bool,
+                "message": str,
+            }
+        aux : dict
+            {
+                "x": np.ndarray,
+                "y": np.ndarray,
+                "y_fit": np.ndarray,
+                "result": scipy.optimize.OptimizeResult,
+            }
+        """
+        meta, data = self._resolve_input_info(meta=meta, data=data)
+
+        x = np.asarray(data["position"], dtype=float)
+        y = np.asarray(data["intensity_corrected"], dtype=float)
+        L0_mm = meta["thickness_info"]["t_center_mm"]
+
+
+        search_um = 15   # +/- range around L0
+        loss = "linear"         # 'linear', 'soft_l1', 'huber', ...
+        f_scale = 1.0
+
+        dL_mm = search_um / 1000.0
+        lb = L0_mm - dL_mm
+        ub = L0_mm + dL_mm
+
+        # -----------------------------
+        # Residual for least squares
+        # -----------------------------
+        def residual(params):
+            L_mm = float(params[0])
+            y_model = self._maker_fringes(override={"L": L_mm})
+            y_model = np.asarray(y_model, dtype=float)
+            if y_model.shape != y.shape:
+                raise ValueError(f"Model returned shape {y_model.shape}, expected {y.shape}.")
+            return (y_model - y)
+
+        # -----------------------------
+        # Fit
+        # -----------------------------
+        x0 = np.array([L0_mm], dtype=float)
+        result = least_squares(
+            residual,
+            x0=x0,
+            bounds=(np.array([lb]), np.array([ub])),
+            loss=loss,
+            f_scale=f_scale,
+        )
+
+        L_fit_mm = float(result.x[0])
+
+        fit = {
+            "L0_mm": L0_mm,
+            "L_fit_mm": L_fit_mm,
+            "dL_um": (L_fit_mm - L0_mm) * 1000.0,
+            "cost": float(result.cost),
+            "success": bool(result.success),
+            "message": str(result.message),
+        }
+        aux = {
+            "result": result,
+        }
+        return fit, aux
