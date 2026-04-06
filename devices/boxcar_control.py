@@ -2,6 +2,7 @@ import pyvisa
 from pyvisa.errors import VisaIOError, InvalidSession, LibraryError
 import logging
 from typing import Optional
+from threading import Lock
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - in %(filename)s - %(message)s")
 
@@ -11,6 +12,7 @@ class BoxcarInterfaceController:
         self._resource_manager = pyvisa.ResourceManager()
         self._timeout_ms = timeout_ms
         self.inst = None
+        self._lock = Lock()
     
 
     @property
@@ -81,29 +83,41 @@ class BoxcarInterfaceController:
     
     def send_command(self, command:str) -> None:
         if self.is_connected:
-            try:
-                self.inst.write(command)
-            except (VisaIOError, InvalidSession, LibraryError, Exception) as e:
-                logging.error(f"Failed to send command {command} to SR245: {e}")
+            with self._lock:
+                try:
+                    self.inst.write(command)
+                except (VisaIOError, InvalidSession, LibraryError, Exception) as e:
+                    logging.error(f"Failed to send command {command} to SR245: {e}")
     
 
     def read_response(self) -> Optional[str]:
         if self.is_connected:
-            try:
-                return self.inst.read()
-            except (VisaIOError, InvalidSession, LibraryError, Exception) as e:
-                logging.error(f"Failed to read response from SR245: {e}")
-                return None
+            with self._lock:
+                try:
+                    return self.inst.read()
+                except (VisaIOError, InvalidSession, LibraryError, Exception) as e:
+                    logging.error(f"Failed to read response from SR245: {e}")
+                    return None
         else:
             return None
+
+    def ask(self, command: str) -> Optional[str]:
+        if not self.is_connected:
+            return None
+        with self._lock:
+            try:
+                self.inst.write(command)
+                return self.inst.read()
+            except (VisaIOError, InvalidSession, LibraryError, Exception) as e:
+                logging.error(f"Failed to execute command {command} on SR245: {e}")
+                return None
     
 
     @property
     def idn(self) -> Optional[str]:
         if self.is_connected:
             try:
-                self.send_command("*IDN?")
-                return self.read_response()
+                return self.ask("*IDN?")
             except (VisaIOError, InvalidSession, LibraryError, Exception) as e:
                 logging.error(f"Failed to get IDN: {e}")
         return None
@@ -130,9 +144,12 @@ class BoxcarInterfaceController:
             logging.warning(f"Invalid port number: {port_number}")
             return None
         command = f"?{port_number}"
-        self.send_command(command)
-        response = self.read_response()
+        response = self.ask(command)
         try:
             return float(response)
         except (TypeError, Exception) as e:
             logging.error(f"Failed to read analog port {port_number}: {e}")
+            return None
+
+    def close(self) -> None:
+        self.disconnect()

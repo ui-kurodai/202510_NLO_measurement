@@ -41,11 +41,11 @@ class SHGMeasurementWidget(QGroupBox):
 
         self.input_pol_spin = QDoubleSpinBox()
         self.input_pol_spin.setRange(0, 180)
-        self.input_pol_spin.setSuffix("°")
+        self.input_pol_spin.setSuffix(" deg")
 
         self.detected_pol_spin = QDoubleSpinBox()
         self.detected_pol_spin.setRange(0, 180)
-        self.detected_pol_spin.setSuffix("°")
+        self.detected_pol_spin.setSuffix(" deg")
 
         self.start_spin = QDoubleSpinBox()
         self.end_spin = QDoubleSpinBox()
@@ -157,33 +157,37 @@ class SHGMeasurementWidget(QGroupBox):
 
 
 
-    def connect_controllers(self, laser, stage_lin, stage_rot, boxcar, elliptec=None):
-        self.runner = SHGMeasurementRunner(laser, stage_lin, stage_rot, boxcar, elliptec)
+    def connect_controllers(self, laser, stage_lin, stage_rot, boxcar, input_polarizer=None, analyzer_polarizer=None):
+        self.runner = SHGMeasurementRunner(laser, stage_lin, stage_rot, boxcar, input_polarizer, analyzer_polarizer)
 
     def start_measurement(self):
         dry_run = self.dry_run_checkbox.isChecked()
-        if self.runner is None:
-            try:
-                laser = self.devices_tab.laser_widget.controller if not dry_run else None
-                stage_lin = self.devices_tab.stage_lin_widget.controller
-                stage_rot = self.devices_tab.stage_rot_widget.controller
-                boxcar = self.devices_tab.boxcar_widget.controller if not dry_run else None
-                elliptec = self.devices_tab.elliptec_widget.controller 
-            except AttributeError as e:
-                QMessageBox.warning(self, "Not Ready", "MainWindow does not have controller widgets.")
-                logging.error(f"{e}")
-                return
+        try:
+            laser = self.devices_tab.laser_widget.controller if not dry_run else None
+            stage_lin = self.devices_tab.stage_lin_widget.controller
+            stage_rot = self.devices_tab.stage_rot_widget.controller
+            boxcar = self.devices_tab.boxcar_widget.controller if not dry_run else None
+            input_polarizer = self.devices_tab.input_polarizer_widget.controller
+            analyzer_polarizer = self.devices_tab.analyzer_polarizer_widget.controller
+        except AttributeError as e:
+            QMessageBox.warning(self, "Not Ready", "MainWindow does not have controller widgets.")
+            logging.error(f"{e}")
+            return
 
-            if not dry_run:
-                if None in [laser, stage_lin, stage_rot, boxcar, elliptec]:
-                    QMessageBox.warning(self, "Not Ready", "One or more controllers are not connected.")
-                    return
-            else:
-                if None in [stage_lin, stage_rot, elliptec]:
-                    QMessageBox.warning(self, "Not Ready", "Stage or elliptec controllers are not connected.")
-                    return
-            
-            self.connect_controllers(laser, stage_lin, stage_rot, boxcar, elliptec)
+        if not dry_run:
+            if None in [laser, stage_lin, stage_rot, boxcar, input_polarizer, analyzer_polarizer]:
+                QMessageBox.warning(self, "Not Ready", "One or more controllers are not connected.")
+                return
+        else:
+            if None in [stage_lin, stage_rot, input_polarizer, analyzer_polarizer]:
+                QMessageBox.warning(self, "Not Ready", "Stage or polarizer controllers are not connected.")
+                return
+        
+        if not input_polarizer.is_connected or not analyzer_polarizer.is_connected:
+            QMessageBox.warning(self, "Not Ready", "Both polarizer controllers must be connected.")
+            return
+
+        self.connect_controllers(laser, stage_lin, stage_rot, boxcar, input_polarizer, analyzer_polarizer)
 
         if self.runner.is_running:
             QMessageBox.warning(self, "Warning", "Measurement already in progress.")

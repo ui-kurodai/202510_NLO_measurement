@@ -13,12 +13,13 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - in %(filename)s - %(message)s')
 
 class SHGMeasurementRunner:
-    def __init__(self, laser, stage_lin, stage_rot, boxcar, elliptec=None):
+    def __init__(self, laser, stage_lin, stage_rot, boxcar, input_polarizer=None, analyzer_polarizer=None):
         self.laser = laser
         self.stage_lin = stage_lin
         self.stage_rot = stage_rot
         self.boxcar = boxcar
-        self.elliptec = elliptec
+        self.input_polarizer = input_polarizer
+        self.analyzer_polarizer = analyzer_polarizer
 
         self.positions = []
         self.signals = []
@@ -91,6 +92,8 @@ class SHGMeasurementRunner:
             "wavelength_nm": self.laser.wavelength_nm,
             "input_polarization": input_polarization,
             "detected_polarization": detected_polarization,
+            "input_polarizer_zero_offset_deg": getattr(self.input_polarizer, "zero_offset_deg", None),
+            "analyzer_polarizer_zero_offset_deg": getattr(self.analyzer_polarizer, "zero_offset_deg", None),
             "ref_ch":channels[0],
             "sig_ch":channels[1],
             "repetition": repetition,
@@ -106,19 +109,28 @@ class SHGMeasurementRunner:
             with open(meta_path, "w") as meta_file:
                 json.dump(metadata, meta_file, indent=2)
 
-        if not dry_run:
-            print("[measure_shg] Turning laser ON...")
-            self.laser.start()
-
         scan_values = self._make_scan_points(start, end, step)
         csv_file = None
         writer = None
+        laser_started = False
         if not dry_run:
             csv_file = open(csv_path, mode="w", newline="")
             writer = csv.writer(csv_file)
             writer.writerow(["position"] + [f"ch{ch}" for ch in channels])
 
         try:
+            if self.input_polarizer is not None:
+                self.input_polarizer.move_to_polarization(input_polarization)
+                time.sleep(0.2)
+            if self.analyzer_polarizer is not None:
+                self.analyzer_polarizer.move_to_polarization(detected_polarization)
+                time.sleep(0.2)
+
+            if not dry_run:
+                print("[measure_shg] Turning laser ON...")
+                self.laser.start()
+                laser_started = True
+
             self.stage_lin.reset()
             self.stage_rot.reset()
             if method == "rotation":
@@ -159,7 +171,7 @@ class SHGMeasurementRunner:
         finally:
             if writer:
                 csv_file.close()
-            if not dry_run:
+            if not dry_run and laser_started:
                 print("[measure_shg] Turning laser OFF...")
                 self.laser.stop()
 

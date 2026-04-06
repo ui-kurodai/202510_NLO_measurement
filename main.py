@@ -7,12 +7,14 @@ from PyQt6.QtCore import QLocale, Qt, QSize
 # Workflow widgets
 from widgets.measurement_widget import SHGMeasurementWidget
 from widgets.analysis_widget import FittingAnalysisWidget
+from widgets.calibration_widget import PolarizerCalibrationWidget
 
 # Device widgets
 from widgets.crylasQlaser_widget import CrylasQlaserWidget
 from widgets.elliptec_rotator_widget import ElliptecRotatorWidget
 from widgets.gsc02_stage_widget import OSMS2035Widget, OSMS60YAWWidget
 from widgets.boxcar_widget import BoxcarWidget
+from widgets.power_meter_widget import PowerMeterWidget
 
 
 class DevicesPanel(QWidget):
@@ -42,7 +44,17 @@ class DevicesPanel(QWidget):
         self.stage_lin_widget = OSMS2035Widget(axis=1)   # translation stage
         self.stage_rot_widget = OSMS60YAWWidget(axis=2) # rotation stage
         self.boxcar_widget = BoxcarWidget()
-        self.elliptec_widget = ElliptecRotatorWidget()
+        self.power_meter_widget = PowerMeterWidget()
+        self.input_polarizer_widget = ElliptecRotatorWidget(
+            title="Input Polarizer (Elliptec)",
+            calibration_key="input_polarizer",
+            default_address="0",
+        )
+        self.analyzer_polarizer_widget = ElliptecRotatorWidget(
+            title="Analyzer Polarizer (Elliptec)",
+            calibration_key="analyzer_polarizer",
+            default_address="1",
+        )
 
         # Ordered list of (name, widget)
         self._devices = [
@@ -50,7 +62,9 @@ class DevicesPanel(QWidget):
             ("Stage (Translation)", self.stage_lin_widget),
             ("Stage (Rotation)", self.stage_rot_widget),
             ("Boxcar", self.boxcar_widget),
-            ("Analyzer", self.elliptec_widget),
+            ("Power Meter", self.power_meter_widget),
+            ("Input Polarizer", self.input_polarizer_widget),
+            ("Analyzer Polarizer", self.analyzer_polarizer_widget),
         ]
 
         # Populate list and stack in the same order
@@ -88,7 +102,9 @@ class DevicesPanel(QWidget):
             self.stage_lin_widget,
             self.stage_rot_widget,
             self.boxcar_widget,
-            self.elliptec_widget,
+            self.power_meter_widget,
+            self.input_polarizer_widget,
+            self.analyzer_polarizer_widget,
         ]
 
 
@@ -116,10 +132,15 @@ class MainWindow(QWidget):
 
         # Workflow tabs
         self.home_widget = SHGMeasurementWidget(devices_tab=self.devices_tab)
+        self.calibration_widget = PolarizerCalibrationWidget(
+            devices_tab=self.devices_tab,
+            home_widget=self.home_widget,
+        )
         self.analysis_widget = FittingAnalysisWidget()
 
         # Add tabs in the requested order
         self.tabs.addTab(self.home_widget, "Home")
+        self.tabs.addTab(self.calibration_widget, "Calibration")
         self.tabs.addTab(self.analysis_widget, "Fitting analysis")
         self.tabs.addTab(self.devices_tab, "Devices")
 
