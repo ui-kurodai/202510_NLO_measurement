@@ -7,7 +7,8 @@ from PyQt6.QtCore import QLocale, Qt, QSize
 # Workflow widgets
 from widgets.measurement_widget import SHGMeasurementWidget
 from widgets.analysis_widget import FittingAnalysisWidget
-from widgets.filter_management_widget import FilterCatalogWidget
+from widgets.comparison_widget import ComparisonWidget
+from widgets.data_management_widget import DataManagementWidget
 
 # Device widgets
 from widgets.crylasQlaser_widget import CrylasQlaserWidget
@@ -118,13 +119,15 @@ class MainWindow(QWidget):
         # Workflow tabs
         self.home_widget = SHGMeasurementWidget(devices_tab=self.devices_tab)
         self.analysis_widget = FittingAnalysisWidget()
-        self.filter_catalog_widget = FilterCatalogWidget()
-        self.filter_catalog_widget.catalog_updated.connect(self.home_widget.reload_filter_catalog)
+        self.comparison_widget = ComparisonWidget()
+        self.data_management_widget = DataManagementWidget()
+        self.data_management_widget.catalog_updated.connect(self.home_widget.reload_reference_catalogs)
 
         # Add tabs in the requested order
         self.tabs.addTab(self.home_widget, "Home")
         self.tabs.addTab(self.analysis_widget, "Fitting analysis")
-        self.tabs.addTab(self.filter_catalog_widget, "Data Management")
+        self.tabs.addTab(self.comparison_widget, "Comparison")
+        self.tabs.addTab(self.data_management_widget, "Reference Data")
         self.tabs.addTab(self.devices_tab, "Devices")
 
         # Root layout
