@@ -96,6 +96,34 @@ def compare_experiment_folders(
     return [result], warnings
 
 
+def compare_reference_folder_to_target_json(
+    reference_root: Path,
+    target_json_path: Path,
+    reference_d_value: float,
+) -> tuple[ComparisonResult | None, list[str]]:
+    warnings: list[str] = []
+    reference_meta, reference_json_path, reference_warnings = load_single_measurement_json(reference_root)
+    warnings.extend(reference_warnings)
+
+    target_meta = _load_json(target_json_path)
+    if target_meta is None:
+        warnings.append(f"Failed to read target JSON: {target_json_path}")
+        return None, warnings
+
+    if reference_meta is None or reference_json_path is None:
+        return None, warnings
+
+    result = compare_measurement_pair(
+        key=target_json_path.name,
+        reference_root=reference_root,
+        target_root=target_json_path.parent,
+        reference_json_path=reference_json_path,
+        target_json_path=target_json_path,
+        reference_d_value=reference_d_value,
+    )
+    return result, warnings
+
+
 def compare_measurement_pair(
     key: str,
     reference_root: Path,

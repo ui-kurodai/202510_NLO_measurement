@@ -10,14 +10,12 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QListView,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
-    QTreeView,
     QVBoxLayout,
     QWidget,
     QDoubleSpinBox,
@@ -30,6 +28,7 @@ from comparison_utils import (
     load_single_measurement_json,
     write_comparison_results,
 )
+from windows_dialogs import select_multiple_directories
 
 
 class ComparisonWidget(QWidget):
@@ -146,11 +145,11 @@ class ComparisonWidget(QWidget):
 
     def _select_target_folder(self) -> None:
         start_dir = str(self.target_roots[0]) if self.target_roots else "results"
-        folders = self._select_directories("Select target experiment folders", start_dir)
+        folders = self._select_target_directories_native(start_dir)
         if not folders:
             return
         self.target_roots = folders
-        self.lbl_target_folders.setText("\n".join(str(folder) for folder in self.target_roots))
+        self.lbl_target_folders.setText("\n".join(str(path) for path in self.target_roots))
 
     def _run_comparison(self) -> None:
         self.log_output.clear()
@@ -159,7 +158,7 @@ class ComparisonWidget(QWidget):
         self.btn_write_json.setEnabled(False)
 
         if self.reference_root is None or not self.target_roots:
-            QMessageBox.information(self, "Missing folder", "Select one reference folder and at least one target folder first.")
+            QMessageBox.information(self, "Missing target", "Select one reference folder and at least one target folder first.")
             return
 
         reference_d = float(self.sb_reference_d.value())
@@ -256,25 +255,13 @@ class ComparisonWidget(QWidget):
         self.lbl_reference_in_pol.setText(summary["input_polarization"] or "(empty)")
         self.lbl_reference_out_pol.setText(summary["detected_polarization"] or "(empty)")
 
-    def _select_directories(self, title: str, start_dir: str) -> list[Path]:
-        dialog = QFileDialog(self, title, start_dir)
-        dialog.setFileMode(QFileDialog.FileMode.Directory)
-        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
-        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-
-        for view in dialog.findChildren(QListView):
-            if view.model() is not None:
-                view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        for view in dialog.findChildren(QTreeView):
-            if view.model() is not None:
-                view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-
-        if dialog.exec() != QFileDialog.DialogCode.Accepted:
+    def _select_target_directories_native(self, start_dir: str) -> list[Path]:
+        try:
+            return select_multiple_directories(
+                parent_hwnd=int(self.window().winId()) if self.window() is not None else None,
+                title="Select target experiment folders",
+                initial_dir=start_dir,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Selection failed", f"Failed to open native folder picker: {exc}")
             return []
-
-        selected = []
-        for path_text in dialog.selectedFiles():
-            path = Path(path_text)
-            if path not in selected:
-                selected.append(path)
-        return selected
