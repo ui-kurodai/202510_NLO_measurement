@@ -57,12 +57,7 @@ class BoxcarWidget(QGroupBox):
         self.del_port_btns = {}
         self.port_rows = {}
         for port, v in self.analog_output:
-            # add label
-            if v is np.nan:
-                label = QLabel(f"Port {port}: ---- mV")
-            else:
-                label = QLabel(f"Port {port}: {v:.3f} mV")
-            self.port_labels[port] = label
+            self.port_labels[port] = self._create_port_label(port, v)
             
             # add del_btn
             del_port_btn = QPushButton("-")
@@ -85,6 +80,18 @@ class BoxcarWidget(QGroupBox):
         self.layout.addLayout(add_output_layout)
 
         self.setLayout(self.layout)
+
+    def _format_port_output_text(self, port: int, value: float) -> str:
+        if np.isnan(value):
+            return f"Port {port}: ---- V"
+        return f"Port {port}: {value:.3f} V"
+
+    def _create_port_label(self, port: int, value: float) -> QLabel:
+        label = QLabel(self._format_port_output_text(port, value))
+        font = label.font()
+        font.setPointSizeF(font.pointSizeF() * 2)
+        label.setFont(font)
+        return label
 
     def scan_gpib_resources(self):
         self.resource_combo.clear()
@@ -173,7 +180,7 @@ class BoxcarWidget(QGroupBox):
             # update data
             self.analog_output.append([port, np.nan])
             # upate label
-            self.port_labels[port] = QLabel(f"Port {port}: ---- mV")
+            self.port_labels[port] = self._create_port_label(port, np.nan)
             self.del_port_btns[port] = QPushButton("-")
             self.del_port_btns[port].clicked.connect(lambda _, p=port:self.handle_port("-", p))
 
@@ -229,10 +236,7 @@ class BoxcarWidget(QGroupBox):
         # update_label
         for port, v in self.analog_output:
             try:
-                if np.isnan(v):
-                    self.port_labels[port].setText(f"Port {port}: ---- mV")
-                else:
-                    self.port_labels[port].setText(f"Port {port}: {v:.3f} mV")
+                self.port_labels[port].setText(self._format_port_output_text(port, v))
             except Exception as e:
                     logging.error(f"Failed to update output label: {e}")
 
@@ -241,7 +245,7 @@ class BoxcarWidget(QGroupBox):
             port, _ = self.analog_output[i]
             self.analog_output[i][1] = np.nan  # overwrite
             if port in self.port_labels:
-                self.port_labels[port].setText(f"Port {port}: ---- mV")
+                self.port_labels[port].setText(self._format_port_output_text(port, np.nan))
 
 
     def shutdown(self):
