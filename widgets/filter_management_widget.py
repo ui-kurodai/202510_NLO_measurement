@@ -26,6 +26,7 @@ from measurement_metadata import (
     format_filter_display,
     load_nd_filter_catalog,
     normalize_filter_entry,
+    resolve_catalog_path,
     save_nd_filter_catalog,
 )
 
@@ -201,7 +202,11 @@ class FilterCatalogWidget(QWidget):
         self._refresh_filter_id_preview()
 
     def _browse_transmission_csv(self) -> None:
-        start_dir = self.le_csv_path.text().strip() or str(ND_FILTER_CATALOG_PATH.parent)
+        current_path = resolve_catalog_path(self.le_csv_path.text().strip())
+        if current_path is not None and current_path.exists():
+            start_dir = str(current_path.parent if current_path.is_file() else current_path)
+        else:
+            start_dir = str(ND_FILTER_CATALOG_PATH.parent)
         selected, _ = QFileDialog.getOpenFileName(
             self,
             "Select transmission spectrum CSV",
@@ -238,7 +243,8 @@ class FilterCatalogWidget(QWidget):
             QMessageBox.warning(self, "Input Error", "Please enter at least Product Name or Instance ID.")
             return
 
-        if csv_path_text and not Path(csv_path_text).exists():
+        resolved_csv_path = resolve_catalog_path(csv_path_text) if csv_path_text else None
+        if csv_path_text and (resolved_csv_path is None or not resolved_csv_path.exists()):
             QMessageBox.warning(self, "Input Error", "Transmission CSV path does not exist.")
             return
 

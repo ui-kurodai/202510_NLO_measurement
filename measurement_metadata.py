@@ -3,12 +3,14 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any
 
 
-APP_DATA_DIR = Path(__file__).resolve().parent / "app_data"
+PROJECT_ROOT_DIR = Path(__file__).resolve().parent
+APP_DATA_DIR = PROJECT_ROOT_DIR / "app_data"
 ND_FILTER_CATALOG_PATH = APP_DATA_DIR / "nd_filter_catalog.json"
 SAMPLE_CATALOG_PATH = APP_DATA_DIR / "sample_catalog.json"
 BEAM_PROFILE_CATALOG_PATH = APP_DATA_DIR / "beam_profile_catalog.json"
@@ -59,6 +61,33 @@ def _to_optional_path(value: Any) -> str | None:
     if value in (None, ""):
         return None
     return str(value).strip()
+
+
+def _normalize_catalog_relative_path(value: Any, base_dir: Path = PROJECT_ROOT_DIR) -> str | None:
+    path_text = _to_optional_path(value)
+    if path_text is None:
+        return None
+
+    path = Path(path_text)
+    if not path.is_absolute():
+        return path.as_posix()
+
+    try:
+        relative_path = os.path.relpath(path, base_dir)
+    except ValueError:
+        return path.as_posix()
+    return Path(relative_path).as_posix()
+
+
+def resolve_catalog_path(value: Any, base_dir: Path = PROJECT_ROOT_DIR) -> Path | None:
+    path_text = _to_optional_path(value)
+    if path_text is None:
+        return None
+
+    path = Path(path_text)
+    if path.is_absolute():
+        return path
+    return (base_dir / path).resolve()
 
 
 def normalize_crystal_orientation(value: Any) -> str:
@@ -129,7 +158,7 @@ def normalize_filter_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "product_name": product_name,
         "instance_id": instance_id,
         "nominal_od": _to_optional_float(entry.get("nominal_od")),
-        "transmission_csv_path": _to_optional_path(entry.get("transmission_csv_path")),
+        "transmission_csv_path": _normalize_catalog_relative_path(entry.get("transmission_csv_path")),
         "notes": str(entry.get("notes") or "").strip(),
     }
     if not normalized["filter_id"]:
@@ -423,7 +452,7 @@ def resolve_filter_transmission(
     csv_path_text = normalized.get("transmission_csv_path")
 
     if csv_path_text and shg_wavelength_nm is not None:
-        csv_path = Path(csv_path_text)
+        csv_path = resolve_catalog_path(csv_path_text)
         try:
             wavelengths, transmissions, transmission_column = _load_transmission_spectrum(csv_path)
             interpolated = _interpolate_transmission(wavelengths, transmissions, shg_wavelength_nm)
