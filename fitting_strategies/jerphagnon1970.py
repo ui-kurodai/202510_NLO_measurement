@@ -158,10 +158,12 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
         def projection_factor(theta):
             meta = self.analysis.meta
             theta_p_w = refraction_angle(theta)["w"]
+            cut_axis = self.normalize_axis(meta["crystal_orientation"])
+            cut_axis_tuple = tuple(int(axis) for axis in cut_axis)
 
             key = (
                 meta["material"],
-                tuple(meta["crystal_orientation"]),
+                cut_axis_tuple,
                 meta["rot/trans_axis"],
                 int(round(meta["input_polarization"])),
                 int(round(meta["detected_polarization"])),
@@ -733,16 +735,22 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
             print(f"Error: {e}")
             Lc = []
         Pm0_fit, _Pm0 = self._fit_Pm0(data)
+        _fit_model, fit_aux = self._maker_fringes(
+            override={"L": L_fit["L_mm"], "theta_deg": data["position_centered"]},
+            return_aux=True,
+        )
 
         # add fitted theoretical values to csv
         out = data.copy()
-        out["fit"] = Pm0_fit["Pm0"] * self._maker_fringes(override={"L":L_fit["L_mm"], "theta_deg": data["position_centered"]}) \
+        out["fit"] = Pm0_fit["Pm0"] * np.asarray(_fit_model, dtype=float) \
       + _offset["offset"]
 
         results = {}
         results.update(L_fit)
         results.update(Lc)
         results.update(Pm0_fit)
+        if isinstance(fit_aux, dict) and fit_aux.get("d_factor") is not None:
+            results["d_factor"] = float(fit_aux["d_factor"])
         self.analysis.meta.update(results)
 
         csv_path = self.analysis.csv_path
