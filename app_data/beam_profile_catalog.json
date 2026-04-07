@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "beam_profiles": [
+    {
+      "id": "20251017_1940",
+      "beam_r_x": 360.0,
+      "beam_r_y": 423.0,
+      "fitting_type": "Gaussian"
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "samples": [
+    {
+      "sample": "BMF12-B-1",
+      "material": "BaMgF4",
+      "crystal_orientation": "010",
+      "thickness_info": {
+        "wedge_angle_deg": 0.536,
+        "t_center_mm": 1.8
+      }
+    },
+    {
+      "sample": "BMF12-B-2",
+      "material": "BaMgF4",
+      "crystal_orientation": "010",
+      "thickness_info": {
+        "wedge_angle_deg": 0.534,
+        "t_center_mm": 1.603
+      }
+    },
+    {
+      "sample": "BMF12-B-3",
+      "material": "BaMgF4",
+      "crystal_orientation": "010",
+      "thickness_info": {
+        "wedge_angle_deg": 0.541,
+        "t_center_mm": 1.433
+      }
+    },
+    {
+      "sample": "BMF36-A-1",
+      "material": "BaMgF4",
+      "crystal_orientation": "010",
+      "thickness_info": {
+        "wedge_angle_deg": 0.0,
+        "t_center_mm": 3.824
+      }
+    },
+    {
+      "sample": "BMF36-A-2",
+      "material": "BaMgF4",
+      "crystal_orientation": "010",
+      "thickness_info": {
+        "wedge_angle_deg": 0.54,
+        "t_center_mm": 1.804
+      }
+    },
+    {
+      "sample": "BMF36-B0",
+      "material": "BaMgF4",
+      "crystal_orientation": "100",
+      "thickness_info": {
+        "wedge_angle_deg": 0.0,
+        "t_center_mm": 1.389
+      }
+    },
+    {
+      "sample": "quartz-1",
+      "material": "SiO2",
+      "crystal_orientation": "010",
+      "thickness_info": {
+        "wedge_angle_deg": 0.0,
+        "t_center_mm": 0.511
+      }
+    },
+    {
+      "sample": "quartz-3",
+      "material": "SiO2",
+      "crystal_orientation": "010",
+      "thickness_info": {
+        "wedge_angle_deg": 0.64,
+        "t_center_mm": 0.451
+      }
+    }
+  ]
+}
