@@ -4,7 +4,11 @@ import json
 import time
 from datetime import datetime
 import logging
-from measurement_metadata import apply_condition_metadata
+from measurement_metadata import (
+    apply_condition_metadata,
+    beam_metadata_from_entry,
+    sample_metadata_from_entry,
+)
 
 # from devices.laser_control import CrylasQLaserController, CrylasQLaserDecoder
 # from devices.osms2035_control import OSMS2035Controller
@@ -47,6 +51,8 @@ class SHGMeasurementRunner:
         axis: str,
         boxcar_sensitivity_text: str,
         nd_filter_entries: list[dict],
+        sample_entry: dict | None = None,
+        beam_profile_entry: dict | None = None,
         dry_run: bool = False,
         on_progress=None    # emit the latest signal for realtime GUI display
     ) -> dict:
@@ -104,6 +110,10 @@ class SHGMeasurementRunner:
             "step": step,
             "timestamp": datetime.now().isoformat()
         }
+        if sample_entry is not None:
+            metadata.update(sample_metadata_from_entry(sample_entry))
+        if beam_profile_entry is not None:
+            metadata.update(beam_metadata_from_entry(beam_profile_entry))
         metadata, condition_warnings = apply_condition_metadata(
             metadata=metadata,
             boxcar_sensitivity_text=boxcar_sensitivity_text,
