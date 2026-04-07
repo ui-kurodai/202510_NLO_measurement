@@ -31,7 +31,7 @@ from typing import Any, Dict, Optional, Tuple, List
 import numpy as np
 import pandas as pd
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QLocale, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QPushButton, QLabel, QLineEdit, QComboBox,
@@ -208,6 +208,8 @@ class FittingAnalysisWidget(QWidget):
         self.sb_wedge = QDoubleSpinBox(); self.sb_wedge.setRange(-90.0, 90.0); self.sb_wedge.setDecimals(6)
         self.sb_beam_rx = QDoubleSpinBox(); self.sb_beam_rx.setRange(0.0, 1e6); self.sb_beam_rx.setDecimals(6)
         self.sb_beam_ry = QDoubleSpinBox(); self.sb_beam_ry.setRange(0.0, 1e6); self.sb_beam_ry.setDecimals(6)
+        for spin_box in [self.sb_t_thin, self.sb_wedge, self.sb_beam_rx, self.sb_beam_ry]:
+            spin_box.setLocale(QLocale.c())
         self.cmb_boxcar_sensitivity = QComboBox()
         self.cmb_boxcar_sensitivity.setEditable(True)
         self.cmb_boxcar_sensitivity.addItems(COMMON_BOXCAR_SENSITIVITIES)
@@ -385,6 +387,7 @@ class FittingAnalysisWidget(QWidget):
         slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         slider.setMinimumWidth(260)
         value_box = QDoubleSpinBox()
+        value_box.setLocale(QLocale.c())
         value_box.setRange(minimum, maximum)
         value_box.setDecimals(decimals)
         value_box.setSingleStep(step)
@@ -392,6 +395,7 @@ class FittingAnalysisWidget(QWidget):
         value_box.setFixedWidth(88)
 
         min_box = QDoubleSpinBox()
+        min_box.setLocale(QLocale.c())
         min_box.setRange(minimum, maximum)
         min_box.setDecimals(decimals)
         min_box.setSingleStep(step)
@@ -399,6 +403,7 @@ class FittingAnalysisWidget(QWidget):
         min_box.setFixedWidth(78)
 
         max_box = QDoubleSpinBox()
+        max_box.setLocale(QLocale.c())
         max_box.setRange(minimum, maximum)
         max_box.setDecimals(decimals)
         max_box.setSingleStep(step)

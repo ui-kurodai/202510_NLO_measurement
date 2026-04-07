@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QLocale, pyqtSignal
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from measure_shg import SHGMeasurementRunner
@@ -74,12 +74,15 @@ class SHGMeasurementWidget(QGroupBox):
         self.channel_combo_2 = QComboBox()
         for ch in range(1, 9):
             self.channel_combo_2.addItem(f"CH{ch}")
+        self.channel_combo_2.setCurrentIndex(1)
 
         self.input_pol_spin = QDoubleSpinBox()
+        self.input_pol_spin.setLocale(QLocale.c())
         self.input_pol_spin.setRange(0, 180)
         self.input_pol_spin.setSuffix(" deg")
 
         self.detected_pol_spin = QDoubleSpinBox()
+        self.detected_pol_spin.setLocale(QLocale.c())
         self.detected_pol_spin.setRange(0, 180)
         self.detected_pol_spin.setSuffix(" deg")
 
@@ -87,6 +90,7 @@ class SHGMeasurementWidget(QGroupBox):
         self.end_spin = QDoubleSpinBox()
         self.step_spin = QDoubleSpinBox()
         for spin_box in [self.start_spin, self.end_spin, self.step_spin]:
+            spin_box.setLocale(QLocale.c())
             spin_box.setDecimals(3)
             spin_box.setRange(-9999, 9999)
 
@@ -107,7 +111,7 @@ class SHGMeasurementWidget(QGroupBox):
         self.boxcar_sensitivity_combo.setCurrentText("1 V / 0.1 V")
 
         self.no_filter_checkbox = QCheckBox("No ND filter")
-        self.no_filter_checkbox.setChecked(True)
+        self.no_filter_checkbox.setChecked(False)
         self.no_filter_checkbox.toggled.connect(self._toggle_filter_selection)
 
         self.reload_filters_btn = QPushButton("Reload Filters")
@@ -298,6 +302,16 @@ class SHGMeasurementWidget(QGroupBox):
                 if self.beam_profile_combo.itemData(index) == current_id:
                     restored_index = index
                     break
+        elif catalog["beam_profiles"]:
+            latest_id = max(
+                (entry["id"] for entry in catalog["beam_profiles"] if entry.get("id")),
+                default=None,
+            )
+            if latest_id is not None:
+                for index in range(self.beam_profile_combo.count()):
+                    if self.beam_profile_combo.itemData(index) == latest_id:
+                        restored_index = index
+                        break
         self.beam_profile_combo.setCurrentIndex(restored_index)
 
     def _selected_sample_entry(self):
