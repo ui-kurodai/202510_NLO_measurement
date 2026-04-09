@@ -131,8 +131,5 @@ def upsert_fitting_result(
 
     for key in FITTING_RESULT_KEYS:
         payload.pop(key, None)
-    for key in FITTING_RESULT_KEYS:
-        if key in entry:
-            payload[key] = entry[key]
 
     return payload
