@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 
 from PyQt6.QtCore import Qt, QLocale, pyqtSignal
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QPushButton, QLabel, QLineEdit, QComboBox,
@@ -58,6 +59,7 @@ from measurement_metadata import (
     resolve_selected_filters,
     sample_metadata_from_entry,
 )
+from fitting_results import extract_fit_payload, merge_fit_payload, upsert_fitting_result
 # self made database
 # from crystaldatabase import CRYSTALS
 # from crystaldatabase import *
@@ -158,7 +160,7 @@ class FittingAnalysisWidget(QWidget):
         self.btn_open = QPushButton("Open Folder…")
         self.btn_update_json = QPushButton("Update JSON")
         self.btn_fit = QPushButton("Run Fit")
-        self.btn_save = QPushButton("Save Figures")
+        self.btn_save = QPushButton("Save All Plots")
         self.btn_fit.setEnabled(False)
         self.btn_save.setEnabled(False)
         self.btn_update_json.setEnabled(False)
@@ -210,11 +212,21 @@ class FittingAnalysisWidget(QWidget):
         f = QFormLayout(meta_edit)
         self.le_material = QLineEdit()
         self.le_crystal_orientation = QLineEdit()
+        self.le_axis = QLineEdit()
         self.sb_t_thin = QDoubleSpinBox(); self.sb_t_thin.setRange(0.0, 1e6); self.sb_t_thin.setDecimals(6)
         self.sb_wedge = QDoubleSpinBox(); self.sb_wedge.setRange(-90.0, 90.0); self.sb_wedge.setDecimals(6)
         self.sb_beam_rx = QDoubleSpinBox(); self.sb_beam_rx.setRange(0.0, 1e6); self.sb_beam_rx.setDecimals(6)
         self.sb_beam_ry = QDoubleSpinBox(); self.sb_beam_ry.setRange(0.0, 1e6); self.sb_beam_ry.setDecimals(6)
-        for spin_box in [self.sb_t_thin, self.sb_wedge, self.sb_beam_rx, self.sb_beam_ry]:
+        self.sb_input_pol = QDoubleSpinBox(); self.sb_input_pol.setRange(-360.0, 360.0); self.sb_input_pol.setDecimals(3)
+        self.sb_detected_pol = QDoubleSpinBox(); self.sb_detected_pol.setRange(-360.0, 360.0); self.sb_detected_pol.setDecimals(3)
+        for spin_box in [
+            self.sb_t_thin,
+            self.sb_wedge,
+            self.sb_beam_rx,
+            self.sb_beam_ry,
+            self.sb_input_pol,
+            self.sb_detected_pol,
+        ]:
             spin_box.setLocale(QLocale.c())
         self.cmb_boxcar_sensitivity = QComboBox()
         self.cmb_boxcar_sensitivity.setEditable(True)
@@ -223,6 +235,9 @@ class FittingAnalysisWidget(QWidget):
         self.le_filters.setPlaceholderText("filter_id=value, ...")
         f.addRow("material:", self.le_material)
         f.addRow("crystal_orientation (e.g. 0,1,1):", self.le_crystal_orientation)
+        f.addRow("rotation/translation axis:", self.le_axis)
+        f.addRow("input polarization (deg):", self.sb_input_pol)
+        f.addRow("detected polarization (deg):", self.sb_detected_pol)
         f.addRow("t_center_mm:", self.sb_t_thin)
         f.addRow("wedge_angle_deg:", self.sb_wedge)
         f.addRow("beam_r_x:", self.sb_beam_rx)
@@ -256,6 +271,19 @@ class FittingAnalysisWidget(QWidget):
 
         self.plot_tabs = QTabWidget()
         fit_tab = QWidget(); fit_layout = QVBoxLayout(fit_tab)
+        fit_series_row = QHBoxLayout()
+        fit_series_row.addWidget(QLabel("Show:"))
+        self.chk_fit_show_data = QCheckBox("Data")
+        self.chk_fit_show_data.setChecked(True)
+        self.chk_fit_show_fitting = QCheckBox("Fitting")
+        self.chk_fit_show_fitting.setChecked(True)
+        self.chk_fit_show_envelope = QCheckBox("Envelope")
+        self.chk_fit_show_envelope.setChecked(True)
+        fit_series_row.addWidget(self.chk_fit_show_data)
+        fit_series_row.addWidget(self.chk_fit_show_fitting)
+        fit_series_row.addWidget(self.chk_fit_show_envelope)
+        fit_series_row.addStretch(1)
+        fit_layout.addLayout(fit_series_row)
         self.canvas_fit = MplCanvas(fit_tab, width=6.0, height=3.6)
         fit_layout.addWidget(self.canvas_fit)
         fit_layout.addWidget(self._build_manual_fit_group())
@@ -293,11 +321,13 @@ class FittingAnalysisWidget(QWidget):
         self.plot_tabs.addTab(lc_tab, "Lc")
 
         plot_toolbar = QHBoxLayout()
-        self.btn_plot_settings = QPushButton("Plot Settings...")
-        self.btn_save_current_plot = QPushButton("Save Current Plot...")
+        self.btn_plot_settings = QPushButton("Plot Settings")
+        self.btn_save_current_plot = QPushButton("Save Current Plot")
+        self.btn_copy_current_plot = QPushButton("Copy Image")
         plot_toolbar.addStretch(1)
         plot_toolbar.addWidget(self.btn_plot_settings)
         plot_toolbar.addWidget(self.btn_save_current_plot)
+        plot_toolbar.addWidget(self.btn_copy_current_plot)
         right_layout.addLayout(plot_toolbar)
         right_layout.addWidget(self.plot_tabs, 3)
 
@@ -338,8 +368,8 @@ class FittingAnalysisWidget(QWidget):
             label="L [mm]:",
             minimum=-1e6,
             maximum=1e6,
-            decimals=3,
-            step=0.001,
+            decimals=4,
+            step=0.0001,
         )
         self._create_manual_control_row(
             form=form,
@@ -443,10 +473,14 @@ class FittingAnalysisWidget(QWidget):
         self.filter_preset_combo.activated.connect(self._filter_preset_activated)
         self.btn_plot_settings.clicked.connect(self._edit_current_plot_settings)
         self.btn_save_current_plot.clicked.connect(self._save_current_plot_clicked)
+        self.btn_copy_current_plot.clicked.connect(self._copy_current_plot_clicked)
         self.btn_reset_manual.clicked.connect(self._reset_manual_controls_clicked)
         self.btn_apply_manual.clicked.connect(self._apply_manual_fit_clicked)
-        self.cmb_strategy.currentIndexChanged.connect(lambda *_args: self._refresh_analysis_views(reset_manual=True))
+        self.cmb_strategy.currentIndexChanged.connect(self._strategy_selection_changed)
         self.cmb_lc_source.currentIndexChanged.connect(lambda *_args: self._render_analysis_plots())
+        self.chk_fit_show_data.stateChanged.connect(lambda *_args: self._render_analysis_plots())
+        self.chk_fit_show_fitting.stateChanged.connect(lambda *_args: self._render_analysis_plots())
+        self.chk_fit_show_envelope.stateChanged.connect(lambda *_args: self._render_analysis_plots())
 
         for key in self._manual_controls:
             controls = self._manual_controls[key]
@@ -513,6 +547,42 @@ class FittingAnalysisWidget(QWidget):
             return self._strategies[data]
         # If no userdata (e.g., no strategies), try a conventional default
         return None
+
+    def _strategy_selection_changed(self, *_args):
+        if self._meta:
+            self._populate_table_from_json(self._meta)
+        self._refresh_analysis_views(reset_manual=True)
+
+    def _fit_payload_for_strategy(
+        self,
+        meta: Optional[Dict[str, Any]] = None,
+        strategy: Optional[StrategyInfo] = None,
+    ) -> Dict[str, Any]:
+        selected = strategy or self._get_selected_strategy()
+        strategy_name = selected.class_name if selected is not None else None
+        return extract_fit_payload(meta if meta is not None else self._meta, strategy_name)
+
+    def _meta_with_selected_fit(
+        self,
+        meta: Optional[Dict[str, Any]] = None,
+        strategy: Optional[StrategyInfo] = None,
+    ) -> Dict[str, Any]:
+        selected = strategy or self._get_selected_strategy()
+        strategy_name = selected.class_name if selected is not None else None
+        return merge_fit_payload(meta if meta is not None else self._meta, strategy_name)
+
+    def _apply_saved_strategy_selection(self, meta: Dict[str, Any]):
+        target_name = str(meta.get("fitting_active_strategy") or "").strip()
+        if not target_name:
+            payload = extract_fit_payload(meta)
+            target_name = str(payload.get("strategy") or "").strip()
+        if not target_name:
+            return
+
+        for index, strategy in enumerate(self._strategies):
+            if strategy.class_name == target_name:
+                self.cmb_strategy.setCurrentIndex(index)
+                return
 
     # --------------------------- Reference data ---------------------------
     def reload_sample_catalog(self):
@@ -706,6 +776,7 @@ class FittingAnalysisWidget(QWidget):
         self._df = df
 
         # Update view fields
+        self._apply_saved_strategy_selection(meta)
         self._populate_meta_labels(meta)
         self._prefill_metadata_editors(meta)
         self._populate_table_from_json(meta)
@@ -732,6 +803,15 @@ class FittingAnalysisWidget(QWidget):
             self.le_crystal_orientation.setText(ori)
         else:
             self.le_crystal_orientation.setText("")
+        self.le_axis.setText(str(meta.get("rot/trans_axis", "")))
+        try:
+            self.sb_input_pol.setValue(float(meta.get("input_polarization", 0.0)))
+        except Exception:
+            self.sb_input_pol.setValue(0.0)
+        try:
+            self.sb_detected_pol.setValue(float(meta.get("detected_polarization", 0.0)))
+        except Exception:
+            self.sb_detected_pol.setValue(0.0)
         # thickness_info
         tinfo = meta.get("thickness_info") or {}
         try:
@@ -829,6 +909,9 @@ class FittingAnalysisWidget(QWidget):
                     payload["crystal_orientation"] = parts
             except Exception:
                 pass
+        payload["rot/trans_axis"] = self.le_axis.text().strip()
+        payload["input_polarization"] = float(self.sb_input_pol.value())
+        payload["detected_polarization"] = float(self.sb_detected_pol.value())
 
         tinfo = dict(payload.get("thickness_info") or {})
         tinfo["t_center_mm"] = float(self.sb_t_thin.value())
@@ -925,6 +1008,7 @@ class FittingAnalysisWidget(QWidget):
     def _populate_table_from_json(self, meta: Dict):
         """Show saved fit-oriented values without duplicating the metadata panel."""
         rows = []
+        fit_payload = self._fit_payload_for_strategy(meta)
         for key, label in [
             ("L_mm", "Corrected L [mm]"),
             ("L_mm_std", "Corrected L std [mm]"),
@@ -940,8 +1024,8 @@ class FittingAnalysisWidget(QWidget):
             ("n_count", "Lc pair count"),
             ("n_peaks", "Peak count"),
         ]:
-            if key in meta:
-                rows.append((label, meta.get(key)))
+            if key in fit_payload:
+                rows.append((label, fit_payload.get(key)))
 
         selected = self._get_selected_strategy()
         if selected is not None:
@@ -975,6 +1059,7 @@ class FittingAnalysisWidget(QWidget):
         if selected is None:
             context["error"] = "No fitting strategy selected."
             return context
+        meta_with_fit = self._meta_with_selected_fit(self._meta, selected)
 
         try:
             mod = importlib.import_module(selected.qualname)
@@ -1023,8 +1108,9 @@ class FittingAnalysisWidget(QWidget):
                 "offset": float(offset_info.get("offset", 0.0)) if isinstance(offset_info, dict) else 0.0,
                 "centering_info": centering_info if isinstance(centering_info, dict) else None,
                 "offset_info": offset_info if isinstance(offset_info, dict) else {"offset": 0.0},
-                "auto_L": self._infer_auto_L(analysis.meta, strategy, prepared),
-                "auto_peak": self._infer_auto_peak(analysis.meta, strategy, prepared),
+                "saved_fit": self._fit_payload_for_strategy(self._meta, selected),
+                "auto_L": self._infer_auto_L(meta_with_fit, strategy, prepared),
+                "auto_peak": self._infer_auto_peak(meta_with_fit, strategy, prepared),
                 "notes": notes,
                 "x_label": self._x_axis_label(analysis.meta, prepared),
             }
@@ -1136,6 +1222,20 @@ class FittingAnalysisWidget(QWidget):
     def _current_plot_canvas(self) -> MplCanvas:
         return self._plot_canvases[self._current_plot_key()]
 
+    def _current_fitting_output_dir(self, create: bool = False) -> Optional[Path]:
+        if not self._current_dir:
+            return None
+        selected = self._get_selected_strategy()
+        class_name = selected.class_name if selected is not None else "current"
+        safe_class_name = "".join(
+            char if char.isalnum() or char in {"-", "_"} else "_"
+            for char in class_name
+        ).strip("_") or "current"
+        output_dir = self._current_dir / f"fitting_{safe_class_name}"
+        if create:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_all_canvas_heights()
@@ -1150,6 +1250,8 @@ class FittingAnalysisWidget(QWidget):
                 self.plot_tabs.setTabVisible(index, not is_wedge)
         if is_wedge and self._current_plot_key() in {"centering", "lc"}:
             self.plot_tabs.setCurrentWidget(self._plot_pages["fit"])
+        if hasattr(self, "chk_fit_show_envelope"):
+            self.chk_fit_show_envelope.setEnabled(not is_wedge)
         self._update_all_canvas_heights()
 
     def _canvas_base_height(self, plot_key: str) -> int:
@@ -1283,6 +1385,7 @@ class FittingAnalysisWidget(QWidget):
             QMessageBox.information(self, "No folder", "Load a result folder first.")
             return
         plot_key = self._current_plot_key()
+        output_dir = self._current_fitting_output_dir(create=True) or self._current_dir
         default_name = {
             "fit": "fit_overlay.png",
             "resid": "residuals.png",
@@ -1293,7 +1396,7 @@ class FittingAnalysisWidget(QWidget):
         path, _selected = QFileDialog.getSaveFileName(
             self,
             "Save current plot",
-            str(self._current_dir / default_name),
+            str(output_dir / default_name),
             "PNG Files (*.png);;PDF Files (*.pdf);;All Files (*)",
         )
         if not path:
@@ -1304,6 +1407,14 @@ class FittingAnalysisWidget(QWidget):
             QMessageBox.critical(self, "Save failed", str(e))
             return
         QMessageBox.information(self, "Saved", f"Saved plot to {path}")
+
+    def _copy_current_plot_clicked(self):
+        if not self._current_dir:
+            QMessageBox.information(self, "No folder", "Load a result folder first.")
+            return
+        clipboard = QGuiApplication.clipboard()
+        clipboard.setPixmap(self._current_plot_canvas().grab())
+        QMessageBox.information(self, "Copied", "Current plot image was copied to the clipboard.")
 
     def _configure_plot_axes(self, canvas: MplCanvas, plot_key: str, y_label: str, top_axis_L_mm: Optional[float] = None):
         settings = self._plot_settings[plot_key]
@@ -1372,16 +1483,17 @@ class FittingAnalysisWidget(QWidget):
         if context.get("error"):
             return
 
+        saved_fit = context.get("saved_fit", {})
         auto_L = float(context.get("auto_L", 0.0))
         auto_peak = float(context.get("auto_peak", 1.0))
         y = np.asarray(context.get("display_y", []), dtype=float)
         y_max = float(np.nanmax(y)) if y.size and np.isfinite(np.nanmax(y)) else max(auto_peak, 1.0)
 
-        l_std = self._safe_float(self._meta.get("L_mm_std"))
+        l_std = self._safe_float(saved_fit.get("L_mm_std"))
         l_span = max(5.0 * l_std, 0.005) if np.isfinite(l_std) and l_std > 0 else max(abs(auto_L) * 0.05, 0.02)
-        peak_std = self._safe_float(self._meta.get("Pm0_stderr"))
+        peak_std = self._safe_float(saved_fit.get("Pm0_stderr"))
         if not np.isfinite(peak_std) or peak_std <= 0:
-            peak_std = self._safe_float(self._meta.get("k_scale_std"))
+            peak_std = self._safe_float(saved_fit.get("k_scale_std"))
         if np.isfinite(peak_std) and peak_std > 0:
             peak_span = max(5.0 * peak_std, max(y_max, auto_peak) * 0.1)
         else:
@@ -1621,15 +1733,18 @@ class FittingAnalysisWidget(QWidget):
         self.canvas_fit.clear()
         ax = self.canvas_fit.ax
         sample_label = str(self._meta.get("sample") or self._meta.get("sample_id") or "Data")
-        ax.plot(live["x"], live["y"], linestyle="none", marker="o", markersize=3, label=sample_label)
-        ax.plot(live["x"], live["fit_curve"], linewidth=1.6, label="Fitting")
-        ax.plot(live["x"], live["envelope_curve"], linewidth=1.2, linestyle="--", label="Envelope")
+        if self.chk_fit_show_data.isChecked():
+            ax.plot(live["x"], live["y"], linestyle="none", marker="o", markersize=3, label=sample_label)
+        if self.chk_fit_show_fitting.isChecked():
+            ax.plot(live["x"], live["fit_curve"], linewidth=1.6, label="Fitting")
+        if self.chk_fit_show_envelope.isChecked() and not self._is_wedge_scan():
+            ax.plot(live["x"], live["envelope_curve"], linewidth=1.2, linestyle="--", label="Envelope")
         nominal_L = self._nominal_thickness_mm()
         delta_um = (float(live["L_value"]) - nominal_L) * 1000.0
         ax.text(
             0.02,
             0.98,
-            f"L = {live['L_value']:.3f} mm (ΔL= {delta_um:+.1f} um)\nPeak = {live['peak_value']:.2f}",
+            f"L = {live['L_value']:.4f} mm (ΔL= {delta_um:+.1f} um)\nPeak = {live['peak_value']:.2f}",
             transform=ax.transAxes,
             va="top",
             ha="left",
@@ -1691,10 +1806,12 @@ class FittingAnalysisWidget(QWidget):
 
         minima_idx = np.asarray(extrema.get("minima_idx", []), dtype=int)
         maxima_idx = np.asarray(extrema.get("maxima_idx", []), dtype=int)
-        if minima_idx.size:
-            ax.plot(live["x"][minima_idx], live["y"][minima_idx], "*", ms=9, label="Minima")
-        if maxima_idx.size:
-            ax.plot(live["x"][maxima_idx], live["y"][maxima_idx], "o", ms=5, label="Maxima")
+        minima_x = live["x"][minima_idx] if minima_idx.size else np.array([], dtype=float)
+        minima_y = live["y"][minima_idx] if minima_idx.size else np.array([], dtype=float)
+        maxima_x = live["x"][maxima_idx] if maxima_idx.size else np.array([], dtype=float)
+        maxima_y = live["y"][maxima_idx] if maxima_idx.size else np.array([], dtype=float)
+        ax.plot(minima_x, minima_y, linestyle="none", marker="*", ms=9, label="* Minima")
+        ax.plot(maxima_x, maxima_y, linestyle="none", marker="o", ms=5, label="o Maxima")
 
         self._configure_plot_axes(
             self.canvas_extrema,
@@ -1774,6 +1891,10 @@ class FittingAnalysisWidget(QWidget):
         if not self.json_path or not self.csv_path:
             QMessageBox.information(self, "No data", "Load a result folder first.")
             return
+        selected = self._get_selected_strategy()
+        if selected is None:
+            QMessageBox.critical(self, "No strategy", "No fitting strategy is available/selected.")
+            return
 
         ok, message = self._write_json_metadata(show_message=False)
         if not ok:
@@ -1797,22 +1918,35 @@ class FittingAnalysisWidget(QWidget):
             QMessageBox.critical(self, "Read failed", str(e))
             return
 
-        meta["L_mm"] = float(live["L_value"])
-        meta["L_mm_std"] = 0.0
-        meta["k_scale"] = float(live["peak_value"])
-        meta["k_scale_std"] = 0.0
-        meta["Pm0"] = float(live["peak_value"])
-        meta["Pm0_stderr"] = 0.0
-        meta["residual_rms"] = float(np.sqrt(np.mean(np.square(live["residual"]))))
+        fit_result = {
+            "L_mm": float(live["L_value"]),
+            "L_mm_std": 0.0,
+            "k_scale": float(live["peak_value"]),
+            "k_scale_std": 0.0,
+            "Pm0": float(live["peak_value"]),
+            "Pm0_stderr": 0.0,
+            "residual_rms": float(np.sqrt(np.mean(np.square(live["residual"])))),
+        }
+        existing_fit = self._fit_payload_for_strategy(meta, selected)
+        if existing_fit:
+            fit_result = {**existing_fit, **fit_result}
         d_factor = self._safe_float(live.get("d_factor"))
         if np.isfinite(d_factor):
-            meta["d_factor"] = float(d_factor)
+            fit_result["d_factor"] = float(d_factor)
 
         if "error" not in lc_info:
             result = lc_info["result"]
             for key in ("Lc_mean_mm", "Lc_std_mm", "minima_count", "n_count"):
                 if key in result:
-                    meta[key] = result[key]
+                    fit_result[key] = result[key]
+
+        meta = upsert_fitting_result(
+            meta,
+            selected.class_name,
+            fit_result,
+            strategy_module=selected.qualname,
+            strategy_display_name=selected.display_name,
+        )
 
         try:
             with open(self.json_path, "w", encoding="utf-8") as f:
@@ -1860,6 +1994,7 @@ class FittingAnalysisWidget(QWidget):
             QMessageBox.information(self, "No folder", "Load a result folder first.")
             return
         try:
+            output_dir = self._current_fitting_output_dir(create=True) or self._current_dir
             figures = {
                 "fit_overlay.png": self.canvas_fit.figure,
                 "residuals.png": self.canvas_resid.figure,
@@ -1868,11 +2003,11 @@ class FittingAnalysisWidget(QWidget):
                 "lc_pairs.png": self.canvas_lc.figure,
             }
             for filename, figure in figures.items():
-                figure.savefig(self._current_dir / filename, dpi=200, bbox_inches="tight")
+                figure.savefig(output_dir / filename, dpi=200, bbox_inches="tight")
         except Exception as e:
             QMessageBox.critical(self, "Save failed", str(e))
             return
-        QMessageBox.information(self, "Saved", "Figures were saved for all analysis tabs.")
+        QMessageBox.information(self, "Saved", f"Plots for all analysis tabs were saved to {output_dir}")
 
 
 # --------------------------- Standalone test hook ---------------------------
