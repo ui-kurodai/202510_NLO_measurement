@@ -525,6 +525,12 @@ def _select_reference_variant(
         for variant in reference_variants:
             if str(variant.get("strategy") or "").strip() == target_strategy:
                 return variant, None
+        target_family = _strategy_family_name(target_strategy)
+        for variant in reference_variants:
+            reference_strategy = str(variant.get("strategy") or "").strip()
+            if reference_strategy and _strategy_family_name(reference_strategy) == target_family:
+                reference_label = str(variant.get("label") or reference_strategy or "(legacy)")
+                return variant, f"Used reference fit '{reference_label}' for compatible target strategy '{target_strategy}'."
 
     if len(reference_variants) == 1:
         variant = reference_variants[0]
@@ -585,3 +591,12 @@ def _format_optional_deg(value: Any) -> str:
         return f"{float(value):g} deg"
     except (TypeError, ValueError):
         return str(value)
+
+
+def _strategy_family_name(strategy_name: str) -> str:
+    normalized = str(strategy_name or "").strip().lower()
+    if normalized.endswith("wedgestrategy"):
+        return normalized[: -len("wedgestrategy")]
+    if normalized.endswith("strategy"):
+        return normalized[: -len("strategy")]
+    return normalized
