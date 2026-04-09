@@ -1,7 +1,11 @@
+import json
+
 import numpy as np
+from scipy.optimize import least_squares
 from scipy.signal import argrelextrema
 
 from crystaldatabase import CRYSTALS
+from fitting_results import upsert_fitting_result
 
 class BaseFittingStrategy:
     """Abstract base class for SHG fitting algorithms."""
@@ -24,6 +28,30 @@ class BaseFittingStrategy:
             A dictionary of fitting results.
         """
         raise NotImplementedError("Subclasses must implement fit_all()")
+
+    def _coerce_scalar(self, value, default=float("nan")):
+        """
+        Convert scalar-like values or arrays to a representative float.
+        """
+        try:
+            arr = np.asarray(value, dtype=float)
+        except Exception:
+            try:
+                return float(value)
+            except Exception:
+                return default
+
+        if arr.ndim == 0:
+            try:
+                return float(arr)
+            except Exception:
+                return default
+
+        flat = arr.reshape(-1)
+        finite = flat[np.isfinite(flat)]
+        if finite.size == 0:
+            return default
+        return float(finite[0])
     
 
     _UNSET = object()
@@ -458,6 +486,128 @@ class BaseWedgeStrategy(BaseFittingStrategy):
 
         L_array = t_center + (data["position"] - self.center_pos) * np.tan(np.radians(wedge_angle_deg))
         return np.asarray(L_array, dtype=float)
+
+    def _fit_L(self, meta="auto", data="auto"):
+        """
+        Fit sample thickness L [mm] near the nominal thickness for wedge scans.
+        """
+        meta, data = self._resolve_input_info(meta=meta, data=data)
+
+        y = np.asarray(data["intensity_corrected"], dtype=float)
+        L0_mm = meta["thickness_info"]["t_center_mm"]
+
+        search_um = 15
+        loss = "linear"
+        f_scale = 1.0
+
+        dL_mm = search_um / 1000.0
+        lb = L0_mm - dL_mm
+        ub = L0_mm + dL_mm
+
+        def residual(params):
+            L_mm = float(params[0])
+            y_model = self._maker_fringes(override={"L": L_mm, "meta": meta, "data": data})
+            y_model = np.asarray(y_model, dtype=float)
+            if y_model.shape != y.shape:
+                raise ValueError(f"Model returned shape {y_model.shape}, expected {y.shape}.")
+            return y_model - y
+
+        x0 = np.array([L0_mm], dtype=float)
+        result = least_squares(
+            residual,
+            x0=x0,
+            bounds=(np.array([lb]), np.array([ub])),
+            loss=loss,
+            f_scale=f_scale,
+        )
+
+        L_fit_mm = float(result.x[0])
+
+        fit = {
+            "L0_mm": L0_mm,
+            "L_fit_mm": L_fit_mm,
+            "dL_um": (L_fit_mm - L0_mm) * 1000.0,
+            "cost": float(result.cost),
+            "success": bool(result.success),
+            "message": str(result.message),
+        }
+        aux = {
+            "result": result,
+        }
+        return fit, aux
+
+    def fit_all(self):
+        """
+        Wedge fitting pipeline:
+        1. fit thickness with _fit_L()
+        2. use measured max intensity as amplitude
+        3. write fit curve and fitting summary
+        """
+        meta = self.analysis.meta
+        data = self.analysis.data
+
+        fit_L, _fit_aux = self._fit_L(meta=meta, data=data)
+        fitted_L_mm = float(fit_L["L_fit_mm"])
+
+        model_result = self._maker_fringes(
+            override={"L": fitted_L_mm, "meta": meta, "data": data},
+            return_aux=True,
+        )
+        if isinstance(model_result, tuple) and len(model_result) == 2:
+            model, fit_aux = model_result
+        else:
+            model, fit_aux = model_result, {}
+
+        model = np.asarray(model, dtype=float)
+        intensity = np.asarray(data["intensity_corrected"], dtype=float)
+        if intensity.size == 0 or not np.isfinite(intensity).any():
+            raise ValueError("No finite intensity data available for wedge fitting.")
+
+        peak = float(np.nanmax(intensity))
+        fit_curve = peak * model
+        finite = np.isfinite(intensity) & np.isfinite(fit_curve)
+        if not np.any(finite):
+            raise ValueError("No finite residual points available for wedge fitting.")
+        residual_rms = float(np.sqrt(np.mean((intensity[finite] - fit_curve[finite]) ** 2)))
+
+        out = data.copy()
+        out["fit"] = fit_curve
+
+        results = {
+            "L_mm": fitted_L_mm,
+            "L_mm_std": float("nan"),
+            "k_scale": peak,
+            "k_scale_std": 0.0,
+            "Pm0": peak,
+            "Pm0_stderr": 0.0,
+            "residual_rms": residual_rms,
+        }
+        if isinstance(fit_aux, dict) and fit_aux.get("d_factor") is not None:
+            d_factor = self._coerce_scalar(fit_aux["d_factor"])
+            if np.isfinite(d_factor):
+                results["d_factor"] = d_factor
+        if isinstance(fit_aux, dict) and fit_aux.get("Lc") is not None:
+            lc = self._coerce_scalar(fit_aux["Lc"])
+            if np.isfinite(lc):
+                results["Lc_mean_mm"] = lc
+                results["Lc_std_mm"] = float("nan")
+
+        self.analysis.meta = upsert_fitting_result(
+            self.analysis.meta,
+            self.__class__.__name__,
+            results,
+            strategy_module=self.__class__.__module__,
+            strategy_display_name=self.__class__.__name__,
+        )
+
+        csv_path = self.analysis.csv_path
+        json_path = self.analysis.json_path
+        self.analysis.data = out
+        out.to_csv(csv_path, index=False)
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(self.analysis.meta, f, ensure_ascii=False, indent=2)
+
+        return results
 
 
 # Error handling

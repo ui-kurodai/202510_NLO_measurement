@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any
 
 from fitting_strategies.base import BaseRotationStrategy
+from fitting_strategies.base import BaseWedgeStrategy
 from fitting_strategies.base import FittingConfigurationError
 from fitting_results import upsert_fitting_result
 
@@ -768,3 +769,78 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
             json.dump(self.analysis.meta, f, ensure_ascii=False, indent=2)
 
         return results
+
+
+class Jerphagnon1970WedgeStrategy(Jerphagnon1970Strategy, BaseWedgeStrategy):
+    """
+    Adapt Jerphagnon's rotation formula to wedge scans by evaluating the
+    rotation model at theta=0 on the wedge thickness profile.
+    """
+
+    def __init__(self, analysis):
+        super().__init__(analysis)
+
+    GEOMETRY_P_FUNCTIONS = {
+        # key configuration is: ("material", (cut), "trans_axis", pol_in, pol_out)
+        # These entries map wedge measurement geometries to the corresponding
+        # Jerphagnon rotation model. Since theta is fixed to 0 for the wedge
+        # adaptation, only p(0) matters here.
+
+        # BMF d31
+        ("BaMgF4", (0, 1, 0), "100", 90, 0): lambda _: 1.0,
+
+        # BMF d32
+        ("BaMgF4", (1, 0, 0), "001", 0, 90): lambda _: 1.0,
+
+        # BMF d33
+        ("BaMgF4", (0, 1, 0), "100", 0, 0): lambda _: 1.0,
+    }
+
+    def _maker_fringes(self, override: dict | None = None, return_aux=False):
+        override = {} if override is None else override
+        meta = override.get("meta", "auto")
+        data = override.get("data", "auto")
+        meta, data = self._resolve_input_info(meta=meta, data=data)
+
+        L_array = self.calc_thickness_array(override=override, meta=meta, data=data)
+
+        rotation_override = dict(override)
+        rotation_override.update(
+            {
+                "meta": meta,
+                "data": data,
+                "L": L_array,
+                "theta_deg": 0.0,
+            }
+        )
+
+        model, rot_aux = super()._maker_fringes(
+            override=rotation_override,
+            envelope=False,
+            return_aux=True,
+        )
+
+        model = np.asarray(model, dtype=float)
+        if model.ndim == 0:
+            model = np.full(L_array.shape, float(model), dtype=float)
+
+        if not return_aux:
+            return model
+
+        delta_k_values = np.asarray(rot_aux["delta_k"], dtype=float).reshape(-1)
+        finite_delta_k = delta_k_values[np.isfinite(delta_k_values)]
+        delta_k = float(finite_delta_k[0]) if finite_delta_k.size else float("nan")
+        if np.isfinite(delta_k) and not np.isclose(delta_k, 0.0):
+            lc = float(np.pi / delta_k)
+        else:
+            lc = float("nan")
+
+        aux = {
+            "d_factor": rot_aux["d_factor"],
+            "L_array": L_array,
+            "Lc": lc,
+        }
+        return model, aux
+
+    def fit_all(self):
+        return BaseWedgeStrategy.fit_all(self)
