@@ -91,11 +91,12 @@ class ComparisonWidget(QWidget):
         self.lbl_summary = QLabel("Load two experiment folders and run comparison.")
         table_layout.addWidget(self.lbl_summary)
 
-        self.table = QTableWidget(0, 12)
+        self.table = QTableWidget(0, 13)
         self.table.setHorizontalHeaderLabels(
             [
                 "Target folder",
                 "Target sample",
+                "Strategy",
                 "Peak type",
                 "Peak ref",
                 "Peak target",
@@ -184,7 +185,8 @@ class ComparisonWidget(QWidget):
         for warning in all_warnings:
             self._append_log(f"WARNING: {warning}")
         for result in all_results:
-            self._append_log(f"{result.target_json_path.parent.name}: {result.status_text}")
+            strategy_text = self._strategy_text(result)
+            self._append_log(f"{result.target_json_path.parent.name} [{strategy_text}]: {result.status_text}")
 
         if all_results:
             self.btn_write_json.setEnabled(any(result.error is None for result in all_results))
@@ -197,6 +199,7 @@ class ComparisonWidget(QWidget):
             values = [
                 result.target_json_path.parent.name,
                 result.target_sample,
+                self._strategy_text(result),
                 result.peak_label,
                 self._fmt(result.peak_ref),
                 self._fmt(result.peak_target),
@@ -234,6 +237,13 @@ class ComparisonWidget(QWidget):
         if value is None:
             return ""
         return f"{value:.6g}"
+
+    def _strategy_text(self, result: ComparisonResult) -> str:
+        target_strategy = result.target_strategy or "(legacy)"
+        reference_strategy = result.reference_strategy or "(legacy)"
+        if target_strategy == reference_strategy:
+            return target_strategy
+        return f"{target_strategy} <- {reference_strategy}"
 
     def _refresh_reference_info(self) -> None:
         self.lbl_reference_sample.setText("(unavailable)")
