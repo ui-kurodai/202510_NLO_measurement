@@ -65,6 +65,15 @@
       }
     },
     {
+      "sample": "quartz-2",
+      "material": "SiO2",
+      "crystal_orientation": "010",
+      "thickness_info": {
+        "wedge_angle_deg": 0.0,
+        "t_center_mm": 0.512
+      }
+    },
+    {
       "sample": "quartz-3",
       "material": "SiO2",
       "crystal_orientation": "010",
