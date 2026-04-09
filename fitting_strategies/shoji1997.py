@@ -50,7 +50,7 @@ class Shoji1997WedgeStrategy(BaseWedgeStrategy):
         # P_2w = K * L_array**2 * np.sin(Psi)**2 / (beam_r_x*beam_r_y * (Psi)**2)
         P_N = np.sin(Psi)**2
 
-        aux = {"L_array": L_array,
+        aux = {"L_array": L_array,                                                                                                                      
                "Lc" : np.pi / delta_k
                }
 
