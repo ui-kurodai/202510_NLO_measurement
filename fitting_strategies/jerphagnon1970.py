@@ -10,6 +10,7 @@ from typing import Optional, Tuple, Dict, Any
 
 from fitting_strategies.base import BaseRotationStrategy
 from fitting_strategies.base import FittingConfigurationError
+from fitting_results import upsert_fitting_result
 
 # self made database
 from crystaldatabase import CRYSTALS
@@ -751,7 +752,13 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
         results.update(Pm0_fit)
         if isinstance(fit_aux, dict) and fit_aux.get("d_factor") is not None:
             results["d_factor"] = float(fit_aux["d_factor"])
-        self.analysis.meta.update(results)
+        self.analysis.meta = upsert_fitting_result(
+            self.analysis.meta,
+            self.__class__.__name__,
+            results,
+            strategy_module=self.__class__.__module__,
+            strategy_display_name=self.__class__.__name__,
+        )
 
         csv_path = self.analysis.csv_path
         json_path = self.analysis.json_path
