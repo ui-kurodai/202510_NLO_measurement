@@ -1690,22 +1690,41 @@ class FittingAnalysisWidget(QWidget):
     def _render_analysis_plots(self):
         self._update_plot_tab_visibility()
         self._update_all_canvas_heights()
-        if not self._analysis_context or self._analysis_context.get("error"):
+        if not self._analysis_context:
             self._clear_plots()
-            if self._analysis_context.get("error"):
-                message = str(self._analysis_context["error"])
-                for canvas in [
-                    self.canvas_fit,
-                    self.canvas_resid,
-                    self.canvas_centering,
-                    self.canvas_extrema,
-                    self.canvas_lc,
-                ]:
-                    self._show_plot_message(canvas, message)
             self.btn_apply_manual.setEnabled(False)
+            return
+        if self._analysis_context.get("error"):
+            message = str(self._analysis_context["error"])
+            self._render_fit_data_only_plot(message)
+            for canvas in [
+                self.canvas_resid,
+                self.canvas_centering,
+                self.canvas_extrema,
+                self.canvas_lc,
+            ]:
+                self._show_plot_message(canvas, message)
+            self.btn_apply_manual.setEnabled(False)
+            self.lbl_manual_hint.setText(f"Fitting unavailable. Showing data only. {message}")
             return
 
         live = self._compute_live_curves()
+        if "error" in live:
+            message = str(live["error"])
+            self._render_fit_data_only_plot(message)
+            for canvas in [
+                self.canvas_resid,
+                self.canvas_centering,
+                self.canvas_extrema,
+                self.canvas_lc,
+            ]:
+                self._show_plot_message(canvas, message)
+            self.btn_apply_manual.setEnabled(False)
+            notes = self._analysis_context.get("notes") or []
+            note_text = "" if not notes else " | " + " | ".join(str(note) for note in notes)
+            self.lbl_manual_hint.setText(f"Fitting unavailable. Showing data only. {message}{note_text}")
+            return
+
         extrema = self._compute_extrema_info()
         lc_info = self._compute_lc_diagnostics(
             L_value=float(live.get("L_value", self._manual_value("L"))),
@@ -1725,6 +1744,54 @@ class FittingAnalysisWidget(QWidget):
             if not notes else
             "The live overlay uses the current L and Peak values. " + " | ".join(str(note) for note in notes)
         )
+
+    def _render_fit_data_only_plot(self, error_message: str):
+        self.canvas_fit.clear()
+        ax = self.canvas_fit.ax
+        context = self._analysis_context or {}
+        data = self._df
+        display_x = context.get("display_x")
+        display_y = context.get("display_y")
+        if display_x is not None and display_y is not None:
+            x = np.asarray(display_x, dtype=float)
+            y = np.asarray(display_y, dtype=float)
+        elif data is None or data.empty:
+            self._show_plot_message(self.canvas_fit, error_message)
+            return
+        elif "position_centered" in data.columns:
+            x = np.asarray(data["position_centered"], dtype=float)
+        elif "position" in data.columns:
+            x = np.asarray(data["position"], dtype=float)
+        elif "angle_deg" in data.columns:
+            x = np.asarray(data["angle_deg"], dtype=float)
+        elif "position_mm" in data.columns:
+            x = np.asarray(data["position_mm"], dtype=float)
+        else:
+            x = np.arange(len(data), dtype=float)
+
+        if display_x is None or display_y is None:
+            if "offset_corrected" in data.columns:
+                y = np.asarray(data["offset_corrected"], dtype=float)
+            elif "intensity_corrected" in data.columns:
+                y = np.asarray(data["intensity_corrected"], dtype=float)
+            elif "ch2" in data.columns:
+                y = np.asarray(data["ch2"], dtype=float)
+            else:
+                numeric_columns = [
+                    column for column in data.columns
+                    if column not in {"position", "position_centered", "angle_deg", "position_mm", "fit", "fit_envelope"}
+                    and np.issubdtype(data[column].dtype, np.number)
+                ]
+                if not numeric_columns:
+                    self._show_plot_message(self.canvas_fit, error_message)
+                    return
+                y = np.asarray(data[numeric_columns[-1]], dtype=float)
+
+        sample_label = str(self._meta.get("sample") or self._meta.get("sample_id") or "Data")
+        ax.plot(x, y, linestyle="none", marker="o", markersize=3, label=sample_label)
+        self._configure_plot_axes(self.canvas_fit, "fit", "Signal (V)")
+        self.canvas_fit.figure.tight_layout()
+        self.canvas_fit.draw()
 
     def _render_fit_plot(self, live: Dict[str, Any]):
         if "error" in live:
