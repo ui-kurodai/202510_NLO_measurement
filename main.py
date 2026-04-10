@@ -126,7 +126,7 @@ class MainWindow(QWidget):
         # Add tabs in the requested order
         self.tabs.addTab(self.home_widget, "Home")
         self.tabs.addTab(self.analysis_widget, "Fitting analysis")
-        self.tabs.addTab(self.comparison_widget, "Comparison")
+        self.tabs.addTab(self.comparison_widget, "d-calculation")
         self.tabs.addTab(self.data_management_widget, "Reference Data")
         self.tabs.addTab(self.devices_tab, "Devices")
 
