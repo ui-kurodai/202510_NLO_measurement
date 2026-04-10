@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QBrush
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -35,6 +35,44 @@ from fitting_results import normalize_fitting_entries
 from windows_dialogs import select_multiple_directories
 
 
+class DraggableTableWidget(QTableWidget):
+    rowMoveRequested = pyqtSignal(int, int)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._drag_start_row: int | None = None
+        self._drag_target_row: int | None = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_row = self.rowAt(int(event.position().y()))
+            self._drag_target_row = self._drag_start_row
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton and self._drag_start_row is not None:
+            hovered_row = self.rowAt(int(event.position().y()))
+            if hovered_row >= 0:
+                self._drag_target_row = hovered_row
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        try:
+            if (
+                event.button() == Qt.MouseButton.LeftButton
+                and self._drag_start_row is not None
+                and self._drag_target_row is not None
+                and self._drag_start_row >= 0
+                and self._drag_target_row >= 0
+                and self._drag_start_row != self._drag_target_row
+            ):
+                self.rowMoveRequested.emit(self._drag_start_row, self._drag_target_row)
+        finally:
+            self._drag_start_row = None
+            self._drag_target_row = None
+        super().mouseReleaseEvent(event)
+
+
 class ComparisonWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -42,7 +80,10 @@ class ComparisonWidget(QWidget):
         self.target_roots: list[Path] = []
         self._results: list[ComparisonResult] = []
         self._row_enabled: dict[str, bool] = {}
+        self._manual_row_order: list[str] = []
+        self._displayed_result_keys: list[str] = []
         self._syncing_selection = False
+        self._syncing_row_move = False
 
         self._build_ui()
 
@@ -102,7 +143,7 @@ class ComparisonWidget(QWidget):
         table_split.setContentsMargins(0, 0, 0, 0)
         table_split.setSpacing(0)
 
-        self.fixed_table = QTableWidget(0, 3)
+        self.fixed_table = DraggableTableWidget(0, 3)
         self.fixed_table.setHorizontalHeaderLabels(["Show", "Target holder", "Strategy"])
         self.fixed_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.fixed_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -112,17 +153,18 @@ class ComparisonWidget(QWidget):
         self.fixed_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.fixed_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.fixed_table.setMinimumWidth(420)
+        self.fixed_table.verticalHeader().setSectionsMovable(True)
+        self.fixed_table.verticalHeader().sectionMoved.connect(self._sync_row_move_from_fixed)
 
-        self.table = QTableWidget(0, 11)
+        self.table = DraggableTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels(
             [
                 "Target sample",
-                "Peak type",
+                "Filter diff",
                 "Peak ref",
                 "Peak target",
                 "d_factor ref",
                 "d_factor target",
-                "Filter diff",
                 "I_target/I_ref",
                 "d_target/d_ref",
                 "calculated_d",
@@ -133,11 +175,14 @@ class ComparisonWidget(QWidget):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setSectionsMovable(True)
 
         self.fixed_table.verticalScrollBar().valueChanged.connect(self.table.verticalScrollBar().setValue)
         self.table.verticalScrollBar().valueChanged.connect(self.fixed_table.verticalScrollBar().setValue)
         self.fixed_table.currentCellChanged.connect(self._sync_table_selection_from_fixed)
         self.table.currentCellChanged.connect(self._sync_table_selection_from_scroll)
+        self.fixed_table.rowMoveRequested.connect(self._move_result_row)
+        self.table.rowMoveRequested.connect(self._move_result_row)
 
         table_split.addWidget(self.fixed_table, 0)
         table_split.addWidget(self.table, 1)
@@ -186,6 +231,8 @@ class ComparisonWidget(QWidget):
         self.table.setRowCount(0)
         self._results = []
         self._row_enabled.clear()
+        self._manual_row_order.clear()
+        self._displayed_result_keys.clear()
         self.btn_write_json.setEnabled(False)
 
         if self.reference_root is None or not self.target_roots:
@@ -226,16 +273,16 @@ class ComparisonWidget(QWidget):
     def _populate_table(self, results: list[ComparisonResult]) -> None:
         for result in results:
             self._row_enabled.setdefault(result.key, True)
+        self._reconcile_manual_row_order(results)
 
         ordered_results = sorted(
             results,
             key=lambda result: (
                 0 if self._row_enabled.get(result.key, True) else 1,
-                result.target_json_path.parent.name.lower(),
-                result.target_sample.lower(),
-                result.target_strategy.lower(),
+                self._manual_order_index(result.key),
             ),
         )
+        self._displayed_result_keys = [result.key for result in ordered_results]
 
         self.fixed_table.setRowCount(len(ordered_results))
         self.table.setRowCount(len(ordered_results))
@@ -280,12 +327,11 @@ class ComparisonWidget(QWidget):
 
             values = [
                 result.target_sample,
-                result.peak_label,
+                result.differing_filters_text,
                 self._fmt(result.peak_ref),
                 self._fmt(result.peak_target),
                 self._fmt(result.d_factor_ref),
                 self._fmt(result.d_factor_target),
-                result.differing_filters_text,
                 self._fmt(result.intensity_ratio),
                 self._fmt(result.d_ratio),
                 self._fmt(result.calculated_d),
@@ -383,6 +429,63 @@ class ComparisonWidget(QWidget):
     def _status_text(self, result: ComparisonResult, enabled: bool) -> str:
         prefix = "" if enabled else "[hidden] "
         return prefix + result.status_text
+
+    def _reconcile_manual_row_order(self, results: list[ComparisonResult]) -> None:
+        seen_keys = {result.key for result in results}
+        self._manual_row_order = [key for key in self._manual_row_order if key in seen_keys]
+        for result in results:
+            if result.key not in self._manual_row_order:
+                self._manual_row_order.append(result.key)
+
+    def _manual_order_index(self, key: str) -> int:
+        try:
+            return self._manual_row_order.index(key)
+        except ValueError:
+            return len(self._manual_row_order)
+
+    def _sync_row_move_from_fixed(self, logical_index: int, old_visual_index: int, new_visual_index: int) -> None:
+        del logical_index
+        if self._syncing_row_move:
+            return
+        self._syncing_row_move = True
+        try:
+            self.table.verticalHeader().moveSection(old_visual_index, new_visual_index)
+            self._apply_manual_order_from_view()
+        finally:
+            self._syncing_row_move = False
+
+    def _apply_manual_order_from_view(self) -> None:
+        header = self.fixed_table.verticalHeader()
+        visible_keys = [
+            self._displayed_result_keys[header.logicalIndex(visual_index)]
+            for visual_index in range(header.count())
+            if 0 <= header.logicalIndex(visual_index) < len(self._displayed_result_keys)
+        ]
+        enabled_keys = [key for key in visible_keys if self._row_enabled.get(key, True)]
+        disabled_keys = [key for key in visible_keys if not self._row_enabled.get(key, True)]
+        self._manual_row_order = enabled_keys + disabled_keys
+        self._populate_table(self._results)
+
+    def _move_result_row(self, source_row: int, target_row: int) -> None:
+        if self._syncing_row_move:
+            return
+        if not (0 <= source_row < len(self._displayed_result_keys) and 0 <= target_row < len(self._displayed_result_keys)):
+            return
+
+        source_key = self._displayed_result_keys[source_row]
+        target_key = self._displayed_result_keys[target_row]
+        if self._row_enabled.get(source_key, True) != self._row_enabled.get(target_key, True):
+            return
+
+        self._reconcile_manual_row_order(self._results)
+        try:
+            self._manual_row_order.remove(source_key)
+        except ValueError:
+            return
+
+        target_index = self._manual_order_index(target_key)
+        self._manual_row_order.insert(target_index, source_key)
+        self._populate_table(self._results)
 
     def _sync_table_selection_from_fixed(self, current_row: int, current_column: int, previous_row: int, previous_column: int) -> None:
         del current_column, previous_row, previous_column
