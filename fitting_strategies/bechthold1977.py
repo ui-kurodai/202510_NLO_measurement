@@ -61,12 +61,12 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
         
         theta = np.deg2rad(theta_deg)
 
-        principle_n_w = self.n_eff(pol_in, wl1_nm, aux=True)
+        principle_n_w = self.n_eff(pol_in, wl1_nm, meta=meta, aux=True)
         n_w_third = principle_n_w["n_third"]
         n_w_rot = principle_n_w["n_rot"]
         n_w_cut = principle_n_w["n_cut"]
 
-        principle_n_2w = self.n_eff(pol_in, wl1_nm / 2.0, aux=True)
+        principle_n_2w = self.n_eff(pol_out, wl1_nm / 2.0, meta=meta, aux=True)
         n_2w_third = principle_n_2w["n_third"]
         n_2w_rot = principle_n_2w["n_rot"]
         n_2w_cut = principle_n_2w["n_cut"]
@@ -86,8 +86,9 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
                 int(round(meta["input_polarization"])),
                 int(round(meta["detected_polarization"])),
             )
+        geometry_functions = override.get("geometry_functions", self.GEOMETRY_FUNCTIONS)
         try:
-            exp_config = self.GEOMETRY_FUNCTIONS[key]
+            exp_config = geometry_functions[key]
         except KeyError:
             raise FittingConfigurationError(
                 f"This geometry is not supported: {key}"
@@ -273,6 +274,50 @@ class Bechthold1977WedgeStrategy(Bechthold1977Strategy, BaseWedgeStrategy):
         ("BaMgF4", "100", "001", 45, 0): "15"
     }
 
+    ROTATION_THEORY_KEYS = {
+        # key configuration is:
+        # (material, cut, trans_axis, pol_in, pol_out) ->
+        # (material, cut, rot_axis, pol_in, pol_out)
+
+        # BMF d31
+        ("BaMgF4", "010", "100", 90, 0): ("BaMgF4", "010", "100", 0, 90),
+
+        # BMF d32
+        ("BaMgF4", "100", "001", 0, 90): ("BaMgF4", "100", "010", 0, 90),
+
+        # BMF d33
+        ("BaMgF4", "010", "100", 0, 0): ("BaMgF4", "010", "001", 0, 0),
+
+        # BMF d15
+        ("BaMgF4", "010", "100", 45, 90): ("BaMgF4", "010", "100", 45, 0),
+
+        # BMF d24
+        ("BaMgF4", "100", "001", 45, 0): ("BaMgF4", "100", "010", 45, 0),
+    }
+
+    def _rotation_theory_meta(self, meta: dict):
+        key = (
+            meta["material"],
+            meta["crystal_orientation"],
+            meta["rot/trans_axis"],
+            int(round(meta["input_polarization"])),
+            int(round(meta["detected_polarization"])),
+        )
+        try:
+            theory_key = self.ROTATION_THEORY_KEYS[key]
+        except KeyError:
+            raise FittingConfigurationError(
+                f"This wedge geometry has no mapped rotation theory frame: {key}"
+            )
+
+        theory_meta = dict(meta)
+        theory_meta["material"] = theory_key[0]
+        theory_meta["crystal_orientation"] = theory_key[1]
+        theory_meta["rot/trans_axis"] = theory_key[2]
+        theory_meta["input_polarization"] = theory_key[3]
+        theory_meta["detected_polarization"] = theory_key[4]
+        return theory_meta
+
     def _maker_fringes(self, override: dict | None = None, return_aux=False):
         """
         Adapt Bechthold's rotation formula to wedge scans by fixing theta=0
@@ -282,16 +327,18 @@ class Bechthold1977WedgeStrategy(Bechthold1977Strategy, BaseWedgeStrategy):
         meta = override.get("meta", "auto")
         data = override.get("data", "auto")
         meta, data = self._resolve_input_info(meta=meta, data=data)
+        theory_meta = self._rotation_theory_meta(meta)
 
         L_array = self.calc_thickness_array(override=override, meta=meta, data=data)
 
         rotation_override = dict(override)
         rotation_override.update(
             {
-                "meta": meta,
+                "meta": theory_meta,
                 "data": data,
                 "L": L_array,
                 "theta_deg": 0.0,
+                "geometry_functions": Bechthold1977Strategy.GEOMETRY_FUNCTIONS,
             }
         )
 

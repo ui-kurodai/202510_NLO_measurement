@@ -248,9 +248,9 @@ class BaseRotationStrategy(BaseFittingStrategy):
     def __init__(self, analysis=None):
         super().__init__(analysis)
 
-    def n_eff(self, pol_deg, wav_nm, theta_deg=None, aux=False):
+    def n_eff(self, pol_deg, wav_nm, theta_deg=None, meta="auto", aux=False):
         """Return effective refractive index for rotation Maker fringe geometry."""
-        meta = self.analysis.meta
+        meta = self._resolve_input_info(meta=meta)
         crystal = CRYSTALS[meta["material"]]()
 
         geometry = {
