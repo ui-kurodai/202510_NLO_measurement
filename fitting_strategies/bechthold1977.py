@@ -98,20 +98,20 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
             Psi = 2*np.pi*L *(v_2w(theta) - w_w(theta)) / wl1_mm
             P_nl = lambda theta=theta: 4 * np.cos(theta)**2 /(w_w(theta) + np.cos(theta))**2
 
-            I_2w_env = (P_nl(theta)**2) * (w_w(theta) * (n_2w_third**2) * np.cos(theta) + v_2w(theta)**2) / \
+            I_2w_env = 2.0 * (P_nl(theta)**2) * (w_w(theta) * (n_2w_third**2) * np.cos(theta) + v_2w(theta)**2) / \
                 (((v_2w(theta) - w_w(theta))**2) * (v_2w(theta) + w_w(theta)) * ((v_2w(theta) + (n_2w_third**2) *np.cos(theta))**3))
             
-            I_2w_0 = (P_nl(0)**2) * (w_w(0) * (n_2w_third**2) * np.cos(0) + v_2w(0)**2) / \
+            I_2w_0 = 2.0 *(P_nl(0)**2) * (w_w(0) * (n_2w_third**2) * np.cos(0) + v_2w(0)**2) / \
                 (((v_2w(0) - w_w(0))**2) * (v_2w(0) + w_w(0)) * ((v_2w(0) + (n_2w_third**2) *np.cos(0))**3))
         
         elif exp_config in ["11", "12"]:
             Psi = 2*np.pi*L *(w_2w(theta) - w_w(theta)) / wl1_mm
             P_nl = lambda theta=theta: 4 * np.cos(theta)**2 /(w_w(theta) + np.cos(theta))**2
 
-            I_2w_env = (P_nl(theta)**2) * w_2w(theta) * (w_w(theta) + np.cos(theta)) / \
+            I_2w_env = 2.0 *(P_nl(theta)**2) * w_2w(theta) * (w_w(theta) + np.cos(theta)) / \
                 (((w_2w(theta) - w_w(theta))**2) * (w_2w(theta) + w_w(theta)) * ((w_2w(theta) + np.cos(theta))**3))
             
-            I_2w_0 = (P_nl(0)**2) * w_2w(0) * (w_w(0) + np.cos(0)) / \
+            I_2w_0 = 2.0 *(P_nl(0)**2) * w_2w(0) * (w_w(0) + np.cos(0)) / \
                 (((w_2w(0) - w_w(0))**2) * (w_2w(0) + w_w(0)) * ((w_2w(0) + np.cos(0))**3))
         
 
@@ -119,10 +119,10 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
             Psi = 2*np.pi*L *(w_2w(theta) - ((v_w(theta) + w_w(theta))/2.0)) / wl1_mm
             P_nl = lambda theta=theta: 4 *v_w(theta)* np.cos(theta)**2 /((v_w(theta) + np.cos(theta)*n_w_third**2) * (w_w(theta) + np.cos(theta)))
 
-            I_2w_env = (P_nl(theta)**2) * w_2w(theta) * (((v_w(theta) + w_w(theta))/2.0) + np.cos(theta)) / \
+            I_2w_env = 2.0 *(P_nl(theta)**2) * w_2w(theta) * (((v_w(theta) + w_w(theta))/2.0) + np.cos(theta)) / \
                 (((w_2w(theta) - ((v_w(theta) + w_w(theta))/2.0))**2) * (w_2w(theta) + ((v_w(theta) + w_w(theta))/2.0)) * ((w_2w(theta) + np.cos(theta))**3))
             
-            I_2w_0 = (P_nl(0)**2) * w_2w(0) * (((v_w(0) + w_w(0))/2.0) + np.cos(0)) / \
+            I_2w_0 = 2.0 *(P_nl(0)**2) * w_2w(0) * (((v_w(0) + w_w(0))/2.0) + np.cos(0)) / \
                 (((w_2w(0) - ((v_w(0) + w_w(0))/2.0))**2) * (w_2w(0) + ((v_w(0) + w_w(0))/2.0)) * ((w_2w(0) + np.cos(0))**3))
         else:
             raise FittingConfigurationError(
