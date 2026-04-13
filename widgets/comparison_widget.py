@@ -357,6 +357,7 @@ class ComparisonWidget(QWidget):
         self.table.resizeColumnsToContents()
         self.fixed_table.setColumnWidth(1, max(self.fixed_table.columnWidth(1), 180))
         self.fixed_table.setColumnWidth(2, max(self.fixed_table.columnWidth(2), 220))
+        self.table.setColumnWidth(1, max(self.table.columnWidth(1), 320))
 
     def _write_results(self) -> None:
         if self.reference_root is None:
