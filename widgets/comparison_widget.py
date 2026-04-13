@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html import escape
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -327,7 +328,6 @@ class ComparisonWidget(QWidget):
 
             values = [
                 result.target_sample,
-                result.differing_filters_text,
                 self._fmt(result.peak_ref),
                 self._fmt(result.peak_target),
                 self._fmt(result.d_factor_ref),
@@ -338,9 +338,16 @@ class ComparisonWidget(QWidget):
                 self._status_text(result, enabled),
             ]
             for column_index, value in enumerate(values):
+                actual_column_index = column_index if column_index == 0 else column_index + 1
                 item = QTableWidgetItem(value)
                 self._style_item(item, base_color, enabled)
-                self.table.setItem(row_index, column_index, item)
+                self.table.setItem(row_index, actual_column_index, item)
+
+            self.table.setCellWidget(
+                row_index,
+                1,
+                self._build_filter_diff_widget(result, base_color, enabled),
+            )
 
             row_height = max(self.fixed_table.verticalHeader().defaultSectionSize(), 28)
             self.fixed_table.setRowHeight(row_index, row_height)
@@ -425,6 +432,40 @@ class ComparisonWidget(QWidget):
             item.setForeground(QBrush(QColor(20, 20, 20)))
         else:
             item.setForeground(QBrush(QColor(150, 150, 150)))
+
+    def _build_filter_diff_widget(self, result: ComparisonResult, background: QColor, enabled: bool) -> QWidget:
+        label = QLabel()
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setMargin(4)
+        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        label.setText(self._format_filter_diff_html(result, enabled))
+
+        widget = QWidget()
+        widget.setAutoFillBackground(True)
+        widget.setStyleSheet(f"background-color: {background.name()};")
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(label)
+        return widget
+
+    def _format_filter_diff_html(self, result: ComparisonResult, enabled: bool) -> str:
+        text = result.differing_filters_text or ""
+        missing_ids = sorted(set(result.differing_filters_missing_csv))
+        if not missing_ids:
+            color = "#141414" if enabled else "#969696"
+            return f"<span style=\"color: {color};\">{escape(text)}</span>"
+
+        highlighted_text = escape(text)
+        for filter_id in sorted(missing_ids, key=len, reverse=True):
+            escaped_filter_id = escape(filter_id)
+            highlighted_text = highlighted_text.replace(
+                escaped_filter_id,
+                f"<span style=\"color: #c62828; font-weight: 700;\">{escaped_filter_id}</span>",
+            )
+
+        default_color = "#141414" if enabled else "#969696"
+        return f"<span style=\"color: {default_color};\">{highlighted_text}</span>"
 
     def _status_text(self, result: ComparisonResult, enabled: bool) -> str:
         prefix = "" if enabled else "[hidden] "

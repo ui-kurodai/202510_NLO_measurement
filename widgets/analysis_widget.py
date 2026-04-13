@@ -60,6 +60,7 @@ from measurement_metadata import (
     sample_metadata_from_entry,
 )
 from fitting_results import extract_fit_payload, merge_fit_payload, upsert_fitting_result
+from widgets.manual_extrema_detection_widget import ManualExtremaDetectionWidget
 # self made database
 # from crystaldatabase import CRYSTALS
 # from crystaldatabase import *
@@ -133,6 +134,7 @@ class FittingAnalysisWidget(QWidget):
         self._analysis_context: Dict[str, Any] = {}
         self._manual_controls: Dict[str, Dict[str, QDoubleSpinBox | QSlider]] = {}
         self._manual_syncing = False
+        self._extrema_force_reset = False
         self._sample_catalog_map: Dict[str, Dict[str, Any]] = {}
         self._beam_profile_catalog_map: Dict[str, Dict[str, Any]] = {}
         self._filter_catalog_map: Dict[str, Dict[str, Any]] = {}
@@ -300,8 +302,8 @@ class FittingAnalysisWidget(QWidget):
         self.plot_tabs.addTab(center_tab, "Centering Cost")
 
         extrema_tab = QWidget(); extrema_layout = QVBoxLayout(extrema_tab)
-        self.canvas_extrema = MplCanvas(extrema_tab, width=6.0, height=2.8)
-        extrema_layout.addWidget(self.canvas_extrema)
+        self.extrema_widget = ManualExtremaDetectionWidget(extrema_tab)
+        extrema_layout.addWidget(self.extrema_widget)
         self.plot_tabs.addTab(extrema_tab, "Extrema")
 
         lc_tab = QWidget(); lc_layout = QVBoxLayout(lc_tab)
@@ -354,7 +356,7 @@ class FittingAnalysisWidget(QWidget):
             "fit": self.canvas_fit,
             "resid": self.canvas_resid,
             "centering": self.canvas_centering,
-            "extrema": self.canvas_extrema,
+            "extrema": self.extrema_widget.canvas,
             "lc": self.canvas_lc,
         }
 
@@ -476,6 +478,7 @@ class FittingAnalysisWidget(QWidget):
         self.btn_copy_current_plot.clicked.connect(self._copy_current_plot_clicked)
         self.btn_reset_manual.clicked.connect(self._reset_manual_controls_clicked)
         self.btn_apply_manual.clicked.connect(self._apply_manual_fit_clicked)
+        self.extrema_widget.extremaChanged.connect(self._render_analysis_plots)
         self.cmb_strategy.currentIndexChanged.connect(self._strategy_selection_changed)
         self.cmb_lc_source.currentIndexChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_data.stateChanged.connect(lambda *_args: self._render_analysis_plots())
@@ -934,6 +937,7 @@ class FittingAnalysisWidget(QWidget):
             payload["filters"] = self._parse_filters_text(filters_text)
         else:
             payload["filters"] = {}
+        payload = self.extrema_widget.merge_into_metadata(payload)
         return payload
 
     def _write_json_metadata(self, show_message: bool = False) -> Tuple[bool, str]:
@@ -954,6 +958,7 @@ class FittingAnalysisWidget(QWidget):
             return False, f"Failed to write JSON: {e}"
 
         self._meta = meta
+        self.extrema_widget.mark_saved()
         self._populate_table_from_json(meta)
         self._refresh_analysis_views(reset_manual=False)
         if show_message:
@@ -1044,6 +1049,7 @@ class FittingAnalysisWidget(QWidget):
         self._analysis_context = self._prepare_analysis_context()
         if reset_manual or not self._manual_controls_ready():
             self._initialize_manual_controls_from_context()
+        self._extrema_force_reset = bool(reset_manual)
         self._render_analysis_plots()
 
     def _prepare_analysis_context(self) -> Dict[str, Any]:
@@ -1589,6 +1595,31 @@ class FittingAnalysisWidget(QWidget):
     def _manual_value(self, key: str) -> float:
         return float(self._manual_controls[key]["value"].value())
 
+    def _compute_auto_extrema_info(self) -> Dict[str, Any]:
+        context = self._analysis_context
+        if context.get("error"):
+            return {"error": context["error"]}
+
+        strategy = context["strategy"]
+        x = np.asarray(context["display_x"], dtype=float)
+        y = np.asarray(context["display_y"], dtype=float)
+        prepared = context["prepared_data"]
+        info: Dict[str, Any] = {"minima_idx": np.array([], dtype=int), "maxima_idx": np.array([], dtype=int)}
+
+        try:
+            info["minima_idx"] = np.asarray(strategy.detect_minima(x, y), dtype=int)
+        except Exception as e:
+            info["minima_error"] = str(e)
+
+        if hasattr(strategy, "_fit_Pm0"):
+            try:
+                _result, aux = strategy._fit_Pm0(prepared)
+                info["maxima_idx"] = np.asarray(aux.get("maxima_idx", []), dtype=int)
+            except Exception as e:
+                info["maxima_error"] = str(e)
+
+        return info
+
     def _compute_live_curves(self) -> Dict[str, Any]:
         context = self._analysis_context
         if context.get("error"):
@@ -1622,31 +1653,6 @@ class FittingAnalysisWidget(QWidget):
             "d_factor": fit_aux.get("d_factor"),
         }
 
-    def _compute_extrema_info(self) -> Dict[str, Any]:
-        context = self._analysis_context
-        if context.get("error"):
-            return {"error": context["error"]}
-
-        strategy = context["strategy"]
-        x = np.asarray(context["display_x"], dtype=float)
-        y = np.asarray(context["display_y"], dtype=float)
-        prepared = context["prepared_data"]
-        info: Dict[str, Any] = {"minima_idx": np.array([], dtype=int), "maxima_idx": np.array([], dtype=int)}
-
-        try:
-            info["minima_idx"] = np.asarray(strategy.detect_minima(x, y), dtype=int)
-        except Exception as e:
-            info["minima_error"] = str(e)
-
-        if hasattr(strategy, "_fit_Pm0"):
-            try:
-                _result, aux = strategy._fit_Pm0(prepared)
-                info["maxima_idx"] = np.asarray(aux.get("maxima_idx", []), dtype=int)
-            except Exception as e:
-                info["maxima_error"] = str(e)
-
-        return info
-
     def _make_fit_theory_dataframe(self, L_value: float, peak_value: float) -> pd.DataFrame:
         context = self._analysis_context
         strategy = context["strategy"]
@@ -1677,11 +1683,15 @@ class FittingAnalysisWidget(QWidget):
         source = self.cmb_lc_source.currentData() or "data"
         try:
             lc_data = self._make_fit_theory_dataframe(L_value, peak_value) if source == "fit" else context["prepared_data"].copy()
+            minima_override = None
+            if source == "data":
+                minima_override = self.extrema_widget.saved_minima_indices()
             result, aux = strategy._calc_Lc_large_angle(
                 context["analysis"].meta,
                 lc_data,
                 [0, 180],
                 L_value,
+                minima_idx_override=minima_override,
             )
             return {"result": result, "aux": aux, "source": source, "data": lc_data}
         except Exception as e:
@@ -1697,13 +1707,9 @@ class FittingAnalysisWidget(QWidget):
         if self._analysis_context.get("error"):
             message = str(self._analysis_context["error"])
             self._render_fit_data_only_plot(message)
-            for canvas in [
-                self.canvas_resid,
-                self.canvas_centering,
-                self.canvas_extrema,
-                self.canvas_lc,
-            ]:
+            for canvas in [self.canvas_resid, self.canvas_centering, self.canvas_lc]:
                 self._show_plot_message(canvas, message)
+            self.extrema_widget.show_message(message)
             self.btn_apply_manual.setEnabled(False)
             self.lbl_manual_hint.setText(f"Fitting unavailable. Showing data only. {message}")
             return
@@ -1712,20 +1718,16 @@ class FittingAnalysisWidget(QWidget):
         if "error" in live:
             message = str(live["error"])
             self._render_fit_data_only_plot(message)
-            for canvas in [
-                self.canvas_resid,
-                self.canvas_centering,
-                self.canvas_extrema,
-                self.canvas_lc,
-            ]:
+            for canvas in [self.canvas_resid, self.canvas_centering, self.canvas_lc]:
                 self._show_plot_message(canvas, message)
+            self.extrema_widget.show_message(message)
             self.btn_apply_manual.setEnabled(False)
             notes = self._analysis_context.get("notes") or []
             note_text = "" if not notes else " | " + " | ".join(str(note) for note in notes)
             self.lbl_manual_hint.setText(f"Fitting unavailable. Showing data only. {message}{note_text}")
             return
 
-        extrema = self._compute_extrema_info()
+        extrema = self._compute_auto_extrema_info()
         lc_info = self._compute_lc_diagnostics(
             L_value=float(live.get("L_value", self._manual_value("L"))),
             peak_value=float(live.get("peak_value", self._manual_value("peak"))),
@@ -1864,30 +1866,27 @@ class FittingAnalysisWidget(QWidget):
 
     def _render_extrema_plot(self, live: Dict[str, Any], extrema: Dict[str, Any]):
         if "error" in live:
-            self._show_plot_message(self.canvas_extrema, str(live["error"]))
+            self.extrema_widget.show_message(str(live["error"]))
             return
-        self.canvas_extrema.clear()
-        ax = self.canvas_extrema.ax
-        ax.plot(live["x"], live["y"], linewidth=1.0, label="Data")
-        ax.plot(live["x"], live["fit_curve"], linewidth=1.2, alpha=0.7, label="Current fit")
-
-        minima_idx = np.asarray(extrema.get("minima_idx", []), dtype=int)
-        maxima_idx = np.asarray(extrema.get("maxima_idx", []), dtype=int)
-        minima_x = live["x"][minima_idx] if minima_idx.size else np.array([], dtype=float)
-        minima_y = live["y"][minima_idx] if minima_idx.size else np.array([], dtype=float)
-        maxima_x = live["x"][maxima_idx] if maxima_idx.size else np.array([], dtype=float)
-        maxima_y = live["y"][maxima_idx] if maxima_idx.size else np.array([], dtype=float)
-        ax.plot(minima_x, minima_y, linestyle="none", marker="*", ms=9, label="* Minima")
-        ax.plot(maxima_x, maxima_y, linestyle="none", marker="o", ms=5, label="o Maxima")
-
-        self._configure_plot_axes(
-            self.canvas_extrema,
-            "extrema",
-            "Signal (V)",
-            top_axis_L_mm=float(live["L_value"]),
+        context = self._analysis_context
+        self.extrema_widget.set_plot_data(
+            meta=self._meta,
+            prepared_data=context["prepared_data"],
+            display_x=np.asarray(live["x"], dtype=float),
+            display_y=np.asarray(live["y"], dtype=float),
+            fit_curve=np.asarray(live["fit_curve"], dtype=float),
+            L_value=float(live["L_value"]),
+            auto_minima_idx=np.asarray(extrema.get("minima_idx", []), dtype=int),
+            auto_maxima_idx=np.asarray(extrema.get("maxima_idx", []), dtype=int),
+            configure_axes=lambda canvas, top_axis_L_mm: self._configure_plot_axes(
+                canvas,
+                "extrema",
+                "Signal (V)",
+                top_axis_L_mm=top_axis_L_mm,
+            ),
+            force_reset=self._extrema_force_reset,
         )
-        self.canvas_extrema.figure.tight_layout()
-        self.canvas_extrema.draw()
+        self._extrema_force_reset = False
 
     def _render_lc_plot(self, lc_info: Dict[str, Any]):
         if self._is_wedge_scan():
@@ -2045,15 +2044,10 @@ class FittingAnalysisWidget(QWidget):
         QMessageBox.information(self, "Saved", "Current L and Peak values were written to JSON/CSV.")
 
     def _clear_plots(self):
-        for canvas in [
-            self.canvas_fit,
-            self.canvas_resid,
-            self.canvas_centering,
-            self.canvas_extrema,
-            self.canvas_lc,
-        ]:
+        for canvas in [self.canvas_fit, self.canvas_resid, self.canvas_centering, self.canvas_lc]:
             canvas.clear()
             canvas.draw()
+        self.extrema_widget.clear_plot()
 
     # --------------------------------- Save ---------------------------------
     def _save_figures_clicked(self):
@@ -2066,7 +2060,7 @@ class FittingAnalysisWidget(QWidget):
                 "fit_overlay.png": self.canvas_fit.figure,
                 "residuals.png": self.canvas_resid.figure,
                 "centering_cost.png": self.canvas_centering.figure,
-                "extrema.png": self.canvas_extrema.figure,
+                "extrema.png": self.extrema_widget.canvas.figure,
                 "lc_pairs.png": self.canvas_lc.figure,
             }
             for filename, figure in figures.items():

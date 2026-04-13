@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from fitting_results import extract_fit_payload, normalize_fitting_entries
-from measurement_metadata import parse_boxcar_sensitivity
+from measurement_metadata import load_nd_filter_catalog, parse_boxcar_sensitivity
 
 
 @dataclass
@@ -40,6 +41,7 @@ class ComparisonResult:
     d_ratio: float | None = None
     calculated_d: float | None = None
     differing_filters_text: str = ""
+    differing_filters_missing_csv: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
 
@@ -241,9 +243,10 @@ def compare_measurement_pair(
             results.append(result)
             continue
 
-        filter_ratio, differing_filters_text = _compute_filter_ratio(filters_ref, filters_target)
+        filter_ratio, differing_filters_text, missing_filter_csv_ids = _compute_filter_ratio(filters_ref, filters_target)
         result.filter_ratio = filter_ratio
         result.differing_filters_text = differing_filters_text
+        result.differing_filters_missing_csv = missing_filter_csv_ids
 
         transmission_ref = _transmission_product(filters_ref)
         transmission_target = _transmission_product(filters_target)
@@ -466,7 +469,10 @@ def _transmission_product(filters: dict[str, float]) -> float:
     return product
 
 
-def _compute_filter_ratio(reference_filters: dict[str, float], target_filters: dict[str, float]) -> tuple[float, str]:
+def _compute_filter_ratio(
+    reference_filters: dict[str, float],
+    target_filters: dict[str, float],
+) -> tuple[float, str, list[str]]:
     common_same = {
         filter_id
         for filter_id in set(reference_filters) & set(target_filters)
@@ -493,7 +499,13 @@ def _compute_filter_ratio(reference_filters: dict[str, float], target_filters: d
         details.append(
             "target: " + ", ".join(f"{filter_id}={transmission:.6g}" for filter_id, transmission in sorted(target_only.items()))
         )
-    return filter_ratio, " | ".join(details) if details else "(same filters or no filters)"
+    differing_filter_ids = set(reference_only) | set(target_only)
+    missing_filter_csv_ids = [
+        filter_id
+        for filter_id in sorted(differing_filter_ids)
+        if not _filter_has_registered_csv(filter_id)
+    ]
+    return filter_ratio, " | ".join(details) if details else "(same filters or no filters)", missing_filter_csv_ids
 
 
 def _extract_fit_variants(meta: dict[str, Any]) -> list[dict[str, Any]]:
@@ -600,3 +612,25 @@ def _strategy_family_name(strategy_name: str) -> str:
     if normalized.endswith("strategy"):
         return normalized[: -len("strategy")]
     return normalized
+
+
+@lru_cache(maxsize=1)
+def _filter_csv_registration_map() -> dict[str, bool]:
+    catalog = load_nd_filter_catalog()
+    filters = catalog.get("filters", [])
+    registration_map: dict[str, bool] = {}
+    if not isinstance(filters, list):
+        return registration_map
+
+    for entry in filters:
+        if not isinstance(entry, dict):
+            continue
+        filter_id = str(entry.get("filter_id") or "").strip()
+        if not filter_id:
+            continue
+        registration_map[filter_id] = bool(str(entry.get("transmission_csv_path") or "").strip())
+    return registration_map
+
+
+def _filter_has_registered_csv(filter_id: str) -> bool:
+    return _filter_csv_registration_map().get(str(filter_id), False)

@@ -12,7 +12,7 @@ class Ishidate1974Strategy(Jerphagnon1970Strategy):
     def __init__(self, analysis):
         super().__init__(analysis)
 
-    def _calc_Lc_large_angle(self, meta, data, mask, fitted_L_mm, minima_threshold=None):
+    def _calc_Lc_large_angle(self, meta, data, mask, fitted_L_mm, minima_threshold=None, minima_idx_override=None):
         """
         III D-1 (a): Calculate Lc from large angles (e.g., θ > 30 deg).
         Parameters
@@ -30,7 +30,10 @@ class Ishidate1974Strategy(Jerphagnon1970Strategy):
             raise ValueError("No data points in the specified theta window.")
 
         # find minima
-        if minima_threshold is not None:
+        if minima_idx_override is not None:
+            minima_idx = np.asarray(minima_idx_override, dtype=int)
+            minima_idx = minima_idx[(minima_idx >= 0) & (minima_idx < theta_deg.size)]
+        elif minima_threshold is not None:
             minima_idx = self.detect_minima(theta_deg, I, threshold_ratio=minima_threshold)
         else:
             minima_idx = self.detect_minima(theta_deg, I)
