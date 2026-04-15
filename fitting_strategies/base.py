@@ -84,6 +84,45 @@ class BaseFittingStrategy:
         if resolved_meta is self._UNSET:
             return resolved_data
         return resolved_meta, resolved_data
+
+    def _resolve_frequency_tag(self, meta, wav_nm):
+        """
+        Map the model wavelength onto the fundamental / SH tags used by dn_override.
+        """
+        try:
+            fundamental_nm = float(meta["wavelength_nm"])
+            wav_nm = float(wav_nm)
+        except Exception:
+            return None
+
+        atol = max(abs(fundamental_nm) * 1e-9, 1e-9)
+        if np.isclose(wav_nm, fundamental_nm, rtol=0.0, atol=atol):
+            return "w"
+        if np.isclose(wav_nm, fundamental_nm / 2.0, rtol=0.0, atol=atol):
+            return "2w"
+        return None
+
+    def _principal_n_with_dn_override(self, meta, wav_nm, index_to_n, dn_override=None):
+        """
+        Return principal refractive indices keyed by axis label after applying dn overrides.
+
+        Supported dn_override keys are either ``dn_w_a`` style or ``w_a`` style.
+        """
+        crystal = CRYSTALS[meta["material"]]()
+        dn_override = dn_override if isinstance(dn_override, dict) else {}
+        freq_tag = self._resolve_frequency_tag(meta, wav_nm)
+
+        principal_n = {}
+        for axis_label, pol_label in index_to_n.items():
+            n_value = float(crystal.get_n(wav_nm, polarization=pol_label))
+            if freq_tag is not None:
+                for key in (f"dn_{freq_tag}_{pol_label}", f"{freq_tag}_{pol_label}"):
+                    if key in dn_override:
+                        n_value += float(dn_override[key])
+                        break
+            principal_n[axis_label] = n_value
+
+        return principal_n
         
     
     def normalize_axis(self, axis):
@@ -248,7 +287,7 @@ class BaseRotationStrategy(BaseFittingStrategy):
     def __init__(self, analysis=None):
         super().__init__(analysis)
 
-    def n_eff(self, pol_deg, wav_nm, theta_deg=None, meta="auto", aux=False):
+    def n_eff(self, pol_deg, wav_nm, theta_deg=None, meta="auto", aux=False, dn_override=None):
         """Return effective refractive index for rotation Maker fringe geometry."""
         meta = self._resolve_input_info(meta=meta)
         crystal = CRYSTALS[meta["material"]]()
@@ -272,9 +311,15 @@ class BaseRotationStrategy(BaseFittingStrategy):
                 f"Unsupported crystal axiality: {axiality}."
             )
 
-        n_rot = crystal.get_n(wav_nm, polarization=index_to_n[rot_axis])
-        n_cut = crystal.get_n(wav_nm, polarization=index_to_n[cut_axis])
-        n_third = crystal.get_n(wav_nm, polarization=index_to_n[third_axis])
+        principal_n = self._principal_n_with_dn_override(
+            meta,
+            wav_nm,
+            index_to_n=index_to_n,
+            dn_override=dn_override,
+        )
+        n_rot = principal_n[rot_axis]
+        n_cut = principal_n[cut_axis]
+        n_third = principal_n[third_axis]
 
         tol = 1e-3
         theta_is_none = theta_deg is None
@@ -419,7 +464,7 @@ class BaseWedgeStrategy(BaseFittingStrategy):
         # stage position where the laser hit the center of the sample holder 
         self.center_pos = 18.05
 
-    def n_eff(self, pol_deg, wav_nm, meta="auto", aux=False):
+    def n_eff(self, pol_deg, wav_nm, meta="auto", aux=False, dn_override=None):
         """Return effective refractive index for wedge Maker fringe geometry."""
         meta = self._resolve_input_info(meta=meta)
         crystal = CRYSTALS[meta["material"]]()
@@ -443,9 +488,15 @@ class BaseWedgeStrategy(BaseFittingStrategy):
                 f"Unsupported crystal axiality: {axiality}."
             )
 
-        n_trans = crystal.get_n(wav_nm, polarization=index_to_n[trans_axis])
-        n_cut = crystal.get_n(wav_nm, polarization=index_to_n[cut_axis])
-        n_third = crystal.get_n(wav_nm, polarization=index_to_n[third_axis])
+        principal_n = self._principal_n_with_dn_override(
+            meta,
+            wav_nm,
+            index_to_n=index_to_n,
+            dn_override=dn_override,
+        )
+        n_trans = principal_n[trans_axis]
+        n_cut = principal_n[cut_axis]
+        n_third = principal_n[third_axis]
 
         tol = 1e-3
 

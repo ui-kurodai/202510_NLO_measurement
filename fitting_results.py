@@ -17,6 +17,22 @@ FITTING_RESULT_KEYS: tuple[str, ...] = (
     "minima_count",
     "n_count",
     "n_peaks",
+    "group_size",
+    "phase_pair_count",
+    "n_fit_cost",
+    "n_fit_success",
+    "dn_w_a",
+    "dn_w_b",
+    "dn_w_c",
+    "dn_2w_a",
+    "dn_2w_b",
+    "dn_2w_c",
+    "n_w_a",
+    "n_w_b",
+    "n_w_c",
+    "n_2w_a",
+    "n_2w_b",
+    "n_2w_c",
 )
 
 FITTING_CONTAINER_KEY = "fitting"
