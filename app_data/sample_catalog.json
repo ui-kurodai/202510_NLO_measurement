@@ -7,7 +7,7 @@
       "crystal_orientation": "010",
       "thickness_info": {
         "wedge_angle_deg": 0.0,
-        "t_center_mm": 10.5
+        "t_center_mm": 10.383
       }
     },
     {
@@ -16,7 +16,7 @@
       "crystal_orientation": "100",
       "thickness_info": {
         "wedge_angle_deg": 0.0,
-        "t_center_mm": 12.5
+        "t_center_mm": 12.404
       }
     },
     {
