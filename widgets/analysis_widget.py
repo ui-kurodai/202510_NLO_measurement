@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QGroupBox, QMessageBox, QTabWidget,
     QTableWidget, QTableWidgetItem, QSizePolicy, QSplitter,
     QDoubleSpinBox, QSlider, QDialog, QDialogButtonBox, QCheckBox,
-    QScrollArea
+    QScrollArea, QPlainTextEdit, QListView, QTreeView
 )
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -270,6 +270,9 @@ class FittingAnalysisWidget(QWidget):
         self.right_scroll.setWidgetResizable(True)
         self.right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         right = QWidget(); right_layout = QVBoxLayout(right)
+        self.analysis_pages = QTabWidget()
+
+        standard_page = QWidget(); standard_layout = QVBoxLayout(standard_page)
 
         self.plot_tabs = QTabWidget()
         fit_tab = QWidget(); fit_layout = QVBoxLayout(fit_tab)
@@ -330,8 +333,13 @@ class FittingAnalysisWidget(QWidget):
         plot_toolbar.addWidget(self.btn_plot_settings)
         plot_toolbar.addWidget(self.btn_save_current_plot)
         plot_toolbar.addWidget(self.btn_copy_current_plot)
-        right_layout.addLayout(plot_toolbar)
-        right_layout.addWidget(self.plot_tabs, 3)
+        standard_layout.addLayout(plot_toolbar)
+        standard_layout.addWidget(self.plot_tabs, 3)
+
+        self.nfit_page = self._build_nfit_page()
+        self.analysis_pages.addTab(standard_page, "Standard Fit")
+        self.analysis_pages.addTab(self.nfit_page, "Refractive Index Fit")
+        right_layout.addWidget(self.analysis_pages, 3)
 
         self.tbl = QTableWidget(0, 2)
         self.tbl.setHorizontalHeaderLabels(["Fit Parameter", "Saved Value"])
@@ -399,6 +407,53 @@ class FittingAnalysisWidget(QWidget):
         self.lbl_manual_hint.setStyleSheet("color: gray;")
         layout.addWidget(self.lbl_manual_hint)
         return group
+
+    def _build_nfit_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        config_group = QGroupBox("Global n-Fit Setup")
+        config_layout = QVBoxLayout(config_group)
+        self.lbl_nfit_intro = QLabel(
+            "Use one measurement folder per line. Update JSON or Run Fit to save the list into "
+            "`n_fit_group_paths`. If the list is empty, only the current folder is used."
+        )
+        self.lbl_nfit_intro.setWordWrap(True)
+        self.lbl_nfit_intro.setStyleSheet("color: gray;")
+        self.txt_nfit_group_paths = QPlainTextEdit()
+        self.txt_nfit_group_paths.setPlaceholderText(
+            "One folder path per line.\n"
+            "Relative paths are resolved from the current folder and its parent."
+        )
+        self.txt_nfit_group_paths.setTabChangesFocus(True)
+        self.txt_nfit_group_paths.setFixedHeight(96)
+
+        nfit_btn_row = QHBoxLayout()
+        self.btn_nfit_select_folders = QPushButton("Select Folders…")
+        self.btn_nfit_current_only = QPushButton("Use Current Folder Only")
+        self.btn_nfit_refresh = QPushButton("Refresh Preview")
+        nfit_btn_row.addWidget(self.btn_nfit_select_folders)
+        nfit_btn_row.addWidget(self.btn_nfit_current_only)
+        nfit_btn_row.addWidget(self.btn_nfit_refresh)
+        nfit_btn_row.addStretch(1)
+
+        self.lbl_nfit_hint = QLabel("Select a global n-fit strategy to preview grouped measurements.")
+        self.lbl_nfit_hint.setWordWrap(True)
+        self.lbl_nfit_hint.setStyleSheet("color: gray;")
+
+        config_layout.addWidget(self.lbl_nfit_intro)
+        config_layout.addWidget(self.txt_nfit_group_paths)
+        config_layout.addLayout(nfit_btn_row)
+        config_layout.addWidget(self.lbl_nfit_hint)
+        layout.addWidget(config_group)
+
+        self.nfit_measurements_host = QWidget()
+        self.nfit_measurements_layout = QVBoxLayout(self.nfit_measurements_host)
+        self.nfit_measurements_layout.setContentsMargins(0, 0, 0, 0)
+        self.nfit_measurements_layout.setSpacing(8)
+        layout.addWidget(self.nfit_measurements_host, 1)
+        layout.addStretch(1)
+        return page
 
     def _create_manual_control_row(
         self,
@@ -484,6 +539,10 @@ class FittingAnalysisWidget(QWidget):
         self.chk_fit_show_data.stateChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_fitting.stateChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_envelope.stateChanged.connect(lambda *_args: self._render_analysis_plots())
+        self.btn_nfit_select_folders.clicked.connect(self._nfit_select_folders_clicked)
+        self.btn_nfit_current_only.clicked.connect(self._nfit_use_current_folder_only)
+        self.btn_nfit_refresh.clicked.connect(lambda: self._refresh_analysis_views(reset_manual=False))
+        self.analysis_pages.currentChanged.connect(lambda *_args: self._render_analysis_plots())
 
         for key in self._manual_controls:
             controls = self._manual_controls[key]
@@ -712,6 +771,47 @@ class FittingAnalysisWidget(QWidget):
             return ""
         return ", ".join(f"{filter_id}={transmission:g}" for filter_id, transmission in filters.items())
 
+    def _parse_nfit_group_paths(self) -> List[str]:
+        lines = []
+        for raw_line in self.txt_nfit_group_paths.toPlainText().splitlines():
+            line = raw_line.strip()
+            if line:
+                lines.append(line)
+        return lines
+
+    def _set_nfit_group_paths(self, paths: List[str]) -> None:
+        self.txt_nfit_group_paths.blockSignals(True)
+        try:
+            self.txt_nfit_group_paths.setPlainText("\n".join(str(path) for path in paths if str(path).strip()))
+        finally:
+            self.txt_nfit_group_paths.blockSignals(False)
+
+    def _select_multiple_directories(self, start_dir: Optional[Path] = None) -> List[str]:
+        dialog = QFileDialog(self, "Select experiment folders", str(start_dir or self._current_dir or Path.cwd()))
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+
+        for view in dialog.findChildren(QListView):
+            view.setSelectionMode(view.SelectionMode.ExtendedSelection)
+        for view in dialog.findChildren(QTreeView):
+            view.setSelectionMode(view.SelectionMode.ExtendedSelection)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return []
+        return [str(Path(path)) for path in dialog.selectedFiles() if str(path).strip()]
+
+    def _nfit_select_folders_clicked(self):
+        selected = self._select_multiple_directories()
+        if not selected:
+            return
+        self._set_nfit_group_paths(selected)
+        self._refresh_analysis_views(reset_manual=False)
+
+    def _nfit_use_current_folder_only(self):
+        self._set_nfit_group_paths([])
+        self._refresh_analysis_views(reset_manual=False)
+
     def _append_selected_filter_preset(self):
         entry = self._selected_filter_entry()
         if entry is None:
@@ -851,6 +951,11 @@ class FittingAnalysisWidget(QWidget):
         else:
             filter_text = ""
         self.le_filters.setText(filter_text)
+        raw_group_paths = meta.get("n_fit_group_paths")
+        if isinstance(raw_group_paths, list):
+            self._set_nfit_group_paths([str(path) for path in raw_group_paths])
+        else:
+            self._set_nfit_group_paths([])
         self._sync_reference_presets_from_meta(meta)
 
     def _sync_reference_presets_from_meta(self, meta: Dict[str, Any]):
@@ -937,6 +1042,11 @@ class FittingAnalysisWidget(QWidget):
             payload["filters"] = self._parse_filters_text(filters_text)
         else:
             payload["filters"] = {}
+        n_fit_group_paths = self._parse_nfit_group_paths()
+        if n_fit_group_paths:
+            payload["n_fit_group_paths"] = n_fit_group_paths
+        else:
+            payload.pop("n_fit_group_paths", None)
         payload = self.extrema_widget.merge_into_metadata(payload)
         return payload
 
@@ -1028,6 +1138,22 @@ class FittingAnalysisWidget(QWidget):
             ("minima_count", "Minima count"),
             ("n_count", "Lc pair count"),
             ("n_peaks", "Peak count"),
+            ("group_size", "Group size"),
+            ("phase_pair_count", "Phase pair count"),
+            ("n_fit_cost", "n-fit cost"),
+            ("n_fit_success", "n-fit success"),
+            ("dn_w_a", "dn w a"),
+            ("dn_w_b", "dn w b"),
+            ("dn_w_c", "dn w c"),
+            ("dn_2w_a", "dn 2w a"),
+            ("dn_2w_b", "dn 2w b"),
+            ("dn_2w_c", "dn 2w c"),
+            ("n_w_a", "n w a"),
+            ("n_w_b", "n w b"),
+            ("n_w_c", "n w c"),
+            ("n_2w_a", "n 2w a"),
+            ("n_2w_b", "n 2w b"),
+            ("n_2w_c", "n 2w c"),
         ]:
             if key in fit_payload:
                 rows.append((label, fit_payload.get(key)))
@@ -1045,6 +1171,7 @@ class FittingAnalysisWidget(QWidget):
         if self._df is None or self._current_dir is None:
             self._analysis_context = {}
             self._clear_plots()
+            self._clear_nfit_measurements("Load a result folder first.")
             return
         self._analysis_context = self._prepare_analysis_context()
         if reset_manual or not self._manual_controls_ready():
@@ -1121,6 +1248,11 @@ class FittingAnalysisWidget(QWidget):
                 "x_label": self._x_axis_label(analysis.meta, prepared),
             }
         )
+        if hasattr(strategy, "_load_measurement_group"):
+            try:
+                context["n_fit_group"] = strategy._load_measurement_group()
+            except Exception as e:
+                context["n_fit_group_error"] = str(e)
         return context
 
     def _unwrap_data_and_aux(self, result: Any) -> Tuple[pd.DataFrame, Dict[str, Any]]:
@@ -1135,8 +1267,16 @@ class FittingAnalysisWidget(QWidget):
             return np.asarray(model, dtype=float), aux if isinstance(aux, dict) else {}
         return np.asarray(result, dtype=float), {}
 
-    def _evaluate_strategy_curves(self, strategy: Any, L_value: float, x: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    def _evaluate_strategy_curves(
+        self,
+        strategy: Any,
+        L_value: float,
+        x: np.ndarray,
+        dn_override: Optional[Dict[str, float]] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
         override = {"L": L_value, "theta_deg": x}
+        if dn_override:
+            override["dn_override"] = dn_override
         fit_base, fit_aux = self._unwrap_model_and_aux(
             strategy._maker_fringes(override=override, return_aux=True)
         )
@@ -1630,9 +1770,17 @@ class FittingAnalysisWidget(QWidget):
         y = np.asarray(context["display_y"], dtype=float)
         L_value = self._manual_value("L")
         peak_value = self._manual_value("peak")
+        dn_override = self._dn_override_from_saved_fit(
+            context.get("saved_fit", {}) if isinstance(context.get("saved_fit"), dict) else {}
+        )
 
         try:
-            fit_base, env_base, fit_aux = self._evaluate_strategy_curves(strategy, L_value, x)
+            fit_base, env_base, fit_aux = self._evaluate_strategy_curves(
+                strategy,
+                L_value,
+                x,
+                dn_override=dn_override or None,
+            )
         except Exception as e:
             return {"error": f"Failed to evaluate current fit: {e}"}
 
@@ -1659,8 +1807,17 @@ class FittingAnalysisWidget(QWidget):
         x = np.asarray(context["display_x"], dtype=float)
         point_count = max(4001, len(x) * 5 if len(x) else 4001)
         grid = np.linspace(float(np.nanmin(x)), float(np.nanmax(x)), point_count)
+        dn_override = self._dn_override_from_saved_fit(
+            context.get("saved_fit", {}) if isinstance(context.get("saved_fit"), dict) else {}
+        )
         theory = peak_value * np.asarray(
-            strategy._maker_fringes(override={"L": L_value, "theta_deg": grid}),
+            strategy._maker_fringes(
+                override={
+                    "L": L_value,
+                    "theta_deg": grid,
+                    **({"dn_override": dn_override} if dn_override else {}),
+                }
+            ),
             dtype=float,
         )
         return pd.DataFrame(
@@ -1696,12 +1853,175 @@ class FittingAnalysisWidget(QWidget):
             return {"result": result, "aux": aux, "source": source, "data": lc_data}
         except Exception as e:
             return {"error": str(e), "source": source}
+
+    def _dn_override_from_saved_fit(self, fit_payload: Dict[str, Any]) -> Dict[str, float]:
+        dn_override: Dict[str, float] = {}
+        for key in ("dn_w_a", "dn_w_b", "dn_w_c", "dn_2w_a", "dn_2w_b", "dn_2w_c"):
+            value = self._safe_float(fit_payload.get(key))
+            if np.isfinite(value):
+                dn_override[key] = float(value)
+        return dn_override
+
+    def _nfit_group_result_by_source(self) -> Dict[str, Dict[str, Any]]:
+        raw = self._meta.get("n_fit_group_results")
+        if not isinstance(raw, list):
+            return {}
+        mapping: Dict[str, Dict[str, Any]] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("source_dir") or "").strip()
+            if key:
+                mapping[key] = entry
+        return mapping
+
+    def _render_nfit_page(self):
+        context = self._analysis_context
+        if not context:
+            self._clear_nfit_measurements("Load a result folder first.")
+            return
+        if context.get("error"):
+            self._clear_nfit_measurements(str(context["error"]))
+            return
+
+        strategy = context.get("strategy")
+        if not hasattr(strategy, "_load_measurement_group"):
+            self._clear_nfit_measurements("Select a global refractive-index fitting strategy to use this page.")
+            return
+
+        group_error = context.get("n_fit_group_error")
+        if group_error:
+            self._clear_nfit_measurements(f"Grouped measurement preview is unavailable: {group_error}")
+            return
+
+        measurements = context.get("n_fit_group")
+        if not isinstance(measurements, list) or len(measurements) == 0:
+            self._clear_nfit_measurements("No grouped measurements are available.")
+            return
+
+        fit_payload = context.get("saved_fit", {}) if isinstance(context.get("saved_fit"), dict) else {}
+        dn_override = self._dn_override_from_saved_fit(fit_payload)
+        group_results = self._nfit_group_result_by_source()
+        self._clear_nfit_measurements()
+
+        has_saved_global_fit = bool(dn_override)
+        summary_lines = [
+            f"Measurements in group: {len(measurements)}",
+        ]
+        if has_saved_global_fit:
+            summary_lines.append(
+                "Saved dn: "
+                + ", ".join(f"{key}={value:+.5f}" for key, value in dn_override.items())
+            )
+        else:
+            summary_lines.append("No saved dn values yet. Run the global n-fit strategy to overlay fitted curves.")
+        self.lbl_nfit_hint.setText("\n".join(summary_lines))
+
+        for measurement in measurements:
+            meta = measurement["meta"]
+            prepared = measurement["data"]
+            x = np.asarray(prepared.get("position_centered", prepared["position"]), dtype=float)
+            y = np.asarray(prepared.get("offset_corrected", prepared["intensity_corrected"]), dtype=float)
+            minima_idx = np.asarray(measurement.get("minima_idx", []), dtype=int)
+
+            title = (
+                f"{meta.get('sample') or meta.get('sample_id') or 'measurement'} | "
+                f"in {meta.get('input_polarization')} / out {meta.get('detected_polarization')}"
+            )
+            group_box = QGroupBox(title)
+            box_layout = QVBoxLayout(group_box)
+
+            info_lines = [
+                f"cut={meta.get('crystal_orientation')}, axis={meta.get('rot/trans_axis')}, material={meta.get('material')}",
+            ]
+            result_entry = group_results.get(str(measurement.get("source_dir") or ""))
+            fitted_L = None
+            if isinstance(result_entry, dict):
+                fitted_L = self._safe_float(result_entry.get("L_mm"))
+                dL_mm = self._safe_float(result_entry.get("dL_mm"))
+                if np.isfinite(fitted_L):
+                    if np.isfinite(dL_mm):
+                        info_lines.append(f"L = {fitted_L:.6f} mm (dL = {1000.0 * dL_mm:+.2f} um)")
+                    else:
+                        info_lines.append(f"L = {fitted_L:.6f} mm")
+            if not np.isfinite(self._safe_float(fitted_L)):
+                info_lines.append(f"L0 = {float(measurement['L0_mm']):.6f} mm")
+            info_lines.append(f"minima={len(minima_idx)}, phase pairs={len(measurement.get('phase_pairs_deg', []))}")
+
+            info_label = QLabel("\n".join(info_lines))
+            info_label.setWordWrap(True)
+            info_label.setStyleSheet("color: gray;")
+            box_layout.addWidget(info_label)
+
+            canvas = MplCanvas(group_box, width=6.2, height=2.8)
+            canvas.setFixedHeight(260)
+            ax = canvas.ax
+            ax.plot(x, y, linestyle="none", marker="o", markersize=2.5, label="Data")
+
+            if has_saved_global_fit:
+                L_value = fitted_L if np.isfinite(self._safe_float(fitted_L)) else float(measurement["L0_mm"])
+                try:
+                    model = np.asarray(
+                        measurement["strategy"]._maker_fringes(
+                            override={
+                                "meta": measurement["meta"],
+                                "data": measurement["data"],
+                                "theta_deg": x,
+                                "L": float(L_value),
+                                "dn_override": dn_override,
+                            }
+                        ),
+                        dtype=float,
+                    )
+                    finite = np.isfinite(model) & np.isfinite(y)
+                    if np.any(finite):
+                        denom = float(np.dot(model[finite], model[finite]))
+                        if denom > 0.0:
+                            peak = float(np.dot(model[finite], y[finite]) / denom)
+                            fit_curve = peak * model
+                            ax.plot(x, fit_curve, linewidth=1.4, label="Global n-fit")
+                except Exception as exc:
+                    info_label.setText(info_label.text() + f"\nfit overlay error: {exc}")
+
+            ax.set_xlabel("Incidence angle (deg.)")
+            ax.set_ylabel("Signal (V)")
+            ax.grid(True, which="both", alpha=0.25)
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend(loc="best", fontsize=9)
+            canvas.figure.tight_layout()
+            canvas.draw()
+            box_layout.addWidget(canvas)
+            self.nfit_measurements_layout.addWidget(group_box)
+
+        self.nfit_measurements_layout.addStretch(1)
+
+    def _clear_nfit_measurements(self, message: Optional[str] = None):
+        while self.nfit_measurements_layout.count():
+            item = self.nfit_measurements_layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.deleteLater()
+            elif child_layout is not None:
+                while child_layout.count():
+                    sub_item = child_layout.takeAt(0)
+                    sub_widget = sub_item.widget()
+                    if sub_widget is not None:
+                        sub_widget.deleteLater()
+        if message:
+            label = QLabel(message)
+            label.setWordWrap(True)
+            label.setStyleSheet("color: gray;")
+            self.nfit_measurements_layout.addWidget(label)
+            self.lbl_nfit_hint.setText(message)
     
     def _render_analysis_plots(self):
         self._update_plot_tab_visibility()
         self._update_all_canvas_heights()
         if not self._analysis_context:
             self._clear_plots()
+            self._clear_nfit_measurements("Load a result folder first.")
             self.btn_apply_manual.setEnabled(False)
             return
         if self._analysis_context.get("error"):
@@ -1710,6 +2030,7 @@ class FittingAnalysisWidget(QWidget):
             for canvas in [self.canvas_resid, self.canvas_centering, self.canvas_lc]:
                 self._show_plot_message(canvas, message)
             self.extrema_widget.show_message(message)
+            self._clear_nfit_measurements(message)
             self.btn_apply_manual.setEnabled(False)
             self.lbl_manual_hint.setText(f"Fitting unavailable. Showing data only. {message}")
             return
@@ -1721,6 +2042,7 @@ class FittingAnalysisWidget(QWidget):
             for canvas in [self.canvas_resid, self.canvas_centering, self.canvas_lc]:
                 self._show_plot_message(canvas, message)
             self.extrema_widget.show_message(message)
+            self._clear_nfit_measurements(message)
             self.btn_apply_manual.setEnabled(False)
             notes = self._analysis_context.get("notes") or []
             note_text = "" if not notes else " | " + " | ".join(str(note) for note in notes)
@@ -1738,6 +2060,7 @@ class FittingAnalysisWidget(QWidget):
         self._render_centering_plot()
         self._render_extrema_plot(live, extrema)
         self._render_lc_plot(lc_info)
+        self._render_nfit_page()
         self.btn_apply_manual.setEnabled("error" not in live)
 
         notes = self._analysis_context.get("notes") or []
