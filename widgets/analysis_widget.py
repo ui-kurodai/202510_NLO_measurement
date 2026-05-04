@@ -423,6 +423,13 @@ class FittingAnalysisWidget(QWidget):
             decimals=2,
             step=0.01,
         )
+        self.sb_manual_centering = QDoubleSpinBox()
+        self.sb_manual_centering.setLocale(QLocale.c())
+        self.sb_manual_centering.setRange(-1e6, 1e6)
+        self.sb_manual_centering.setDecimals(4)
+        self.sb_manual_centering.setSingleStep(0.0001)
+        self.sb_manual_centering.setKeyboardTracking(False)
+        form.addRow("Centering:", self.sb_manual_centering)
         layout.addLayout(form)
 
         buttons = QHBoxLayout()
@@ -434,7 +441,7 @@ class FittingAnalysisWidget(QWidget):
         layout.addLayout(buttons)
 
         self.lbl_manual_hint = QLabel(
-            "The live overlay uses the current L and Peak values. Overwrite updates saved fit values."
+            "The live overlay uses the current L, Peak, and Centering values. Overwrite updates saved fit values."
         )
         self.lbl_manual_hint.setWordWrap(True)
         self.lbl_manual_hint.setStyleSheet("color: gray;")
@@ -575,6 +582,7 @@ class FittingAnalysisWidget(QWidget):
         self.chk_fit_show_data.stateChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_fitting.stateChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_envelope.stateChanged.connect(lambda *_args: self._render_analysis_plots())
+        self.sb_manual_centering.valueChanged.connect(lambda *_args: self._render_analysis_plots())
         self.btn_nfit_select_folders.clicked.connect(self._nfit_select_folders_clicked)
         self.btn_nfit_current_only.clicked.connect(self._nfit_use_current_folder_only)
         self.btn_nfit_refresh.clicked.connect(lambda: self._refresh_analysis_views(reset_manual=False))
@@ -1427,6 +1435,7 @@ class FittingAnalysisWidget(QWidget):
         for key, label in [
             ("L_mm", "Corrected L [mm]"),
             ("L_mm_std", "Corrected L std [mm]"),
+            ("centering_pos", "Centering position"),
             ("k_scale", "k scale"),
             ("k_scale_std", "k scale std"),
             ("Pm0", "Peak Pm0"),
@@ -2006,7 +2015,7 @@ class FittingAnalysisWidget(QWidget):
     def _manual_controls_ready(self) -> bool:
         if not self._manual_controls:
             return False
-        return all(np.isfinite(float(controls["value"].value())) for controls in self._manual_controls.values())
+        return all(np.isfinite(float(controls["value"].value())) for controls in self._manual_controls.values()) and np.isfinite(float(self.sb_manual_centering.value()))
 
     def _initialize_manual_controls_from_context(self):
         context = self._analysis_context
@@ -2028,9 +2037,17 @@ class FittingAnalysisWidget(QWidget):
             peak_span = max(5.0 * peak_std, max(y_max, auto_peak) * 0.1)
         else:
             peak_span = max(abs(auto_peak) * 0.5, y_max * 0.5, 0.5)
+        centering_value = self._safe_float(saved_fit.get("centering_pos"))
+        if not np.isfinite(centering_value):
+            centering_info = context.get("centering_info")
+            if isinstance(centering_info, dict):
+                centering_value = self._safe_float(centering_info.get("c_best"))
+        if not np.isfinite(centering_value):
+            centering_value = 0.0
 
         self._set_manual_control("L", auto_L - l_span, auto_L + l_span, auto_L)
         self._set_manual_control("peak", 0.0, max(auto_peak + peak_span, peak_span), max(auto_peak, 0.0))
+        self.sb_manual_centering.setValue(float(centering_value))
 
     def _set_manual_control(self, key: str, minimum: float, maximum: float, value: float):
         controls = self._manual_controls[key]
@@ -2119,15 +2136,39 @@ class FittingAnalysisWidget(QWidget):
     def _manual_value(self, key: str) -> float:
         return float(self._manual_controls[key]["value"].value())
 
+    def _manual_centering_value(self) -> float:
+        return float(self.sb_manual_centering.value())
+
+    def _current_prepared_data(self) -> pd.DataFrame:
+        context = self._analysis_context
+        prepared = context.get("prepared_data")
+        if not isinstance(prepared, pd.DataFrame):
+            return pd.DataFrame()
+        current = prepared.copy()
+        if "position" in current.columns:
+            current["position_centered"] = np.asarray(current["position"], dtype=float) - self._manual_centering_value()
+        return current
+
+    def _current_display_xy(self) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+        current = self._current_prepared_data()
+        if current.empty:
+            return np.array([], dtype=float), np.array([], dtype=float), current
+        x = np.asarray(current.get("position_centered", current["position"]), dtype=float)
+        if "offset_corrected" in current.columns:
+            y = np.asarray(current["offset_corrected"], dtype=float)
+        elif "intensity_corrected" in current.columns:
+            y = np.asarray(current["intensity_corrected"], dtype=float)
+        else:
+            y = np.asarray(current["ch2"], dtype=float)
+        return x, y, current
+
     def _compute_auto_extrema_info(self) -> Dict[str, Any]:
         context = self._analysis_context
         if context.get("error"):
             return {"error": context["error"]}
 
         strategy = context["strategy"]
-        x = np.asarray(context["display_x"], dtype=float)
-        y = np.asarray(context["display_y"], dtype=float)
-        prepared = context["prepared_data"]
+        x, y, prepared = self._current_display_xy()
         info: Dict[str, Any] = {"minima_idx": np.array([], dtype=int), "maxima_idx": np.array([], dtype=int)}
 
         try:
@@ -2150,8 +2191,7 @@ class FittingAnalysisWidget(QWidget):
             return {"error": context["error"]}
 
         strategy = context["strategy"]
-        x = np.asarray(context["display_x"], dtype=float)
-        y = np.asarray(context["display_y"], dtype=float)
+        x, y, _prepared = self._current_display_xy()
         L_value = self._manual_value("L")
         peak_value = self._manual_value("peak")
         dn_override = self._dn_override_from_saved_fit(
@@ -2180,6 +2220,7 @@ class FittingAnalysisWidget(QWidget):
             "residual": residual,
             "L_value": L_value,
             "peak_value": peak_value,
+            "centering_value": self._manual_centering_value(),
             "fit_curve_raw": fit_curve + float(context.get("offset", 0.0)),
             "fit_aux": fit_aux,
             "d_factor": fit_aux.get("d_factor"),
@@ -2188,7 +2229,7 @@ class FittingAnalysisWidget(QWidget):
     def _make_fit_theory_dataframe(self, L_value: float, peak_value: float) -> pd.DataFrame:
         context = self._analysis_context
         strategy = context["strategy"]
-        x = np.asarray(context["display_x"], dtype=float)
+        x, _y, _prepared = self._current_display_xy()
         point_count = max(4001, len(x) * 5 if len(x) else 4001)
         grid = np.linspace(float(np.nanmin(x)), float(np.nanmax(x)), point_count)
         dn_override = self._dn_override_from_saved_fit(
@@ -2223,7 +2264,7 @@ class FittingAnalysisWidget(QWidget):
 
         source = self.cmb_lc_source.currentData() or "data"
         try:
-            lc_data = self._make_fit_theory_dataframe(L_value, peak_value) if source == "fit" else context["prepared_data"].copy()
+            lc_data = self._make_fit_theory_dataframe(L_value, peak_value) if source == "fit" else self._current_prepared_data()
             minima_override = None
             if source == "data":
                 minima_override = self.extrema_widget.saved_minima_indices()
@@ -2449,21 +2490,19 @@ class FittingAnalysisWidget(QWidget):
 
         notes = self._analysis_context.get("notes") or []
         self.lbl_manual_hint.setText(
-            "The live overlay uses the current L and Peak values. Overwrite updates saved fit values."
+            "The live overlay uses the current L, Peak, and Centering values. Overwrite updates saved fit values."
             if not notes else
-            "The live overlay uses the current L and Peak values. " + " | ".join(str(note) for note in notes)
+            "The live overlay uses the current L, Peak, and Centering values. " + " | ".join(str(note) for note in notes)
         )
 
     def _render_fit_data_only_plot(self, error_message: str):
         self.canvas_fit.clear()
         ax = self.canvas_fit.ax
         context = self._analysis_context or {}
+        x, y, current = self._current_display_xy()
         data = self._df
-        display_x = context.get("display_x")
-        display_y = context.get("display_y")
-        if display_x is not None and display_y is not None:
-            x = np.asarray(display_x, dtype=float)
-            y = np.asarray(display_y, dtype=float)
+        if x.size and y.size:
+            pass
         elif data is None or data.empty:
             self._show_plot_message(self.canvas_fit, error_message)
             return
@@ -2478,7 +2517,7 @@ class FittingAnalysisWidget(QWidget):
         else:
             x = np.arange(len(data), dtype=float)
 
-        if display_x is None or display_y is None:
+        if not (x.size and y.size):
             if "offset_corrected" in data.columns:
                 y = np.asarray(data["offset_corrected"], dtype=float)
             elif "intensity_corrected" in data.columns:
@@ -2697,6 +2736,7 @@ class FittingAnalysisWidget(QWidget):
         fit_result = {
             "L_mm": float(live["L_value"]),
             "L_mm_std": 0.0,
+            "centering_pos": self._manual_centering_value(),
             "k_scale": float(live["peak_value"]),
             "k_scale_std": 0.0,
             "Pm0": float(live["peak_value"]),
@@ -2733,7 +2773,7 @@ class FittingAnalysisWidget(QWidget):
 
         try:
             csv_df = pd.read_csv(self.csv_path)
-            prepared = self._analysis_context.get("prepared_data")
+            prepared = self._current_prepared_data()
             if isinstance(prepared, pd.DataFrame) and len(prepared) == len(csv_df):
                 for column in ("position_centered", "offset_corrected"):
                     if column in prepared.columns:
@@ -2751,7 +2791,7 @@ class FittingAnalysisWidget(QWidget):
             QMessageBox.warning(self, "Reload failed", msg)
             return
         self._populate_table_from_json(meta)
-        QMessageBox.information(self, "Saved", "Current L and Peak values were written to JSON/CSV.")
+        QMessageBox.information(self, "Saved", "Current L, Peak, and Centering values were written to JSON/CSV.")
 
     def _clear_plots(self):
         for canvas in [self.canvas_fit, self.canvas_resid, self.canvas_centering, self.canvas_lc]:
