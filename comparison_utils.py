@@ -91,7 +91,7 @@ def compare_experiment_folders(
         return [], warnings
 
     results = compare_measurement_pair(
-        key=target_json_path.name,
+        key=_comparison_pair_key(reference_json_path, target_json_path),
         reference_root=reference_root,
         target_root=target_root,
         reference_json_path=reference_json_path,
@@ -119,7 +119,7 @@ def compare_reference_folder_to_target_json(
         return [], warnings
 
     results = compare_measurement_pair(
-        key=target_json_path.name,
+        key=_comparison_pair_key(reference_json_path, target_json_path),
         reference_root=reference_root,
         target_root=target_json_path.parent,
         reference_json_path=reference_json_path,
@@ -188,7 +188,7 @@ def compare_measurement_pair(
         reference_variant, selection_warning = _select_reference_variant(target_variant, reference_variants, reference_meta)
         result = ComparisonResult(
             key=f"{key}::{target_variant['strategy'] or 'legacy'}",
-            relative_path=key,
+            relative_path=target_json_path.name,
             reference_json_path=reference_json_path,
             target_json_path=target_json_path,
             reference_strategy=str((reference_variant or {}).get("strategy") or ""),
@@ -634,3 +634,7 @@ def _filter_csv_registration_map() -> dict[str, bool]:
 
 def _filter_has_registered_csv(filter_id: str) -> bool:
     return _filter_csv_registration_map().get(str(filter_id), False)
+
+
+def _comparison_pair_key(reference_json_path: Path, target_json_path: Path) -> str:
+    return f"{reference_json_path.resolve()}::{target_json_path.resolve()}"

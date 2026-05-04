@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QFileDialog,
+    QFrame,
     QFormLayout,
     QGroupBox,
     QHeaderView,
@@ -17,6 +18,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -74,11 +76,132 @@ class DraggableTableWidget(QTableWidget):
         super().mouseReleaseEvent(event)
 
 
-class ComparisonWidget(QWidget):
-    def __init__(self, parent=None):
+class ReferenceSelectionGroup(QGroupBox):
+    def __init__(self, index: int, parent=None):
         super().__init__(parent)
         self.reference_root: Path | None = None
         self.target_roots: list[Path] = []
+        self._index = index
+        self._build_ui()
+        self.set_index(index)
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        button_row = QHBoxLayout()
+        self.btn_select_reference = QPushButton("Select Reference Folder...")
+        self.btn_select_target = QPushButton("Select Target Folders...")
+        self.btn_remove = QPushButton("Remove Set")
+        button_row.addWidget(self.btn_select_reference)
+        button_row.addWidget(self.btn_select_target)
+        button_row.addStretch(1)
+        button_row.addWidget(self.btn_remove)
+        layout.addLayout(button_row)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+
+        self.lbl_reference_folder = QLabel("(not selected)")
+        self.lbl_reference_folder.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_reference_info = QLabel("(not loaded)")
+        self.lbl_reference_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_target_folders = QLabel("(not selected)")
+        self.lbl_target_folders.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        self.sb_reference_d = QDoubleSpinBox()
+        self.sb_reference_d.setRange(-1e6, 1e6)
+        self.sb_reference_d.setDecimals(6)
+        self.sb_reference_d.setSingleStep(0.01)
+        self.sb_reference_d.setValue(0.3)
+
+        form.addRow("Reference:", self.lbl_reference_folder)
+        form.addRow("Info:", self.lbl_reference_info)
+        form.addRow("Targets:", self.lbl_target_folders)
+        form.addRow("Reference d:", self.sb_reference_d)
+        layout.addLayout(form)
+
+    def set_index(self, index: int) -> None:
+        self._index = index
+        title = f"Reference Set {index}"
+        if self.reference_root is not None:
+            title += f" | {self.reference_root.name}"
+        self.setTitle(title)
+
+    def is_empty(self) -> bool:
+        return self.reference_root is None and not self.target_roots
+
+    def is_complete(self) -> bool:
+        return self.reference_root is not None and bool(self.target_roots)
+
+    def reference_d_value(self) -> float:
+        return float(self.sb_reference_d.value())
+
+    def reference_name(self) -> str:
+        return self.reference_root.name if self.reference_root is not None else f"Reference {self._index}"
+
+    def set_reference_root(self, root: Path | None) -> None:
+        self.reference_root = root
+        if root is None:
+            self.lbl_reference_folder.setText("(not selected)")
+            self.lbl_reference_folder.setToolTip("")
+            self.lbl_reference_info.setText("(not loaded)")
+            self.lbl_reference_info.setToolTip("")
+        else:
+            self.lbl_reference_folder.setText(root.name)
+            self.lbl_reference_folder.setToolTip(str(root))
+        self.set_index(self._index)
+
+    def set_target_roots(self, roots: list[Path]) -> None:
+        self.target_roots = list(roots)
+        if not self.target_roots:
+            self.lbl_target_folders.setText("(not selected)")
+            self.lbl_target_folders.setToolTip("")
+            return
+
+        self.lbl_target_folders.setText(_summarize_path_names(self.target_roots))
+        self.lbl_target_folders.setToolTip("\n".join(str(path) for path in self.target_roots))
+
+    def refresh_reference_info(self) -> list[str]:
+        self.lbl_reference_info.setText("(not loaded)")
+        self.lbl_reference_info.setToolTip("")
+        if self.reference_root is None:
+            return []
+
+        meta, _json_path, warnings = load_single_measurement_json(self.reference_root)
+        if meta is None:
+            self.lbl_reference_info.setText("(unavailable)")
+            return warnings
+
+        summary = extract_measurement_summary(meta)
+        fitting_entries = normalize_fitting_entries(meta)
+        strategy_names = [str(entry.get("strategy") or "(legacy)") for entry in fitting_entries] or ["(no saved fit)"]
+        info_parts = [
+            summary["sample"] or "(empty sample)",
+            summary["thickness"] or "thickness ?",
+            _compact_polarization_text(summary["input_polarization"], summary["detected_polarization"]),
+            ", ".join(strategy_names),
+        ]
+        compact_text = " | ".join(part for part in info_parts if part)
+        self.lbl_reference_info.setText(compact_text or "(empty)")
+
+        tooltip_lines = [
+            f"Sample: {summary['sample'] or '(empty)'}",
+            f"Thickness: {summary['thickness'] or '(empty)'}",
+            f"Input pol.: {summary['input_polarization'] or '(empty)'}",
+            f"Detected pol.: {summary['detected_polarization'] or '(empty)'}",
+            f"Fitting: {', '.join(strategy_names)}",
+        ]
+        self.lbl_reference_info.setToolTip("\n".join(tooltip_lines))
+        return warnings
+
+
+class ComparisonWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._reference_groups: list[ReferenceSelectionGroup] = []
         self._results: list[ComparisonResult] = []
         self._row_enabled: dict[str, bool] = {}
         self._manual_row_order: list[str] = []
@@ -94,51 +217,41 @@ class ComparisonWidget(QWidget):
         layout.setSpacing(8)
 
         button_row = QHBoxLayout()
-        self.btn_select_reference = QPushButton("Select Reference Folder...")
-        self.btn_select_target = QPushButton("Select Target Folders...")
+        self.btn_add_reference = QPushButton("Add Reference...")
         self.btn_compare = QPushButton("Compare")
         self.btn_write_json = QPushButton("Write to Target JSON")
         self.btn_write_json.setEnabled(False)
-        button_row.addWidget(self.btn_select_reference)
-        button_row.addWidget(self.btn_select_target)
+        button_row.addWidget(self.btn_add_reference)
         button_row.addStretch(1)
         button_row.addWidget(self.btn_compare)
         button_row.addWidget(self.btn_write_json)
         layout.addLayout(button_row)
 
-        config_group = QGroupBox("Comparison Setup")
-        config_form = QFormLayout(config_group)
-        self.lbl_reference_folder = QLabel("(not selected)")
-        self.lbl_target_folders = QLabel("(not selected)")
-        self.lbl_reference_sample = QLabel("(not loaded)")
-        self.lbl_reference_thickness = QLabel("(not loaded)")
-        self.lbl_reference_in_pol = QLabel("(not loaded)")
-        self.lbl_reference_out_pol = QLabel("(not loaded)")
-        self.lbl_reference_strategy = QLabel("(not loaded)")
-        self.lbl_reference_folder.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.lbl_target_folders.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.lbl_target_folders.setWordWrap(True)
-        self.sb_reference_d = QDoubleSpinBox()
-        self.sb_reference_d.setRange(-1e6, 1e6)
-        self.sb_reference_d.setDecimals(6)
-        self.sb_reference_d.setSingleStep(0.01)
-        self.sb_reference_d.setValue(0.3)
-        config_form.addRow("Reference folder:", self.lbl_reference_folder)
-        config_form.addRow("Reference sample:", self.lbl_reference_sample)
-        config_form.addRow("Reference thickness:", self.lbl_reference_thickness)
-        config_form.addRow("Reference input pol.:", self.lbl_reference_in_pol)
-        config_form.addRow("Reference detected pol.:", self.lbl_reference_out_pol)
-        config_form.addRow("Reference fitting:", self.lbl_reference_strategy)
-        config_form.addRow("Target folder(s):", self.lbl_target_folders)
-        config_form.addRow("Reference d coefficient:", self.sb_reference_d)
-        layout.addWidget(config_group)
+        setup_group = QGroupBox("Comparison Setup")
+        setup_layout = QVBoxLayout(setup_group)
+        setup_layout.setContentsMargins(8, 8, 8, 8)
+        setup_layout.setSpacing(6)
+
+        self.reference_scroll = QScrollArea()
+        self.reference_scroll.setWidgetResizable(True)
+        self.reference_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.reference_scroll.setMaximumHeight(240)
+
+        self.reference_groups_container = QWidget()
+        self.reference_groups_layout = QVBoxLayout(self.reference_groups_container)
+        self.reference_groups_layout.setContentsMargins(0, 0, 0, 0)
+        self.reference_groups_layout.setSpacing(8)
+        self.reference_groups_layout.addStretch(1)
+        self.reference_scroll.setWidget(self.reference_groups_container)
+        setup_layout.addWidget(self.reference_scroll)
+        layout.addWidget(setup_group)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         table_panel = QWidget()
         table_layout = QVBoxLayout(table_panel)
         table_layout.setContentsMargins(0, 0, 0, 0)
-        self.lbl_summary = QLabel("Load two experiment folders and run comparison.")
+        self.lbl_summary = QLabel("Add at least one reference set, choose target folders, and run comparison.")
         table_layout.addWidget(self.lbl_summary)
         table_split = QHBoxLayout()
         table_split.setContentsMargins(0, 0, 0, 0)
@@ -157,9 +270,10 @@ class ComparisonWidget(QWidget):
         self.fixed_table.verticalHeader().setSectionsMovable(True)
         self.fixed_table.verticalHeader().sectionMoved.connect(self._sync_row_move_from_fixed)
 
-        self.table = DraggableTableWidget(0, 10)
+        self.table = DraggableTableWidget(0, 11)
         self.table.setHorizontalHeaderLabels(
             [
+                "Reference",
                 "Target sample",
                 "Filter diff",
                 "Peak ref",
@@ -202,33 +316,89 @@ class ComparisonWidget(QWidget):
 
         layout.addWidget(splitter, 1)
 
-        self.btn_select_reference.clicked.connect(self._select_reference_folder)
-        self.btn_select_target.clicked.connect(self._select_target_folder)
+        self.btn_add_reference.clicked.connect(self._handle_add_reference)
         self.btn_compare.clicked.connect(self._run_comparison)
         self.btn_write_json.clicked.connect(self._write_results)
+
+        self._add_reference_group()
 
     def _append_log(self, text: str) -> None:
         self.log_output.appendPlainText(text)
 
-    def _select_reference_folder(self) -> None:
-        start_dir = str(self.reference_root) if self.reference_root else "results"
+    def _add_reference_group(self) -> ReferenceSelectionGroup:
+        group = ReferenceSelectionGroup(len(self._reference_groups) + 1, self)
+        group.btn_select_reference.clicked.connect(lambda _checked=False, current=group: self._select_reference_for_group(current))
+        group.btn_select_target.clicked.connect(lambda _checked=False, current=group: self._select_targets_for_group(current))
+        group.btn_remove.clicked.connect(lambda _checked=False, current=group: self._remove_reference_group(current))
+        self._reference_groups.append(group)
+        self.reference_groups_layout.insertWidget(self.reference_groups_layout.count() - 1, group)
+        return group
+
+    def _remove_reference_group(self, group: ReferenceSelectionGroup) -> None:
+        if group not in self._reference_groups:
+            return
+        self._invalidate_results("Reference set removed. Run comparison again.")
+        self._reference_groups.remove(group)
+        self.reference_groups_layout.removeWidget(group)
+        group.deleteLater()
+        for index, current_group in enumerate(self._reference_groups, start=1):
+            current_group.set_index(index)
+        if not self._reference_groups:
+            self._add_reference_group()
+
+    def _handle_add_reference(self) -> None:
+        empty_group = next((group for group in self._reference_groups if group.is_empty()), None)
+        if empty_group is not None:
+            self._select_reference_for_group(empty_group)
+            return
+
+        group = self._add_reference_group()
+        if not self._select_reference_for_group(group) and group.is_empty():
+            self._remove_reference_group(group)
+
+    def _select_reference_for_group(self, group: ReferenceSelectionGroup) -> bool:
+        start_dir = str(group.reference_root) if group.reference_root else "results"
         folder = QFileDialog.getExistingDirectory(self, "Select reference experiment folder", start_dir)
         if not folder:
-            return
-        self.reference_root = Path(folder)
-        self.lbl_reference_folder.setText(str(self.reference_root))
-        self._refresh_reference_info()
+            return False
 
-    def _select_target_folder(self) -> None:
-        start_dir = str(self.target_roots[0]) if self.target_roots else "results"
+        group.set_reference_root(Path(folder))
+        self._invalidate_results("Reference changed. Run comparison again.")
+        warnings = group.refresh_reference_info()
+        for warning in warnings:
+            self._append_log(f"WARNING: {group.reference_name()}: {warning}")
+        return True
+
+    def _select_targets_for_group(self, group: ReferenceSelectionGroup) -> bool:
+        if group.target_roots:
+            start_dir = str(group.target_roots[0])
+        elif group.reference_root is not None:
+            start_dir = str(group.reference_root.parent)
+        else:
+            start_dir = "results"
+
         folders = self._select_target_directories_native(start_dir)
         if not folders:
-            return
-        self.target_roots = folders
-        self.lbl_target_folders.setText("\n".join(str(path) for path in self.target_roots))
+            return False
+
+        group.set_target_roots(folders)
+        self._invalidate_results("Target folders changed. Run comparison again.")
+        return True
+
+    def _invalidate_results(self, summary_text: str | None = None) -> None:
+        self._results = []
+        self._row_enabled.clear()
+        self._manual_row_order.clear()
+        self._displayed_result_keys.clear()
+        self.fixed_table.setRowCount(0)
+        self.table.setRowCount(0)
+        self.btn_write_json.setEnabled(False)
+        if summary_text:
+            self.lbl_summary.setText(summary_text)
 
     def _run_comparison(self) -> None:
         self.log_output.clear()
+        self.fixed_table.setRowCount(0)
         self.table.setRowCount(0)
         self._results = []
         self._row_enabled.clear()
@@ -236,35 +406,67 @@ class ComparisonWidget(QWidget):
         self._displayed_result_keys.clear()
         self.btn_write_json.setEnabled(False)
 
-        if self.reference_root is None or not self.target_roots:
-            QMessageBox.information(self, "Missing target", "Select one reference folder and at least one target folder first.")
+        ready_groups: list[ReferenceSelectionGroup] = []
+        incomplete_groups: list[str] = []
+        for group in self._reference_groups:
+            if group.is_empty():
+                continue
+            if group.is_complete():
+                ready_groups.append(group)
+            else:
+                incomplete_groups.append(group.title())
+
+        if incomplete_groups:
+            QMessageBox.information(
+                self,
+                "Incomplete setup",
+                "Complete both reference and target selection for:\n" + "\n".join(incomplete_groups),
+            )
             return
 
-        reference_d = float(self.sb_reference_d.value())
+        if not ready_groups:
+            QMessageBox.information(
+                self,
+                "Missing setup",
+                "Add at least one reference set with a reference folder and one or more target folders first.",
+            )
+            return
+
         all_results: list[ComparisonResult] = []
         all_warnings: list[str] = []
-        for target_root in self.target_roots:
-            results, warnings = compare_experiment_folders(
-                reference_root=self.reference_root,
-                target_root=target_root,
-                reference_d_value=reference_d,
-            )
-            all_results.extend(results)
-            for warning in warnings:
-                all_warnings.append(f"{target_root.name}: {warning}")
+        total_targets = 0
+        for group in ready_groups:
+            reference_root = group.reference_root
+            if reference_root is None:
+                continue
+
+            reference_d = group.reference_d_value()
+            total_targets += len(group.target_roots)
+            for target_root in group.target_roots:
+                results, warnings = compare_experiment_folders(
+                    reference_root=reference_root,
+                    target_root=target_root,
+                    reference_d_value=reference_d,
+                )
+                all_results.extend(results)
+                for warning in warnings:
+                    all_warnings.append(f"{reference_root.name} -> {target_root.name}: {warning}")
+
         self._results = all_results
         self._populate_table(all_results)
 
         ready_count = sum(1 for result in all_results if result.error is None)
         self.lbl_summary.setText(
-            f"Compared {len(self.target_roots)} target folder(s) | results {len(all_results)} | ready {ready_count} | reference d = {reference_d:g}"
+            f"Reference sets {len(ready_groups)} | target folders {total_targets} | results {len(all_results)} | ready {ready_count}"
         )
 
         for warning in all_warnings:
             self._append_log(f"WARNING: {warning}")
         for result in all_results:
             strategy_text = self._strategy_text(result)
-            self._append_log(f"{result.target_json_path.parent.name} [{strategy_text}]: {result.status_text}")
+            self._append_log(
+                f"{result.reference_json_path.parent.name} -> {result.target_json_path.parent.name} [{strategy_text}]: {result.status_text}"
+            )
 
         if all_results:
             self.btn_write_json.setEnabled(any(result.error is None for result in all_results))
@@ -296,7 +498,7 @@ class ComparisonWidget(QWidget):
         previous_group = None
 
         for row_index, result in enumerate(ordered_results):
-            current_group = str(result.target_json_path)
+            current_group = f"{result.reference_json_path.parent}::{result.target_json_path}"
             if current_group != previous_group:
                 group_index += 1
                 previous_group = current_group
@@ -327,6 +529,7 @@ class ComparisonWidget(QWidget):
                 self.fixed_table.setItem(row_index, column_index, item)
 
             values = [
+                result.reference_json_path.parent.name,
                 result.target_sample,
                 self._fmt(result.peak_ref),
                 self._fmt(result.peak_target),
@@ -338,14 +541,14 @@ class ComparisonWidget(QWidget):
                 self._status_text(result, enabled),
             ]
             for column_index, value in enumerate(values):
-                actual_column_index = column_index if column_index == 0 else column_index + 1
+                actual_column_index = column_index if column_index < 2 else column_index + 1
                 item = QTableWidgetItem(value)
                 self._style_item(item, base_color, enabled)
                 self.table.setItem(row_index, actual_column_index, item)
 
             self.table.setCellWidget(
                 row_index,
-                1,
+                2,
                 self._build_filter_diff_widget(result, base_color, enabled),
             )
 
@@ -357,25 +560,62 @@ class ComparisonWidget(QWidget):
         self.table.resizeColumnsToContents()
         self.fixed_table.setColumnWidth(1, max(self.fixed_table.columnWidth(1), 180))
         self.fixed_table.setColumnWidth(2, max(self.fixed_table.columnWidth(2), 220))
-        self.table.setColumnWidth(1, max(self.table.columnWidth(1), 400))
+        self.table.setColumnWidth(0, max(self.table.columnWidth(0), 180))
+        self.table.setColumnWidth(2, max(self.table.columnWidth(2), 400))
 
     def _write_results(self) -> None:
-        if self.reference_root is None:
-            QMessageBox.information(self, "Missing reference", "Select a reference folder first.")
-            return
-        if not self._results:
-            QMessageBox.information(self, "No results", "Run comparison first.")
+        selected_results = [result for result in self._results if self._row_enabled.get(result.key, True)]
+        if not selected_results:
+            message = "Run comparison first." if not self._results else "No visible rows are selected for saving."
+            QMessageBox.information(self, "No results", message)
             return
 
-        written, skipped, warnings = write_comparison_results(self.reference_root, self._results)
-        for warning in warnings:
+        conflicting_targets = self._find_conflicting_target_writes(selected_results)
+        if conflicting_targets:
+            QMessageBox.warning(
+                self,
+                "Conflicting references",
+                "The same target JSON is assigned to multiple references, so writing would overwrite results:\n"
+                + "\n".join(conflicting_targets),
+            )
+            return
+
+        grouped_results: dict[Path, list[ComparisonResult]] = {}
+        for result in selected_results:
+            grouped_results.setdefault(result.reference_json_path.parent, []).append(result)
+
+        written_total = 0
+        skipped_total = 0
+        warnings_total: list[str] = []
+        for reference_root, grouped in grouped_results.items():
+            written, skipped, warnings = write_comparison_results(reference_root, grouped)
+            written_total += written
+            skipped_total += skipped
+            warnings_total.extend(warnings)
+
+        for warning in warnings_total:
             self._append_log(f"WARNING: {warning}")
-        self._append_log(f"WRITE DONE | updated={written} | skipped={skipped}")
+        self._append_log(f"WRITE DONE | updated={written_total} | skipped={skipped_total}")
         QMessageBox.information(
             self,
             "Completed",
-            f"Updated: {written}\nSkipped: {skipped}",
+            f"Updated: {written_total}\nSkipped: {skipped_total}",
         )
+
+    def _find_conflicting_target_writes(self, results: list[ComparisonResult]) -> list[str]:
+        references_by_target: dict[Path, set[Path]] = {}
+        for result in results:
+            if result.error:
+                continue
+            references_by_target.setdefault(result.target_json_path, set()).add(result.reference_json_path.parent)
+
+        conflicts: list[str] = []
+        for target_json_path, reference_roots in sorted(references_by_target.items(), key=lambda item: str(item[0])):
+            if len(reference_roots) <= 1:
+                continue
+            reference_names = ", ".join(sorted(reference_root.name for reference_root in reference_roots))
+            conflicts.append(f"{target_json_path.parent.name} ({target_json_path.name}) <- {reference_names}")
+        return conflicts
 
     def _fmt(self, value: float | None) -> str:
         if value is None:
@@ -384,33 +624,6 @@ class ComparisonWidget(QWidget):
 
     def _strategy_text(self, result: ComparisonResult) -> str:
         return result.target_strategy or "(legacy)"
-
-    def _refresh_reference_info(self) -> None:
-        self.lbl_reference_sample.setText("(unavailable)")
-        self.lbl_reference_thickness.setText("(unavailable)")
-        self.lbl_reference_in_pol.setText("(unavailable)")
-        self.lbl_reference_out_pol.setText("(unavailable)")
-        self.lbl_reference_strategy.setText("(unavailable)")
-        if self.reference_root is None:
-            return
-
-        meta, _json_path, warnings = load_single_measurement_json(self.reference_root)
-        if warnings:
-            self._append_log(f"WARNING: {self.reference_root.name}: " + " | ".join(warnings))
-        if meta is None:
-            return
-
-        summary = extract_measurement_summary(meta)
-        self.lbl_reference_sample.setText(summary["sample"] or "(empty)")
-        self.lbl_reference_thickness.setText(summary["thickness"] or "(empty)")
-        self.lbl_reference_in_pol.setText(summary["input_polarization"] or "(empty)")
-        self.lbl_reference_out_pol.setText(summary["detected_polarization"] or "(empty)")
-        fitting_entries = normalize_fitting_entries(meta)
-        if fitting_entries:
-            strategy_names = [str(entry.get("strategy") or "(legacy)") for entry in fitting_entries]
-            self.lbl_reference_strategy.setText(", ".join(strategy_names))
-        else:
-            self.lbl_reference_strategy.setText("(no saved fit)")
 
     def _select_target_directories_native(self, start_dir: str) -> list[Path]:
         try:
@@ -548,3 +761,18 @@ class ComparisonWidget(QWidget):
             self.fixed_table.setCurrentCell(current_row, 1)
         finally:
             self._syncing_selection = False
+
+
+def _summarize_path_names(paths: list[Path], max_items: int = 3) -> str:
+    names = [path.name for path in paths]
+    if not names:
+        return "(not selected)"
+    if len(names) <= max_items:
+        return ", ".join(names)
+    return ", ".join(names[:max_items]) + f", +{len(names) - max_items} more"
+
+
+def _compact_polarization_text(input_pol: str, detected_pol: str) -> str:
+    input_text = input_pol or "?"
+    detected_text = detected_pol or "?"
+    return f"in {input_text} / out {detected_text}"
