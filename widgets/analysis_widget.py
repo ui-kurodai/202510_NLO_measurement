@@ -32,14 +32,16 @@ import numpy as np
 import pandas as pd
 
 from PyQt6.QtCore import Qt, QLocale, pyqtSignal
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtGui import QColor, QGuiApplication
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QPushButton, QLabel, QLineEdit, QComboBox,
     QFileDialog, QGroupBox, QMessageBox, QTabWidget,
     QTableWidget, QTableWidgetItem, QSizePolicy, QSplitter,
     QDoubleSpinBox, QSlider, QDialog, QDialogButtonBox, QCheckBox,
-    QScrollArea, QPlainTextEdit, QListView, QTreeView
+    QScrollArea, QPlainTextEdit, QListView, QTreeView,
+    QListWidget, QListWidgetItem, QMenu
 )
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -59,7 +61,13 @@ from measurement_metadata import (
     resolve_selected_filters,
     sample_metadata_from_entry,
 )
-from fitting_results import extract_fit_payload, merge_fit_payload, upsert_fitting_result
+from fitting_results import (
+    extract_fit_payload,
+    merge_fit_payload,
+    normalize_fitting_entries,
+    remove_fitting_results,
+    upsert_fitting_result,
+)
 from widgets.manual_extrema_detection_widget import ManualExtremaDetectionWidget
 # self made database
 # from crystaldatabase import CRYSTALS
@@ -93,6 +101,8 @@ class PlotSettings:
     font_size: float = 10.0
     show_legend: bool = True
     box_aspect: float = 0.0
+    data_plot_style: str = "markers"
+    show_fit_annotation: bool = True
     x_min: Optional[float] = None
     x_max: Optional[float] = None
     y_min: Optional[float] = None
@@ -115,6 +125,19 @@ class MplCanvas(FigureCanvas):
         self.ax.grid(True, which="both", alpha=0.25)
 
 
+class SavedStrategyListWidget(QListWidget):
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            item = self.itemAt(event.position().toPoint())
+            if item is None:
+                self.clearSelection()
+            elif not item.isSelected():
+                self.clearSelection()
+                item.setSelected(True)
+                self.setCurrentItem(item)
+        super().mousePressEvent(event)
+
+
 # ------------------------------- Main Tab -------------------------------
 class FittingAnalysisWidget(QWidget):
     folderLoaded = pyqtSignal(str)   # emits folder path when a folder has been loaded
@@ -131,6 +154,7 @@ class FittingAnalysisWidget(QWidget):
         self.csv_path: Optional[Path] = None
         self.json_path: Optional[Path] = None
         self._strategies: List[StrategyInfo] = []
+        self._transient_strategy_names: List[str] = []
         self._analysis_context: Dict[str, Any] = {}
         self._manual_controls: Dict[str, Dict[str, QDoubleSpinBox | QSlider]] = {}
         self._manual_syncing = False
@@ -139,11 +163,8 @@ class FittingAnalysisWidget(QWidget):
         self._beam_profile_catalog_map: Dict[str, Dict[str, Any]] = {}
         self._filter_catalog_map: Dict[str, Dict[str, Any]] = {}
         self._plot_settings: Dict[str, PlotSettings] = {
-            "fit": PlotSettings(font_size=11.0, show_legend=True, box_aspect=0.0),
-            "resid": PlotSettings(font_size=10.0, show_legend=False, box_aspect=0.0),
-            "centering": PlotSettings(font_size=10.0, show_legend=True, box_aspect=0.0),
-            "extrema": PlotSettings(font_size=10.0, show_legend=True, box_aspect=0.0),
-            "lc": PlotSettings(font_size=10.0, show_legend=False, box_aspect=0.0),
+            key: self._default_plot_settings(key)
+            for key in ("fit", "resid", "centering", "extrema", "lc")
         }
 
         # Build UI
@@ -181,10 +202,22 @@ class FittingAnalysisWidget(QWidget):
         # Strategy group
         strat_group = QGroupBox("Fitting Strategy")
         strat_form = QFormLayout(strat_group)
+        self.lst_saved_strategies = SavedStrategyListWidget()
+        self.lst_saved_strategies.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.lst_saved_strategies.setMinimumHeight(140)
+        self.lst_saved_strategies.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.cmb_strategy = QComboBox()
-        self.lbl_strategy_hint = QLabel("Strategy classes found in fitting_strategies/*")
+        self.btn_add_strategy = QPushButton("+")
+        self.btn_add_strategy.setFixedWidth(32)
+        add_strategy_row = QHBoxLayout()
+        add_strategy_row.setContentsMargins(0, 0, 0, 0)
+        add_strategy_row.setSpacing(6)
+        add_strategy_row.addWidget(self.cmb_strategy, 1)
+        add_strategy_row.addWidget(self.btn_add_strategy, 0)
+        self.lbl_strategy_hint = QLabel("Saved strategies are listed here. Use + to open another strategy.")
         self.lbl_strategy_hint.setStyleSheet("color: gray;")
-        strat_form.addRow("Strategy:", self.cmb_strategy)
+        strat_form.addRow("Saved fits:", self.lst_saved_strategies)
+        strat_form.addRow("Add strategy:", add_strategy_row)
         strat_form.addRow("", self.lbl_strategy_hint)
 
         # Reference presets
@@ -534,7 +567,10 @@ class FittingAnalysisWidget(QWidget):
         self.btn_reset_manual.clicked.connect(self._reset_manual_controls_clicked)
         self.btn_apply_manual.clicked.connect(self._apply_manual_fit_clicked)
         self.extrema_widget.extremaChanged.connect(self._render_analysis_plots)
-        self.cmb_strategy.currentIndexChanged.connect(self._strategy_selection_changed)
+        self.lst_saved_strategies.itemSelectionChanged.connect(self._strategy_selection_changed)
+        self.lst_saved_strategies.customContextMenuRequested.connect(self._show_saved_strategy_context_menu)
+        self.cmb_strategy.currentIndexChanged.connect(self._picker_strategy_changed)
+        self.btn_add_strategy.clicked.connect(self._add_strategy_from_picker)
         self.cmb_lc_source.currentIndexChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_data.stateChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_fitting.stateChanged.connect(lambda *_args: self._render_analysis_plots())
@@ -565,6 +601,10 @@ class FittingAnalysisWidget(QWidget):
     # ------------------------------- Strategies -------------------------------
     def _populate_strategy_list(self):
         """Scan fitting_strategies package for available strategy classes."""
+        current_picker_name = self._picker_strategy_name()
+        current_selected_name = self._selected_strategy_name(allow_picker_fallback=False)
+
+        self.cmb_strategy.blockSignals(True)
         self.cmb_strategy.clear()
         self._strategies.clear()
         strategy_dir = Path(__file__).resolve().parent.parent / "fitting_strategies"
@@ -590,27 +630,292 @@ class FittingAnalysisWidget(QWidget):
         for index, strategy in enumerate(self._strategies):
             self.cmb_strategy.addItem(strategy.display_name, userData=index)
 
-        # Fallback text if none found
         if self.cmb_strategy.count() == 0:
             self.cmb_strategy.addItem("(no strategies found)")
-            self.lbl_strategy_hint.setText("No strategy classes found.")
         else:
-            self.lbl_strategy_hint.setText(
-                f"{len(self._strategies)} strategy class(es) found in fitting_strategies/*"
-            )
+            preferred_picker_name = current_picker_name or current_selected_name
+            if preferred_picker_name:
+                self._set_picker_strategy(preferred_picker_name)
+            else:
+                self.cmb_strategy.setCurrentIndex(0)
+        self.cmb_strategy.blockSignals(False)
+
+        self._refresh_saved_strategy_list(self._meta, preferred_strategy_name=current_selected_name)
         self._refresh_analysis_views(reset_manual=True)
 
-    def _get_selected_strategy(self) -> Optional[StrategyInfo]:
+    def _find_strategy_info(self, strategy_name: str | None) -> Optional[StrategyInfo]:
+        normalized = str(strategy_name or "").strip()
+        if not normalized:
+            return None
+        for strategy in self._strategies:
+            if strategy.class_name == normalized:
+                return strategy
+        return None
+
+    def _picker_strategy_name(self) -> Optional[str]:
         idx = self.cmb_strategy.currentIndex()
         if idx < 0:
             return None
         data = self.cmb_strategy.currentData()
         if isinstance(data, int) and 0 <= data < len(self._strategies):
-            return self._strategies[data]
-        # If no userdata (e.g., no strategies), try a conventional default
+            return self._strategies[data].class_name
         return None
 
+    def _set_picker_strategy(self, strategy_name: str | None) -> None:
+        normalized = str(strategy_name or "").strip()
+        if not normalized:
+            return
+        for index, strategy in enumerate(self._strategies):
+            if strategy.class_name == normalized:
+                self.cmb_strategy.setCurrentIndex(index)
+                return
+
+    def _current_strategy_item(self) -> Optional[QListWidgetItem]:
+        item = self.lst_saved_strategies.currentItem()
+        if item is not None and item.isSelected():
+            return item
+        selected_items = self.lst_saved_strategies.selectedItems()
+        if selected_items:
+            return selected_items[0]
+        if self.lst_saved_strategies.count() == 1:
+            return self.lst_saved_strategies.item(0)
+        return None
+
+    def _selected_strategy_name(self, *, allow_picker_fallback: bool = True) -> Optional[str]:
+        item = self._current_strategy_item()
+        if item is not None:
+            strategy_name = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
+            if strategy_name:
+                return strategy_name
+        if allow_picker_fallback and self.lst_saved_strategies.count() == 0:
+            return self._picker_strategy_name()
+        return None
+
+    def _is_strategy_saved(self, strategy_name: str) -> bool:
+        normalized = str(strategy_name or "").strip()
+        if not normalized:
+            return False
+        for entry in normalize_fitting_entries(self._meta):
+            if str(entry.get("strategy") or "").strip() == normalized:
+                return True
+        return False
+
+    def _display_name_for_strategy(
+        self,
+        strategy_name: str | None,
+        *,
+        saved_entry: Optional[Dict[str, Any]] = None,
+        saved: bool = True,
+    ) -> str:
+        normalized = str(strategy_name or "").strip()
+        info = self._find_strategy_info(normalized)
+        if info is not None:
+            label = info.display_name
+        elif saved_entry and str(saved_entry.get("strategy_display_name") or "").strip():
+            label = str(saved_entry.get("strategy_display_name") or "").strip()
+        else:
+            label = normalized or "(unnamed)"
+        if not saved:
+            return f"{label} (new)"
+        if normalized and info is None:
+            return f"{label} (unavailable)"
+        return label
+
+    def _refresh_saved_strategy_list(
+        self,
+        meta: Optional[Dict[str, Any]],
+        *,
+        preferred_strategy_name: Optional[str] = None,
+    ) -> None:
+        saved_entries = normalize_fitting_entries(meta)
+        saved_map: Dict[str, Dict[str, Any]] = {}
+        saved_names: List[str] = []
+        for entry in saved_entries:
+            strategy_name = str(entry.get("strategy") or "").strip()
+            if not strategy_name or strategy_name in saved_map:
+                continue
+            saved_map[strategy_name] = dict(entry)
+            saved_names.append(strategy_name)
+
+        self._transient_strategy_names = [
+            name for name in self._transient_strategy_names
+            if name not in saved_map
+        ]
+        visible_transient_names = [
+            name for name in self._transient_strategy_names
+            if name not in saved_names
+        ]
+
+        target_name = str(preferred_strategy_name or "").strip()
+        if not target_name:
+            target_name = str((meta or {}).get("fitting_active_strategy") or "").strip()
+        if not target_name and saved_names:
+            target_name = saved_names[-1]
+        if not target_name and visible_transient_names:
+            target_name = visible_transient_names[-1]
+
+        self.lst_saved_strategies.blockSignals(True)
+        self.lst_saved_strategies.clear()
+
+        for strategy_name in saved_names:
+            entry = saved_map[strategy_name]
+            item = QListWidgetItem(
+                self._display_name_for_strategy(strategy_name, saved_entry=entry, saved=True)
+            )
+            item.setData(Qt.ItemDataRole.UserRole, strategy_name)
+            item.setData(Qt.ItemDataRole.UserRole + 1, True)
+            tooltip_lines = [f"strategy: {strategy_name}"]
+            strategy_module = str(entry.get("strategy_module") or "").strip()
+            if strategy_module:
+                tooltip_lines.append(f"module: {strategy_module}")
+            item.setToolTip("\n".join(tooltip_lines))
+            self.lst_saved_strategies.addItem(item)
+            if strategy_name == target_name:
+                item.setSelected(True)
+                self.lst_saved_strategies.setCurrentItem(item)
+
+        for strategy_name in visible_transient_names:
+            item = QListWidgetItem(self._display_name_for_strategy(strategy_name, saved=False))
+            item.setData(Qt.ItemDataRole.UserRole, strategy_name)
+            item.setData(Qt.ItemDataRole.UserRole + 1, False)
+            item.setForeground(QColor("gray"))
+            item.setToolTip(f"strategy: {strategy_name}\nNot saved to JSON yet.")
+            self.lst_saved_strategies.addItem(item)
+            if strategy_name == target_name:
+                item.setSelected(True)
+                self.lst_saved_strategies.setCurrentItem(item)
+
+        if self.lst_saved_strategies.currentItem() is None and self.lst_saved_strategies.count() > 0:
+            first_item = self.lst_saved_strategies.item(0)
+            first_item.setSelected(True)
+            self.lst_saved_strategies.setCurrentItem(first_item)
+
+        self.lst_saved_strategies.blockSignals(False)
+
+        saved_count = len(saved_names)
+        available_count = len(self._strategies)
+        if available_count == 0:
+            self.lbl_strategy_hint.setText("No strategy classes found.")
+        elif saved_count == 0:
+            self.lbl_strategy_hint.setText(
+                f"No saved fitting result in JSON. Use + to open one of {available_count} strategies."
+            )
+        else:
+            self.lbl_strategy_hint.setText(
+                f"{saved_count} saved fitting result(s). Ctrl+click for multi-select, then right-click to delete."
+            )
+
+    def _get_selected_strategy(self) -> Optional[StrategyInfo]:
+        return self._find_strategy_info(self._selected_strategy_name())
+
+    def _picker_strategy_changed(self, *_args):
+        if self.lst_saved_strategies.count() != 0:
+            return
+        if self._meta:
+            self._populate_table_from_json(self._meta)
+        self._refresh_analysis_views(reset_manual=True)
+
+    def _add_strategy_from_picker(self):
+        strategy_name = self._picker_strategy_name()
+        if not strategy_name:
+            QMessageBox.information(self, "No strategy", "No fitting strategy is available.")
+            return
+        if self._is_strategy_saved(strategy_name):
+            self._refresh_saved_strategy_list(self._meta, preferred_strategy_name=strategy_name)
+            self._strategy_selection_changed()
+            return
+        if strategy_name not in self._transient_strategy_names:
+            self._transient_strategy_names.append(strategy_name)
+        self._refresh_saved_strategy_list(self._meta, preferred_strategy_name=strategy_name)
+        self._strategy_selection_changed()
+
+    def _show_saved_strategy_context_menu(self, pos):
+        if not self.lst_saved_strategies.selectedItems():
+            return
+        menu = QMenu(self)
+        action = menu.addAction("Delete")
+        action.triggered.connect(self._delete_selected_strategy_results)
+        menu.exec(self.lst_saved_strategies.mapToGlobal(pos))
+
+    def _delete_selected_strategy_results(self):
+        if not self.json_path:
+            QMessageBox.information(self, "No data", "Load a result folder first.")
+            return
+
+        selected_items = self.lst_saved_strategies.selectedItems()
+        if not selected_items:
+            return
+
+        saved_names: List[str] = []
+        transient_names: List[str] = []
+        display_lines: List[str] = []
+        for item in selected_items:
+            strategy_name = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
+            is_saved = bool(item.data(Qt.ItemDataRole.UserRole + 1))
+            if not strategy_name:
+                continue
+            display_lines.append(f" - {item.text()}")
+            if is_saved:
+                saved_names.append(strategy_name)
+            else:
+                transient_names.append(strategy_name)
+
+        if not saved_names and not transient_names:
+            return
+
+        if saved_names and transient_names:
+            message = (
+                "Delete the selected fitting results from JSON and remove unsaved entries from the list?\n\n"
+                + "\n".join(display_lines)
+            )
+        elif saved_names:
+            message = "Delete the selected fitting results from JSON?\n\n" + "\n".join(display_lines)
+        else:
+            message = "Remove the selected unsaved entries from the list?\n\n" + "\n".join(display_lines)
+
+        reply = QMessageBox.question(
+            self,
+            "Delete fitting results",
+            message,
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            return
+
+        if saved_names:
+            try:
+                with open(self.json_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception as e:
+                QMessageBox.critical(self, "Read failed", str(e))
+                return
+
+            meta = remove_fitting_results(meta, saved_names)
+
+            try:
+                with open(self.json_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                QMessageBox.critical(self, "Write failed", str(e))
+                return
+
+            self._meta = meta
+
+        removed_names = set(saved_names) | set(transient_names)
+        self._transient_strategy_names = [
+            name for name in self._transient_strategy_names
+            if name not in removed_names
+        ]
+        self._refresh_saved_strategy_list(self._meta)
+        if self._meta:
+            self._populate_table_from_json(self._meta)
+        self._refresh_analysis_views(reset_manual=True)
+
     def _strategy_selection_changed(self, *_args):
+        selected_name = self._selected_strategy_name(allow_picker_fallback=False)
+        if selected_name:
+            self._set_picker_strategy(selected_name)
         if self._meta:
             self._populate_table_from_json(self._meta)
         self._refresh_analysis_views(reset_manual=True)
@@ -620,8 +925,7 @@ class FittingAnalysisWidget(QWidget):
         meta: Optional[Dict[str, Any]] = None,
         strategy: Optional[StrategyInfo] = None,
     ) -> Dict[str, Any]:
-        selected = strategy or self._get_selected_strategy()
-        strategy_name = selected.class_name if selected is not None else None
+        strategy_name = strategy.class_name if strategy is not None else self._selected_strategy_name()
         return extract_fit_payload(meta if meta is not None else self._meta, strategy_name)
 
     def _meta_with_selected_fit(
@@ -629,8 +933,7 @@ class FittingAnalysisWidget(QWidget):
         meta: Optional[Dict[str, Any]] = None,
         strategy: Optional[StrategyInfo] = None,
     ) -> Dict[str, Any]:
-        selected = strategy or self._get_selected_strategy()
-        strategy_name = selected.class_name if selected is not None else None
+        strategy_name = strategy.class_name if strategy is not None else self._selected_strategy_name()
         return merge_fit_payload(meta if meta is not None else self._meta, strategy_name)
 
     def _apply_saved_strategy_selection(self, meta: Dict[str, Any]):
@@ -638,13 +941,8 @@ class FittingAnalysisWidget(QWidget):
         if not target_name:
             payload = extract_fit_payload(meta)
             target_name = str(payload.get("strategy") or "").strip()
-        if not target_name:
-            return
-
-        for index, strategy in enumerate(self._strategies):
-            if strategy.class_name == target_name:
-                self.cmb_strategy.setCurrentIndex(index)
-                return
+        self._set_picker_strategy(target_name)
+        self._refresh_saved_strategy_list(meta, preferred_strategy_name=target_name)
 
     # --------------------------- Reference data ---------------------------
     def reload_sample_catalog(self):
@@ -877,6 +1175,7 @@ class FittingAnalysisWidget(QWidget):
         self._current_dir = folder
         self._meta = meta
         self._df = df
+        self._transient_strategy_names.clear()
 
         # Update view fields
         self._apply_saved_strategy_selection(meta)
@@ -1069,6 +1368,7 @@ class FittingAnalysisWidget(QWidget):
 
         self._meta = meta
         self.extrema_widget.mark_saved()
+        self._apply_saved_strategy_selection(meta)
         self._populate_table_from_json(meta)
         self._refresh_analysis_views(reset_manual=False)
         if show_message:
@@ -1158,9 +1458,12 @@ class FittingAnalysisWidget(QWidget):
             if key in fit_payload:
                 rows.append((label, fit_payload.get(key)))
 
-        selected = self._get_selected_strategy()
-        if selected is not None:
-            rows.insert(0, ("strategy", selected.display_name))
+        selected_name = self._selected_strategy_name()
+        if selected_name:
+            rows.insert(
+                0,
+                ("strategy", self._display_name_for_strategy(selected_name, saved=self._is_strategy_saved(selected_name))),
+            )
 
         self.tbl.setRowCount(len(rows))
         for i, (k, v) in enumerate(rows):
@@ -1188,9 +1491,13 @@ class FittingAnalysisWidget(QWidget):
             context["error"] = "shg_analysis is not importable."
             return context
 
+        selected_name = self._selected_strategy_name()
         selected = self._get_selected_strategy()
         if selected is None:
-            context["error"] = "No fitting strategy selected."
+            if selected_name:
+                context["error"] = f"Selected strategy '{selected_name}' is not available."
+            else:
+                context["error"] = "No fitting strategy selected."
             return context
         meta_with_fit = self._meta_with_selected_fit(self._meta, selected)
 
@@ -1371,8 +1678,7 @@ class FittingAnalysisWidget(QWidget):
     def _current_fitting_output_dir(self, create: bool = False) -> Optional[Path]:
         if not self._current_dir:
             return None
-        selected = self._get_selected_strategy()
-        class_name = selected.class_name if selected is not None else "current"
+        class_name = self._selected_strategy_name() or "current"
         safe_class_name = "".join(
             char if char.isalnum() or char in {"-", "_"} else "_"
             for char in class_name
@@ -1441,11 +1747,54 @@ class FittingAnalysisWidget(QWidget):
         for plot_key in self._plot_canvases:
             self._update_canvas_height(plot_key)
 
+    def _default_plot_settings(self, plot_key: str) -> PlotSettings:
+        return PlotSettings(
+            font_size=11.0 if plot_key == "fit" else 10.0,
+            show_legend=plot_key not in {"resid", "lc"},
+            box_aspect=0.0,
+            data_plot_style="markers",
+            show_fit_annotation=True,
+        )
+
     def _parse_optional_float(self, text: str) -> Optional[float]:
         stripped = str(text).strip()
         if not stripped:
             return None
         return float(stripped)
+
+    def _format_optional_range(self, min_value: Optional[float], max_value: Optional[float]) -> str:
+        if min_value is None and max_value is None:
+            return ""
+        left = "" if min_value is None else f"{min_value:g}"
+        right = "" if max_value is None else f"{max_value:g}"
+        return f"{left}, {right}"
+
+    def _parse_optional_range(self, text: str) -> Tuple[Optional[float], Optional[float]]:
+        stripped = str(text).strip()
+        if not stripped:
+            return None, None
+        normalized = stripped.replace(":", ",").replace("~", ",")
+        parts = [part.strip() for part in normalized.split(",")]
+        if len(parts) != 2:
+            raise ValueError("Range must be entered as 'min, max'.")
+        range_min = float(parts[0]) if parts[0] else None
+        range_max = float(parts[1]) if parts[1] else None
+        if range_min is not None and range_max is not None and range_min > range_max:
+            raise ValueError("Range min must be less than or equal to max.")
+        return range_min, range_max
+
+    def _fit_data_plot_kwargs(self) -> Dict[str, Any]:
+        style = self._plot_settings["fit"].data_plot_style
+        kwargs: Dict[str, Any] = {
+            "marker": "*",
+            "markersize": 5,
+        }
+        if style == "line+markers":
+            kwargs["linestyle"] = "-"
+            kwargs["linewidth"] = 1.0
+        else:
+            kwargs["linestyle"] = "none"
+        return kwargs
 
     def _edit_current_plot_settings(self):
         plot_key = self._current_plot_key()
@@ -1465,6 +1814,15 @@ class FittingAnalysisWidget(QWidget):
         cb_legend = QCheckBox("Show legend")
         cb_legend.setChecked(settings.show_legend)
 
+        cmb_data_style = QComboBox()
+        cmb_data_style.addItem("Markers only", userData="markers")
+        cmb_data_style.addItem("Markers + line", userData="line+markers")
+        data_style_index = max(cmb_data_style.findData(settings.data_plot_style), 0)
+        cmb_data_style.setCurrentIndex(data_style_index)
+
+        cb_fit_annotation = QCheckBox("Show L / Peak annotation")
+        cb_fit_annotation.setChecked(settings.show_fit_annotation)
+
         sb_aspect = QDoubleSpinBox()
         sb_aspect.setRange(0.0, 5.0)
         sb_aspect.setDecimals(2)
@@ -1472,18 +1830,19 @@ class FittingAnalysisWidget(QWidget):
         sb_aspect.setSpecialValueText("Auto")
         sb_aspect.setValue(settings.box_aspect)
 
-        le_x_min = QLineEdit("" if settings.x_min is None else f"{settings.x_min:g}")
-        le_x_max = QLineEdit("" if settings.x_max is None else f"{settings.x_max:g}")
-        le_y_min = QLineEdit("" if settings.y_min is None else f"{settings.y_min:g}")
-        le_y_max = QLineEdit("" if settings.y_max is None else f"{settings.y_max:g}")
+        le_x_range = QLineEdit(self._format_optional_range(settings.x_min, settings.x_max))
+        le_x_range.setPlaceholderText("min, max   (blank side = auto)")
+        le_y_range = QLineEdit(self._format_optional_range(settings.y_min, settings.y_max))
+        le_y_range.setPlaceholderText("min, max   (blank side = auto)")
 
         form.addRow("Font size:", sb_font)
         form.addRow("", cb_legend)
+        if plot_key == "fit":
+            form.addRow("Data style:", cmb_data_style)
+            form.addRow("", cb_fit_annotation)
         form.addRow("Box aspect:", sb_aspect)
-        form.addRow("X min:", le_x_min)
-        form.addRow("X max:", le_x_max)
-        form.addRow("Y min:", le_y_min)
-        form.addRow("Y max:", le_y_max)
+        form.addRow("X range:", le_x_range)
+        form.addRow("Y range:", le_y_range)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(
@@ -1495,14 +1854,15 @@ class FittingAnalysisWidget(QWidget):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(
-            lambda: (
-                sb_font.setValue(10.0 if plot_key != "fit" else 11.0),
-                cb_legend.setChecked(plot_key != "resid" and plot_key != "lc"),
-                sb_aspect.setValue(0.0),
-                le_x_min.clear(),
-                le_x_max.clear(),
-                le_y_min.clear(),
-                le_y_max.clear(),
+            lambda: self._restore_plot_settings_dialog_defaults(
+                plot_key=plot_key,
+                sb_font=sb_font,
+                cb_legend=cb_legend,
+                sb_aspect=sb_aspect,
+                le_x_range=le_x_range,
+                le_y_range=le_y_range,
+                cmb_data_style=cmb_data_style,
+                cb_fit_annotation=cb_fit_annotation,
             )
         )
 
@@ -1510,14 +1870,18 @@ class FittingAnalysisWidget(QWidget):
             return
 
         try:
+            x_min, x_max = self._parse_optional_range(le_x_range.text())
+            y_min, y_max = self._parse_optional_range(le_y_range.text())
             self._plot_settings[plot_key] = PlotSettings(
                 font_size=float(sb_font.value()),
                 show_legend=bool(cb_legend.isChecked()),
                 box_aspect=float(sb_aspect.value()),
-                x_min=self._parse_optional_float(le_x_min.text()),
-                x_max=self._parse_optional_float(le_x_max.text()),
-                y_min=self._parse_optional_float(le_y_min.text()),
-                y_max=self._parse_optional_float(le_y_max.text()),
+                data_plot_style=str(cmb_data_style.currentData() or "markers"),
+                show_fit_annotation=bool(cb_fit_annotation.isChecked()),
+                x_min=x_min,
+                x_max=x_max,
+                y_min=y_min,
+                y_max=y_max,
             )
         except Exception as e:
             QMessageBox.warning(self, "Invalid setting", str(e))
@@ -1525,6 +1889,26 @@ class FittingAnalysisWidget(QWidget):
 
         self._update_canvas_height(plot_key)
         self._render_analysis_plots()
+
+    def _restore_plot_settings_dialog_defaults(
+        self,
+        plot_key: str,
+        sb_font: QDoubleSpinBox,
+        cb_legend: QCheckBox,
+        sb_aspect: QDoubleSpinBox,
+        le_x_range: QLineEdit,
+        le_y_range: QLineEdit,
+        cmb_data_style: QComboBox,
+        cb_fit_annotation: QCheckBox,
+    ) -> None:
+        defaults = self._default_plot_settings(plot_key)
+        sb_font.setValue(defaults.font_size)
+        cb_legend.setChecked(defaults.show_legend)
+        sb_aspect.setValue(defaults.box_aspect)
+        le_x_range.clear()
+        le_y_range.clear()
+        cmb_data_style.setCurrentIndex(max(cmb_data_style.findData(defaults.data_plot_style), 0))
+        cb_fit_annotation.setChecked(defaults.show_fit_annotation)
 
     def _save_current_plot_clicked(self):
         if not self._current_dir:
@@ -2113,7 +2497,7 @@ class FittingAnalysisWidget(QWidget):
                 y = np.asarray(data[numeric_columns[-1]], dtype=float)
 
         sample_label = str(self._meta.get("sample") or self._meta.get("sample_id") or "Data")
-        ax.plot(x, y, linestyle="none", marker="o", markersize=3, label=sample_label)
+        ax.plot(x, y, label=sample_label, **self._fit_data_plot_kwargs())
         self._configure_plot_axes(self.canvas_fit, "fit", "Signal (V)")
         self.canvas_fit.figure.tight_layout()
         self.canvas_fit.draw()
@@ -2124,9 +2508,10 @@ class FittingAnalysisWidget(QWidget):
             return
         self.canvas_fit.clear()
         ax = self.canvas_fit.ax
+        settings = self._plot_settings["fit"]
         sample_label = str(self._meta.get("sample") or self._meta.get("sample_id") or "Data")
         if self.chk_fit_show_data.isChecked():
-            ax.plot(live["x"], live["y"], linestyle="none", marker="o", markersize=3, label=sample_label)
+            ax.plot(live["x"], live["y"], label=sample_label, **self._fit_data_plot_kwargs())
         if self.chk_fit_show_fitting.isChecked():
             ax.plot(live["x"], live["fit_curve"], linewidth=1.6, label="Fitting")
         if self.chk_fit_show_envelope.isChecked() and not self._is_wedge_scan():
@@ -2141,6 +2526,8 @@ class FittingAnalysisWidget(QWidget):
             va="top",
             ha="left",
         )
+        if not settings.show_fit_annotation and ax.texts:
+            ax.texts[-1].remove()
         self._configure_plot_axes(
             self.canvas_fit,
             "fit",

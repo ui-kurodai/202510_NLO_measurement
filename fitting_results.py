@@ -149,3 +149,35 @@ def upsert_fitting_result(
         payload.pop(key, None)
 
     return payload
+
+
+def remove_fitting_results(
+    meta: dict[str, Any] | None,
+    strategy_names: list[str] | tuple[str, ...] | set[str],
+) -> dict[str, Any]:
+    payload = dict(meta) if isinstance(meta, dict) else {}
+    remove_targets = {
+        str(name).strip()
+        for name in strategy_names
+        if str(name).strip()
+    }
+    if not remove_targets:
+        return payload
+
+    entries = [
+        dict(entry)
+        for entry in normalize_fitting_entries(payload)
+        if str(entry.get("strategy") or "").strip() not in remove_targets
+    ]
+    if entries:
+        payload[FITTING_CONTAINER_KEY] = entries
+    else:
+        payload.pop(FITTING_CONTAINER_KEY, None)
+
+    active_strategy = str(payload.get(FITTING_ACTIVE_STRATEGY_KEY) or "").strip()
+    if active_strategy in remove_targets:
+        payload[FITTING_ACTIVE_STRATEGY_KEY] = str(entries[-1].get("strategy") or "").strip() if entries else ""
+        if not payload[FITTING_ACTIVE_STRATEGY_KEY]:
+            payload.pop(FITTING_ACTIVE_STRATEGY_KEY, None)
+
+    return payload
