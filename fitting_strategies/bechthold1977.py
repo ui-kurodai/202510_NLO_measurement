@@ -31,6 +31,7 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
         ("BaMgF4", "100", "010", 0, 90): "9",
 
         # BMF d33
+        ("BaMgF4", "100", "001", 0, 0): "11",
         ("BaMgF4", "010", "001", 0, 0): "12",
 
         # BMF d15
