@@ -34,22 +34,16 @@ import pandas as pd
 from PyQt6.QtCore import Qt, QLocale, pyqtSignal
 from PyQt6.QtGui import QColor, QGuiApplication
 from PyQt6.QtWidgets import (
-    QAbstractItemView,
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QPushButton, QLabel, QLineEdit, QComboBox,
-    QFileDialog, QGroupBox, QMessageBox, QTabWidget,
-    QTableWidget, QTableWidgetItem, QSizePolicy, QSplitter,
+    QFileDialog, QGroupBox, QMessageBox,
+    QTableWidget, QTableWidgetItem,
     QDoubleSpinBox, QSlider, QDialog, QDialogButtonBox, QCheckBox,
-    QScrollArea, QPlainTextEdit, QListView, QTreeView,
-    QListWidget, QListWidgetItem, QMenu
+    QListWidgetItem, QMenu, QStackedWidget
 )
-
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
 
 import logging
 from measurement_metadata import (
-    COMMON_BOXCAR_SENSITIVITIES,
     build_sample_catalog_key,
     format_beam_profile_display,
     format_filter_display,
@@ -68,7 +62,8 @@ from fitting_results import (
     remove_fitting_results,
     upsert_fitting_result,
 )
-from widgets.manual_extrema_detection_widget import ManualExtremaDetectionWidget
+from widgets.refractive_index_global_fit_widget import RefractiveIndexGlobalFitWidget
+from widgets.standard_fit_widget import MplCanvas, SavedStrategyListWidget, StandardFitWidget
 # self made database
 # from crystaldatabase import CRYSTALS
 # from crystaldatabase import *
@@ -108,36 +103,6 @@ class PlotSettings:
     y_min: Optional[float] = None
     y_max: Optional[float] = None
 
-
-class MplCanvas(FigureCanvas):
-    def __init__(self, parent: Optional[QWidget] = None, width: float = 5, height: float = 3, dpi: int = 100):
-        fig = Figure(figsize=(width, height), dpi=dpi)
-        self.ax = fig.add_subplot(111)
-        super().__init__(fig)
-        self.setParent(parent)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.ax.grid(True, which="both", alpha=0.25)
-        self.figure.tight_layout()
-
-    def clear(self):
-        self.figure.clear()
-        self.ax = self.figure.add_subplot(111)
-        self.ax.grid(True, which="both", alpha=0.25)
-
-
-class SavedStrategyListWidget(QListWidget):
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.RightButton:
-            item = self.itemAt(event.position().toPoint())
-            if item is None:
-                self.clearSelection()
-            elif not item.isSelected():
-                self.clearSelection()
-                item.setSelected(True)
-                self.setCurrentItem(item)
-        super().mousePressEvent(event)
-
-
 # ------------------------------- Main Tab -------------------------------
 class FittingAnalysisWidget(QWidget):
     folderLoaded = pyqtSignal(str)   # emits folder path when a folder has been loaded
@@ -156,6 +121,7 @@ class FittingAnalysisWidget(QWidget):
         self._strategies: List[StrategyInfo] = []
         self._transient_strategy_names: List[str] = []
         self._analysis_context: Dict[str, Any] = {}
+        self._live_curve_cache: Dict[str, Any] = {}
         self._manual_controls: Dict[str, Dict[str, QDoubleSpinBox | QSlider]] = {}
         self._manual_syncing = False
         self._extrema_force_reset = False
@@ -174,6 +140,126 @@ class FittingAnalysisWidget(QWidget):
 
     # --------------------------- UI construction ---------------------------
     def _build_ui(self):
+        main = QVBoxLayout(self)
+        main.setContentsMargins(8, 8, 8, 8)
+        main.setSpacing(8)
+
+        nav_bar = QHBoxLayout()
+        self.btn_nav_home = self._make_mode_button("Menu")
+        self.btn_nav_standard = self._make_mode_button("Standard Fit")
+        self.btn_nav_nfit = self._make_mode_button("Refractive Index Global Fit")
+        self.btn_update_json = QPushButton("Update JSON")
+        self.btn_fit = QPushButton("Run Fit")
+        self.btn_save = QPushButton("Save All Plots")
+        self.btn_fit.setEnabled(False)
+        self.btn_save.setEnabled(False)
+        self.btn_update_json.setEnabled(False)
+        nav_bar.addWidget(self.btn_nav_home)
+        nav_bar.addWidget(self.btn_nav_standard)
+        nav_bar.addWidget(self.btn_nav_nfit)
+        nav_bar.addStretch(1)
+        nav_bar.addWidget(self.btn_update_json)
+        nav_bar.addWidget(self.btn_fit)
+        nav_bar.addWidget(self.btn_save)
+        main.addLayout(nav_bar)
+
+        main.addWidget(self._build_strategy_group())
+
+        self.page_stack = QStackedWidget()
+        self.home_page = self._build_home_page()
+        self.standard_fit_widget = StandardFitWidget(self._SLIDER_STEPS, self)
+        self.nfit_widget = RefractiveIndexGlobalFitWidget(self)
+        self.page_stack.addWidget(self.home_page)
+        self.page_stack.addWidget(self.standard_fit_widget)
+        self.page_stack.addWidget(self.nfit_widget)
+        main.addWidget(self.page_stack, 1)
+
+        self.results_group = QGroupBox("Saved Fit Summary")
+        results_layout = QVBoxLayout(self.results_group)
+        self.tbl = QTableWidget(0, 2)
+        self.tbl.setHorizontalHeaderLabels(["Fit Parameter", "Saved Value"])
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+        self.tbl.setMinimumHeight(180)
+        results_layout.addWidget(self.tbl)
+        main.addWidget(self.results_group)
+
+        for attr in [
+            "btn_open",
+            "lbl_current_folder",
+            "sample_preset_combo",
+            "reload_samples_btn",
+            "beam_profile_combo",
+            "reload_beams_btn",
+            "filter_preset_combo",
+            "reload_filters_btn",
+            "le_material",
+            "le_crystal_orientation",
+            "le_axis",
+            "sb_t_thin",
+            "sb_wedge",
+            "sb_beam_rx",
+            "sb_beam_ry",
+            "sb_input_pol",
+            "sb_detected_pol",
+            "cmb_boxcar_sensitivity",
+            "le_filters",
+            "lbl_sample",
+            "lbl_method",
+            "lbl_time",
+            "right_scroll",
+            "plot_tabs",
+            "chk_fit_show_data",
+            "chk_fit_show_fitting",
+            "chk_fit_show_envelope",
+            "canvas_fit",
+            "canvas_resid",
+            "canvas_centering",
+            "extrema_widget",
+            "cmb_lc_source",
+            "lbl_lc_hint",
+            "canvas_lc",
+            "btn_plot_settings",
+            "btn_save_current_plot",
+            "btn_copy_current_plot",
+            "sb_manual_centering",
+            "btn_reset_manual",
+            "btn_apply_manual",
+            "lbl_manual_hint",
+        ]:
+            setattr(self, attr, getattr(self.standard_fit_widget, attr))
+        self._plot_pages = self.standard_fit_widget._plot_pages
+        self._plot_canvases = self.standard_fit_widget._plot_canvases
+        self._manual_controls = self.standard_fit_widget._manual_controls
+
+        for attr in [
+            "btn_open_folder",
+            "lbl_nfit_intro",
+            "txt_nfit_group_paths",
+            "btn_nfit_select_folders",
+            "btn_nfit_current_only",
+            "btn_nfit_refresh",
+            "lbl_nfit_hint",
+            "nfit_measurements_host",
+            "nfit_measurements_layout",
+        ]:
+            setattr(self, attr, getattr(self.nfit_widget, attr))
+        self.lbl_nfit_current_folder = self.nfit_widget.lbl_current_folder
+
+        self._page_indexes = {
+            "home": self.page_stack.indexOf(self.home_page),
+            "standard": self.page_stack.indexOf(self.standard_fit_widget),
+            "nfit": self.page_stack.indexOf(self.nfit_widget),
+        }
+        self._page_buttons = {
+            "home": self.btn_nav_home,
+            "standard": self.btn_nav_standard,
+            "nfit": self.btn_nav_nfit,
+        }
+        self._current_page_key = "home"
+        self._update_folder_status_labels()
+        self._set_analysis_page("home")
+        return
+
         main = QVBoxLayout(self)
         main.setContentsMargins(8, 8, 8, 8)
         main.setSpacing(8)
@@ -557,11 +643,95 @@ class FittingAnalysisWidget(QWidget):
             "max": max_box,
         }
 
+    def _build_strategy_group(self) -> QGroupBox:
+        strat_group = QGroupBox("Fitting Strategy")
+        strat_form = QFormLayout(strat_group)
+        self.lst_saved_strategies = SavedStrategyListWidget()
+        self.lst_saved_strategies.setSelectionMode(self.lst_saved_strategies.SelectionMode.ExtendedSelection)
+        self.lst_saved_strategies.setMinimumHeight(140)
+        self.lst_saved_strategies.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.cmb_strategy = QComboBox()
+        self.btn_add_strategy = QPushButton("+")
+        self.btn_add_strategy.setFixedWidth(32)
+        add_strategy_row = QHBoxLayout()
+        add_strategy_row.setContentsMargins(0, 0, 0, 0)
+        add_strategy_row.setSpacing(6)
+        add_strategy_row.addWidget(self.cmb_strategy, 1)
+        add_strategy_row.addWidget(self.btn_add_strategy, 0)
+        self.lbl_strategy_hint = QLabel("Saved strategies are listed here. Use + to open another strategy.")
+        self.lbl_strategy_hint.setStyleSheet("color: gray;")
+        strat_form.addRow("Saved fits:", self.lst_saved_strategies)
+        strat_form.addRow("Add strategy:", add_strategy_row)
+        strat_form.addRow("", self.lbl_strategy_hint)
+        return strat_group
+
+    def _build_home_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(18)
+
+        title = QLabel("Choose a fitting workflow")
+        title.setStyleSheet("font-size: 22px; font-weight: 600;")
+        subtitle = QLabel(
+            "Use Standard Fit for one measurement folder, or open Refractive Index Global Fit to combine multiple measurements."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: gray; font-size: 13px;")
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(16)
+        self.btn_home_standard = QPushButton("Standard Fit")
+        self.btn_home_standard.setMinimumHeight(120)
+        self.btn_home_standard.setStyleSheet("font-size: 18px; font-weight: 600; text-align: left; padding: 18px;")
+        self.btn_home_nfit = QPushButton("Refractive Index Global Fit")
+        self.btn_home_nfit.setMinimumHeight(120)
+        self.btn_home_nfit.setStyleSheet("font-size: 18px; font-weight: 600; text-align: left; padding: 18px;")
+        button_row.addWidget(self.btn_home_standard, 1)
+        button_row.addWidget(self.btn_home_nfit, 1)
+        layout.addLayout(button_row)
+        layout.addStretch(1)
+        return page
+
+    def _make_mode_button(self, label: str) -> QPushButton:
+        button = QPushButton(label)
+        button.setCheckable(True)
+        return button
+
+    def _set_analysis_page(self, page_key: str) -> None:
+        if page_key not in self._page_indexes:
+            return
+        self._current_page_key = page_key
+        self.page_stack.setCurrentIndex(self._page_indexes[page_key])
+        for key, button in self._page_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(key == page_key)
+            button.blockSignals(False)
+        self._sync_page_chrome()
+        if page_key != "home" and self._analysis_context:
+            self._render_analysis_plots()
+
+    def _sync_page_chrome(self) -> None:
+        self.results_group.setVisible(self._current_page_key != "home")
+
+    def _update_folder_status_labels(self) -> None:
+        folder_text = str(self._current_dir) if self._current_dir else "No folder loaded."
+        self.lbl_current_folder.setText(folder_text)
+        self.lbl_nfit_current_folder.setText(folder_text)
+
     def _connect(self):
         self.btn_open.clicked.connect(self._select_folder)
+        self.btn_open_folder.clicked.connect(self._select_folder)
         self.btn_update_json.clicked.connect(self._update_json_clicked)
         self.btn_fit.clicked.connect(self._run_fit_clicked)
         self.btn_save.clicked.connect(self._save_figures_clicked)
+        self.btn_nav_home.clicked.connect(lambda: self._set_analysis_page("home"))
+        self.btn_nav_standard.clicked.connect(lambda: self._set_analysis_page("standard"))
+        self.btn_nav_nfit.clicked.connect(lambda: self._set_analysis_page("nfit"))
+        self.btn_home_standard.clicked.connect(lambda: self._set_analysis_page("standard"))
+        self.btn_home_nfit.clicked.connect(lambda: self._set_analysis_page("nfit"))
         self.reload_samples_btn.clicked.connect(self.reload_sample_catalog)
         self.reload_beams_btn.clicked.connect(self.reload_beam_profile_catalog)
         self.reload_filters_btn.clicked.connect(self.reload_filter_catalog)
@@ -586,12 +756,14 @@ class FittingAnalysisWidget(QWidget):
         self.btn_nfit_select_folders.clicked.connect(self._nfit_select_folders_clicked)
         self.btn_nfit_current_only.clicked.connect(self._nfit_use_current_folder_only)
         self.btn_nfit_refresh.clicked.connect(lambda: self._refresh_analysis_views(reset_manual=False))
-        self.analysis_pages.currentChanged.connect(lambda *_args: self._render_analysis_plots())
 
         for key in self._manual_controls:
             controls = self._manual_controls[key]
             controls["slider"].valueChanged.connect(
                 lambda _value, name=key: self._manual_slider_changed(name)
+            )
+            controls["slider"].sliderReleased.connect(
+                lambda name=key: self._manual_slider_released(name)
             )
             controls["value"].valueChanged.connect(
                 lambda _value, name=key: self._manual_value_changed(name)
@@ -1184,6 +1356,7 @@ class FittingAnalysisWidget(QWidget):
         self._meta = meta
         self._df = df
         self._transient_strategy_names.clear()
+        self._update_folder_status_labels()
 
         # Update view fields
         self._apply_saved_strategy_selection(meta)
@@ -1486,6 +1659,7 @@ class FittingAnalysisWidget(QWidget):
             self._clear_nfit_measurements("Load a result folder first.")
             return
         self._analysis_context = self._prepare_analysis_context()
+        self._live_curve_cache = {}
         if reset_manual or not self._manual_controls_ready():
             self._initialize_manual_controls_from_context()
         self._extrema_force_reset = bool(reset_manual)
@@ -1608,6 +1782,33 @@ class FittingAnalysisWidget(QWidget):
         for key, value in env_aux.items():
             merged_aux.setdefault(key, value)
         return fit_base, env_base, merged_aux
+
+    def _live_curve_cache_key(
+        self,
+        strategy: Any,
+        L_value: float,
+        x: np.ndarray,
+        dn_override: Optional[Dict[str, float]],
+    ) -> Tuple[Any, ...]:
+        x = np.asarray(x, dtype=float)
+        if x.size:
+            x_key = (
+                int(x.size),
+                float(np.nanmin(x)),
+                float(np.nanmax(x)),
+                float(np.nanmean(x)),
+                float(np.nanstd(x)),
+            )
+        else:
+            x_key = (0, float("nan"), float("nan"), float("nan"), float("nan"))
+        dn_key = tuple(sorted((dn_override or {}).items()))
+        return (
+            strategy.__class__.__module__,
+            strategy.__class__.__name__,
+            round(float(L_value), 12),
+            x_key,
+            dn_key,
+        )
 
     def _x_axis_label(self, meta: Dict[str, Any], data: pd.DataFrame) -> str:
         if "position_centered" in data.columns:
@@ -2127,6 +2328,18 @@ class FittingAnalysisWidget(QWidget):
             controls["value"].setValue(value)
         finally:
             self._manual_syncing = False
+        strategy = self._analysis_context.get("strategy") if isinstance(self._analysis_context, dict) else None
+        if (
+            strategy is not None
+            and getattr(strategy, "LIVE_UPDATE_ON_SLIDER", True) is False
+            and key != "peak"
+        ):
+            return
+        self._render_analysis_plots()
+
+    def _manual_slider_released(self, key: str):
+        if self._manual_syncing:
+            return
         self._render_analysis_plots()
 
     def _reset_manual_controls_clicked(self):
@@ -2199,12 +2412,25 @@ class FittingAnalysisWidget(QWidget):
         )
 
         try:
-            fit_base, env_base, fit_aux = self._evaluate_strategy_curves(
-                strategy,
-                L_value,
-                x,
-                dn_override=dn_override or None,
-            )
+            cache_key = self._live_curve_cache_key(strategy, L_value, x, dn_override or None)
+            cached = self._live_curve_cache.get("model")
+            if isinstance(cached, dict) and cached.get("key") == cache_key:
+                fit_base = cached["fit_base"]
+                env_base = cached["env_base"]
+                fit_aux = cached["fit_aux"]
+            else:
+                fit_base, env_base, fit_aux = self._evaluate_strategy_curves(
+                    strategy,
+                    L_value,
+                    x,
+                    dn_override=dn_override or None,
+                )
+                self._live_curve_cache["model"] = {
+                    "key": cache_key,
+                    "fit_base": fit_base,
+                    "env_base": env_base,
+                    "fit_aux": fit_aux,
+                }
         except Exception as e:
             return {"error": f"Failed to evaluate current fit: {e}"}
 
