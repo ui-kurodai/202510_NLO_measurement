@@ -325,6 +325,43 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
             return modes.g[0]
         return (w_s * modes.g[0] + w_p * modes.g[2]) / denom
 
+    def _mode_poynting_vector(self, modes, index):
+        e_vec = np.asarray(modes.p[:, index], dtype=complex)
+        h_vec = np.asarray(modes.h[:, index], dtype=complex)
+        return np.real(np.cross(e_vec, np.conj(h_vec)))
+
+    def _selected_poynting_slope(self, modes, pol_deg):
+        if np.isclose(float(pol_deg), 0.0, atol=1e-3):
+            s_vec = self._mode_poynting_vector(modes, 0)
+        elif np.isclose(float(pol_deg), 90.0, atol=1e-3):
+            s_vec = self._mode_poynting_vector(modes, 2)
+        else:
+            amp_s, amp_p = self._incident_amplitudes(pol_deg)
+            w_s = abs(amp_s) ** 2
+            w_p = abs(amp_p) ** 2
+            denom = w_s + w_p
+            if denom <= 0:
+                s_vec = self._mode_poynting_vector(modes, 0)
+            else:
+                s_vec = (
+                    w_s * self._mode_poynting_vector(modes, 0)
+                    + w_p * self._mode_poynting_vector(modes, 2)
+                ) / denom
+
+        if np.isclose(s_vec[2], 0.0):
+            return np.nan
+        return float(s_vec[0] / s_vec[2])
+
+    def _raytrace_lateral_slope(self, modes, theta_rad, pol_deg, beam_direction):
+        beam_direction = str(beam_direction or "k").strip().lower()
+        if beam_direction in {"poynting", "s", "energy"}:
+            return self._selected_poynting_slope(modes, pol_deg)
+
+        g_eff = self._selected_g(modes, pol_deg)
+        if np.isclose(g_eff, 0.0):
+            return np.nan
+        return float(np.real(np.sin(theta_rad) / g_eff))
+
     def _detected_transmission_weight(self, linear_solution, pol_out):
         q_out = np.asarray(linear_solution["Q_air_out"], dtype=complex)
         if np.isclose(float(pol_out), 0.0, atol=1e-3):
@@ -610,7 +647,7 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
             "bound_back_norm": float(np.linalg.norm(b_back)),
         }
 
-    def _raytrace_correction(self, theta_rad, wav_nm, thickness_mm, n_xyz, pol_deg, beam_radius_mm, reference_internal_intensity, max_reflections):
+    def _raytrace_correction(self, theta_rad, wav_nm, thickness_mm, n_xyz, pol_deg, beam_radius_mm, reference_internal_intensity, max_reflections, beam_direction="k"):
         """
         Partial-beam ray tracer after Braun 1997 Section 4.
 
@@ -628,27 +665,32 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
                 "intensity_factor": 1.0,
                 "internal_intensity": reference_internal_intensity,
                 "ray_transmitted_intensity": np.nan,
+                "bin_width": np.nan,
+                "lateral_slope": np.nan,
             }
 
         modes = self._layer_modes(theta_rad, n_xyz)
-        g_eff = self._selected_g(modes, pol_deg)
-        a = float(np.sin(theta_rad))
-        if np.isclose(g_eff, 0.0):
+        lateral_slope = self._raytrace_lateral_slope(modes, theta_rad, pol_deg, beam_direction)
+        if not np.isfinite(lateral_slope):
             return {
                 "field_scale": 1.0,
                 "intensity_factor": 1.0,
                 "internal_intensity": reference_internal_intensity,
                 "ray_transmitted_intensity": np.nan,
+                "bin_width": np.nan,
+                "lateral_slope": np.nan,
             }
 
         wav_mm = float(wav_nm) * 1e-6
-        b = abs((2.0 * a / g_eff) * float(thickness_mm) * np.cos(theta_rad))
+        b = abs(2.0 * lateral_slope * float(thickness_mm) * np.cos(theta_rad))
         if not np.isfinite(float(np.real(b))):
             return {
                 "field_scale": 1.0,
                 "intensity_factor": 1.0,
                 "internal_intensity": reference_internal_intensity,
                 "ray_transmitted_intensity": np.nan,
+                "bin_width": np.nan,
+                "lateral_slope": lateral_slope,
             }
         b = float(np.real(b))
 
@@ -662,6 +704,8 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
                 "intensity_factor": 1.0,
                 "internal_intensity": reference_internal_intensity,
                 "ray_transmitted_intensity": np.nan,
+                "bin_width": b,
+                "lateral_slope": lateral_slope,
             }
 
         bin_width = b
@@ -672,7 +716,14 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
         profile = np.exp(-0.5 * (centers / max(float(beam_radius_mm), 1e-12)) ** 2)
         profile_sum = float(np.sum(profile))
         if profile_sum <= 0.0 or not np.isfinite(profile_sum):
-            return 1.0
+            return {
+                "field_scale": 1.0,
+                "intensity_factor": 1.0,
+                "internal_intensity": reference_internal_intensity,
+                "ray_transmitted_intensity": np.nan,
+                "bin_width": bin_width,
+                "lateral_slope": lateral_slope,
+            }
         profile = profile / profile_sum
 
         inc_s, inc_p = self._incident_amplitudes(pol_deg)
@@ -779,6 +830,8 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
                 "intensity_factor": 1.0,
                 "internal_intensity": reference_internal_intensity,
                 "ray_transmitted_intensity": ray_intensity,
+                "bin_width": bin_width,
+                "lateral_slope": lateral_slope,
             }
 
         back_transmission = single_pass_intensity / single_pass_internal_intensity
@@ -788,6 +841,8 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
                 "intensity_factor": 1.0,
                 "internal_intensity": reference_internal_intensity,
                 "ray_transmitted_intensity": ray_intensity,
+                "bin_width": bin_width,
+                "lateral_slope": lateral_slope,
             }
 
         # Braun Eq. (27): infer the fundamental intensity inside the crystal
@@ -806,6 +861,8 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
             "intensity_factor": float(max(intensity_factor, 0.0)),
             "internal_intensity": float(max(ray_internal_intensity, 0.0)),
             "ray_transmitted_intensity": float(max(ray_intensity, 0.0)),
+            "bin_width": bin_width,
+            "lateral_slope": lateral_slope,
         }
 
     def _single_angle_model(self, theta_rad, meta, override):
@@ -841,10 +898,16 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
         ray_field_scale = 1.0
         ray_internal_intensity = reference_internal_intensity
         ray_transmitted_intensity = float("nan")
+        ray_bin_width = float("nan")
+        ray_lateral_slope = float("nan")
         if use_raytrace:
             beam_r_x = float(meta.get("beam_r_x", 0.0)) / 2.0
             beam_r_y = float(meta.get("beam_r_y", 0.0)) / 2.0
             beam_radius_mm = np.sqrt(max(beam_r_x, 0.0) * max(beam_r_y, 0.0)) * 1e-3
+            raytrace_beam_direction = override.get(
+                "raytrace_beam_direction",
+                meta.get("raytrace_beam_direction", "k"),
+            )
             ray = self._raytrace_correction(
                 theta_rad,
                 wl1_nm,
@@ -854,11 +917,14 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
                 beam_radius_mm,
                 reference_internal_intensity,
                 override.get("max_reflections", self.DEFAULT_MAX_REFLECTIONS),
+                beam_direction=raytrace_beam_direction,
             )
             ray_factor = float(ray["intensity_factor"])
             ray_field_scale = float(ray["field_scale"])
             ray_internal_intensity = float(ray["internal_intensity"])
             ray_transmitted_intensity = float(ray["ray_transmitted_intensity"])
+            ray_bin_width = float(ray["bin_width"])
+            ray_lateral_slope = float(ray["lateral_slope"])
             linear_w = self._scaled_linear_solution(linear_w, ray_field_scale)
 
         shg = self._solve_nonlinear_shg(
@@ -879,6 +945,8 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
             "delta_k": 2.0 * psi / thickness_mm if thickness_mm != 0 else np.nan,
             "raytrace_factor": ray_factor,
             "raytrace_field_scale": ray_field_scale,
+            "raytrace_bin_width": ray_bin_width,
+            "raytrace_lateral_slope": ray_lateral_slope,
             "raytrace_internal_intensity": ray_internal_intensity,
             "raytrace_transmitted_intensity": ray_transmitted_intensity,
             "reference_internal_intensity": reference_internal_intensity,
@@ -957,6 +1025,8 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
             "delta_k": np.array([np.real(item["delta_k"]) for item in values], dtype=float).reshape(theta_arr.shape),
             "raytrace_factor": np.array([item["raytrace_factor"] for item in values], dtype=float).reshape(theta_arr.shape),
             "raytrace_field_scale": np.array([item["raytrace_field_scale"] for item in values], dtype=float).reshape(theta_arr.shape),
+            "raytrace_bin_width": np.array([item["raytrace_bin_width"] for item in values], dtype=float).reshape(theta_arr.shape),
+            "raytrace_lateral_slope": np.array([item["raytrace_lateral_slope"] for item in values], dtype=float).reshape(theta_arr.shape),
             "raytrace_internal_intensity": np.array([item["raytrace_internal_intensity"] for item in values], dtype=float).reshape(theta_arr.shape),
             "raytrace_transmitted_intensity": np.array([item["raytrace_transmitted_intensity"] for item in values], dtype=float).reshape(theta_arr.shape),
             "reference_internal_intensity": np.array([item["reference_internal_intensity"] for item in values], dtype=float).reshape(theta_arr.shape),
