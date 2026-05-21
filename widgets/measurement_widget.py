@@ -416,6 +416,8 @@ class SHGMeasurementWidget(QGroupBox):
         if self.runner.is_running:
             QMessageBox.warning(self, "Warning", "Measurement already in progress.")
             return
+        if not self._prepare_stage_widgets_for_measurement():
+            return
 
         measurement_id = self.sample_edit.text().strip()
         selected_sample = self._selected_sample_entry()
@@ -506,6 +508,30 @@ class SHGMeasurementWidget(QGroupBox):
         self.run_btn.setEnabled(False)
         self.abort_btn.setEnabled(True)
         self.thread.start()
+
+    def _prepare_stage_widgets_for_measurement(self):
+        if self.devices_tab is None:
+            return True
+
+        for stage_widget in (
+            getattr(self.devices_tab, "stage_lin_widget", None),
+            getattr(self.devices_tab, "stage_rot_widget", None),
+        ):
+            if stage_widget is None:
+                continue
+            command_thread = getattr(stage_widget, "command_thread", None)
+            if command_thread is not None and command_thread.isRunning():
+                QMessageBox.warning(
+                    self,
+                    "Stage Busy",
+                    "Please wait for the manual stage command to finish before starting measurement.",
+                )
+                return False
+            live_read_checkbox = getattr(stage_widget, "live_read_checkbox", None)
+            if live_read_checkbox is not None and live_read_checkbox.isChecked():
+                live_read_checkbox.setChecked(False)
+
+        return True
 
     def abort_measurement(self):
         if self.runner.is_running:
