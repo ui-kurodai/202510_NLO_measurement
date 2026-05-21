@@ -63,7 +63,10 @@ class Ophir3APowerMeterController:
                     "then make sure this Python process has the same 32/64-bit architecture "
                     "as the registered Ophir COM component."
                 ) from exc
-            self._lm.StartApplication()
+            try:
+                self._lm.StartApplication()
+            except Exception as exc:
+                logging.info("Ophir COM object has no StartApplication method or does not require it: %s", exc)
 
     def scan_usb(self) -> list[str]:
         self.start_application()
@@ -105,7 +108,7 @@ class Ophir3APowerMeterController:
             try:
                 self._lm.StopApplication()
             except Exception as exc:
-                logging.warning("Failed to stop Ophir application: %s", exc)
+                logging.info("Ophir COM object has no StopApplication method or does not require it: %s", exc)
         self._lm = None
 
     def get_sensor_info(self) -> Any:
