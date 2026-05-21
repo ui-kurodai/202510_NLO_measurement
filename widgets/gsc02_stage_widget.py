@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QGroupBox, QPushButton, QLabel, QVBoxLayout, QHBoxLayout,
-    QMessageBox, QComboBox, QDoubleSpinBox, QCheckBox
+    QMessageBox, QComboBox, QDoubleSpinBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from devices.osms2035_control import OSMS2035Controller
@@ -8,7 +8,6 @@ from devices.osms60yaw_control import OSMS60YAWController
 import serial.tools.list_ports
 import logging
 from threading import Lock
-import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - in %(filename)s - %(message)s')
 
@@ -28,7 +27,6 @@ class StageCommonWidget(QGroupBox):
         self.controller = None
         self.axis = axis
         self.unit = unit
-        self.polling_thread = None
         self.command_thread = None
         self._serial_Lock = Lock()
 
@@ -45,6 +43,9 @@ class StageCommonWidget(QGroupBox):
 
         # stage status
         self.position_label = QLabel(f"Position: --- {self.unit}")
+        position_font = self.position_label.font()
+        position_font.setPointSizeF(position_font.pointSizeF() * 2)
+        self.position_label.setFont(position_font)
         self.ready_label = QLabel("Busy/Ready: ---")
         self.motor_label = QLabel("Manual operation: ---")
         self.status_label = QLabel("Status message: ---")
@@ -64,13 +65,6 @@ class StageCommonWidget(QGroupBox):
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.refresh_status)
         self.refresh_btn.setEnabled(False)
-
-        self.live_read_checkbox = QCheckBox("Live read")
-        self.live_read_checkbox.setToolTip(
-            "Polls stage status periodically. Commands are serialized per COM port, but keep this off during measurements."
-        )
-        self.live_read_checkbox.toggled.connect(self.toggle_live_read)
-        self.live_read_checkbox.setEnabled(False)
 
         self.return_origin_btn = QPushButton("Origin")
         self.return_origin_btn.clicked.connect(self.reset)
@@ -110,7 +104,6 @@ class StageCommonWidget(QGroupBox):
         move_layout.addWidget(self.target_spin)
         move_layout.addWidget(self.move_to_btn)
         move_layout.addWidget(self.refresh_btn)
-        move_layout.addWidget(self.live_read_checkbox)
         layout.addLayout(move_layout)
 
         jog_layout = QHBoxLayout()
@@ -158,7 +151,6 @@ class StageCommonWidget(QGroupBox):
         self.target_spin.setEnabled(enabled)
         self.move_to_btn.setEnabled(enabled)
         self.refresh_btn.setEnabled(enabled)
-        self.live_read_checkbox.setEnabled(enabled)
 
 
     def set_busy(self, busy, message=None):
@@ -204,12 +196,6 @@ class StageCommonWidget(QGroupBox):
         
         # Connection OFF
         else:
-            # stop polling
-            if self.polling_thread is not None:
-                try:
-                    self.polling_thread.stop()
-                except Exception as e:
-                    logging.error(f"Failed to stop polling: {e}")
             # stop serial communication
             if self.controller.is_connected:
                 with self._serial_Lock:
@@ -218,7 +204,6 @@ class StageCommonWidget(QGroupBox):
                         self.controller = None
                     except Exception as e:
                         logging.error(f"Failed to close communication with stage: {e}")
-                self.polling_thread = None
                 self.command_thread = None
                 self.connect_btn.setText("Disconnected")
                 self.set_controls_enabled(False)
@@ -290,24 +275,6 @@ class StageCommonWidget(QGroupBox):
         if not self._has_controller():
             return
         self._start_command(lambda: None, "Reading status...")
-
-
-    def toggle_live_read(self, enabled):
-        if enabled:
-            if not self._has_controller():
-                self.live_read_checkbox.setChecked(False)
-                return
-            self.polling_thread = StagePollingThread(self.controller, self._serial_Lock, interval=2.0)
-            self.polling_thread.status_updated.connect(self.update_status)
-            self.polling_thread.polling_failed.connect(self.on_command_failed)
-            self.polling_thread.start()
-            self.status_label.setText("Status message: Live read enabled")
-        else:
-            if self.polling_thread is not None:
-                self.polling_thread.stop()
-                self.polling_thread = None
-            if self.controller is not None:
-                self.status_label.setText("Status message: Live read disabled")
 
 
     def update_status(self, status_dict):
@@ -383,11 +350,9 @@ class StageCommonWidget(QGroupBox):
 
 
     def shutdown(self):
-        if self.polling_thread is not None:
-            self.polling_thread.stop()
-            self.polling_thread = None
         if self.command_thread is not None and self.command_thread.isRunning():
-            self.command_thread.wait()
+            if not self.command_thread.wait(3000):
+                logging.warning("Timed out while waiting for stage command thread during shutdown.")
         if self.controller is not None:
             if self.controller.is_connected:
                 try:
@@ -420,46 +385,6 @@ class StageCommandThread(QThread):
             self.command_failed.emit(str(e))
         finally:
             self.command_finished.emit()
-
-
-class StagePollingThread(QThread):
-    status_updated = pyqtSignal(dict)
-    polling_failed = pyqtSignal(str)
-
-    def __init__(self, controller, lock, interval=1.0, parent=None):
-        super().__init__(parent)
-        self.controller = controller
-        self.lock = lock
-        self.interval = interval
-        self._running = True
-
-
-    def run(self):
-        while self._running:
-            with self.lock:
-                try:
-                    if self.controller.axis == 1:
-                        position = self.controller.millimeter
-                    elif self.controller.axis == 2:
-                        position = self.controller.degree
-                    else:
-                        position = None
-                    status = {
-                        "position": position,
-                        "ready": self.controller.is_ready,
-                        "motor": self.controller.is_energized,
-                        "status": self.controller.is_last_command_success,
-                    }
-                    self.status_updated.emit(status)
-                except Exception as e:
-                    logging.error(f"Polling failed: {e}")
-                    self.polling_failed.emit(str(e))
-            time.sleep(self.interval)
-
-
-    def stop(self):
-        self._running = False
-        self.wait()
 
 
 class OSMS2035Widget(StageCommonWidget):

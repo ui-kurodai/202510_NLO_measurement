@@ -137,6 +137,7 @@ class OSMS60YAWController(GSC02Controller):
                 # cw is "-"
                 elif direction == "cw":
                     angle = delta if delta < 0 else -360 + delta
+                    _ = False
 
                 else:
                     logging.error("Invalid direction: choose from 'ccw', or 'auto'")

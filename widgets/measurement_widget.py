@@ -527,9 +527,6 @@ class SHGMeasurementWidget(QGroupBox):
                     "Please wait for the manual stage command to finish before starting measurement.",
                 )
                 return False
-            live_read_checkbox = getattr(stage_widget, "live_read_checkbox", None)
-            if live_read_checkbox is not None and live_read_checkbox.isChecked():
-                live_read_checkbox.setChecked(False)
 
         return True
 
