@@ -166,6 +166,11 @@ class Ophir3APowerMeterController:
         except Exception as exc:
             raise RuntimeError(f"Failed to read Ophir response for command {command!r}.") from exc
 
+    @staticmethod
+    def _legacy_response_failed(response: str) -> bool:
+        text = response.strip().upper()
+        return text.startswith("?") or any(token in text for token in ("ERROR", "FAILED", "INVALID", "UNKNOWN"))
+
     def get_measurement_modes(self) -> OphirOptionSet:
         self._require_connected()
         return self._option_set_from_response(self._lm.GetMeasurementMode(self._device_handle, self.channel))
@@ -332,20 +337,40 @@ class Ophir3APowerMeterController:
     def zero(self, wait_s: float = 30.0, poll_interval_s: float = 0.5) -> None:
         self._require_connected()
         self.stop_stream()
-        sent = False
-        for command in ("$ZE", "ZE"):
+        zero_command = None
+        first_response = None
+        for command in ("ZE", "$ZE"):
             try:
-                self._lm.Write(self._device_handle, command)
-                sent = True
+                response = self.ask_legacy_command(command)
+                if self._legacy_response_failed(response):
+                    logging.debug("Ophir zero command %s returned %s", command, response)
+                    continue
+                zero_command = command
+                first_response = response
                 break
             except Exception as exc:
                 logging.debug("Ophir zero command %s failed: %s", command, exc)
-        if not sent:
+        if zero_command is None:
             raise RuntimeError("Failed to send zero command to Ophir power meter.")
 
         deadline = time.monotonic() + max(0.0, wait_s)
+        last_status = first_response
+        query_command = "ZQ" if zero_command == "ZE" else "$ZQ"
         while time.monotonic() < deadline:
             time.sleep(min(poll_interval_s, max(0.0, deadline - time.monotonic())))
+            try:
+                last_status = self.ask_legacy_command(query_command)
+            except Exception as exc:
+                logging.debug("Ophir zero status query %s failed: %s", query_command, exc)
+                continue
+
+            status_text = str(last_status).upper()
+            if "COMPLETED" in status_text:
+                return
+            if "FAILED" in status_text or "ABORTED" in status_text:
+                raise RuntimeError(f"Ophir zeroing failed: {last_status}")
+
+        raise RuntimeError(f"Ophir zeroing did not complete within {wait_s:g} s. Last status: {last_status}")
 
     def start_stream(self) -> None:
         self._ensure_com_initialized()
