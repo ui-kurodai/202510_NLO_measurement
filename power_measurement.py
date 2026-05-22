@@ -390,47 +390,51 @@ class PowerMeasurementRunner:
         if not dry_run:
             self.powermeter.set_wavelength_nm(shg_wavelength_nm)
             self._return_rotation_stage_origin()
+            self.powermeter.start_stream()
 
-        for scan_index, angle in enumerate(estimated_angles, start=1):
-            if self._abort:
-                break
-            scan_label = f"theta{scan_index}"
-            scan_points = self._make_positive_scan_points(angle, scan_range, step)
-            csv_path = None if base_dir is None else os.path.join(base_dir, f"{scan_label}.csv")
-            if csv_path is not None:
-                csv_paths.append(csv_path)
-            scan_record = {
-                "label": scan_label,
-                "estimated_angle": angle,
-                "positions": [],
-                "powers": [],
-                "stats": [],
-            }
-            self.scans.append(scan_record)
+        try:
+            for scan_index, angle in enumerate(estimated_angles, start=1):
+                if self._abort:
+                    break
+                scan_label = f"theta{scan_index}"
+                scan_points = self._make_positive_scan_points(angle, scan_range, step)
+                csv_path = None if base_dir is None else os.path.join(base_dir, f"{scan_label}.csv")
+                if csv_path is not None:
+                    csv_paths.append(csv_path)
+                scan_record = {
+                    "label": scan_label,
+                    "estimated_angle": angle,
+                    "positions": [],
+                    "powers": [],
+                    "stats": [],
+                }
+                self.scans.append(scan_record)
 
-            with self._open_csv(csv_path, dry_run=dry_run or csv_path is None) as writer:
-                if writer is not None:
-                    writer.writerow(["angle_deg", "power_w", "std_w", "n"])
-                for pos in scan_points:
-                    if self._abort:
-                        break
-                    logging.info("[Power] Moving to %.4f deg for %s", pos, scan_label)
-                    if not dry_run:
-                        self.stage_rot.move_to_angle(pos, "ccw")
-                        time.sleep(2.0)
-                        stats = self._average_power_tail(total_wait_s=4.0, tail_s=2.0)
-                    else:
-                        time.sleep(0.02)
-                        stats = self._dry_run_power(pos, angle)
-
-                    power = float(stats["mean_w"])
-                    scan_record["positions"].append(pos)
-                    scan_record["powers"].append(power)
-                    scan_record["stats"].append(dict(stats))
+                with self._open_csv(csv_path, dry_run=dry_run or csv_path is None) as writer:
                     if writer is not None:
-                        writer.writerow([pos, power, stats["std_w"], stats["n"]])
-                    if on_progress:
-                        on_progress(scan_index - 1, pos, power)
+                        writer.writerow(["angle_deg", "power_w", "std_w", "n"])
+                    for pos in scan_points:
+                        if self._abort:
+                            break
+                        logging.info("[Power] Moving to %.4f deg for %s", pos, scan_label)
+                        if not dry_run:
+                            self.stage_rot.move_to_angle(pos, "ccw")
+                            stats = self._average_power_after_settle_tail(total_wait_s=4.0, tail_s=2.0)
+                        else:
+                            time.sleep(0.02)
+                            stats = self._dry_run_power(pos, angle)
+
+                        power = float(stats["mean_w"])
+                        scan_record["positions"].append(pos)
+                        scan_record["powers"].append(power)
+                        scan_record["stats"].append(dict(stats))
+                        if writer is not None:
+                            writer.writerow([pos, power, stats["std_w"], stats["n"]])
+                        if on_progress:
+                            on_progress(scan_index - 1, pos, power)
+        finally:
+            if not dry_run:
+                self.powermeter.stop_stream()
         return csv_paths
 
     def _measure_fundamental_power(self, wavelength_nm: float, dry_run: bool) -> dict:
@@ -475,6 +479,33 @@ class PowerMeasurementRunner:
             self.stage_rot.reset()
         except TypeError:
             self.stage_rot.reset("-")
+
+    def _average_power_after_settle_tail(self, total_wait_s: float, tail_s: float) -> dict:
+        self._drain_powermeter_stream()
+        deadline = time.monotonic() + max(0.0, total_wait_s)
+        tail_start = deadline - max(0.0, tail_s)
+        values = []
+        while time.monotonic() < deadline:
+            readings = self.powermeter.read_available_data()
+            if time.monotonic() >= tail_start:
+                values.extend(
+                    reading.power_w
+                    for reading in readings
+                    if self.powermeter._is_valid_reading(reading)
+                )
+            time.sleep(0.1)
+        if not values:
+            raise RuntimeError("No Ophir readings were collected during SHG averaging.")
+        mean = sum(values) / len(values)
+        variance = sum((value - mean) ** 2 for value in values) / len(values)
+        return {"mean_w": mean, "min_w": min(values), "max_w": max(values), "std_w": variance ** 0.5, "n": len(values)}
+
+    def _drain_powermeter_stream(self) -> None:
+        try:
+            while self.powermeter.read_available_data():
+                pass
+        except RuntimeError:
+            pass
 
     def _average_power_tail(self, total_wait_s: float, tail_s: float) -> dict:
         values = []
