@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from threading import Event
-
 from PyQt6.QtCore import QLocale, QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -95,8 +93,10 @@ class PowerMeasurementWidget(QGroupBox):
 
         self.dry_run_checkbox = QCheckBox("Dry Run")
 
-        self.run_btn = QPushButton("Start Step 1")
-        self.run_btn.clicked.connect(self.start_measurement)
+        self.measure_fundamental_btn = QPushButton("Measure Fundamental Power")
+        self.measure_fundamental_btn.clicked.connect(self.start_fundamental_measurement)
+        self.measure_shg_btn = QPushButton("Measure SHG Power")
+        self.measure_shg_btn.clicked.connect(self.start_shg_measurement)
         self.abort_btn = QPushButton("Abort")
         self.abort_btn.setEnabled(False)
         self.abort_btn.clicked.connect(self.abort_measurement)
@@ -165,7 +165,10 @@ class PowerMeasurementWidget(QGroupBox):
         layout.addWidget(self.dry_run_checkbox)
         layout.addWidget(QLabel("Notes:"))
         layout.addWidget(self.notes_edit)
-        layout.addWidget(self.run_btn)
+        run_buttons = QHBoxLayout()
+        run_buttons.addWidget(self.measure_fundamental_btn)
+        run_buttons.addWidget(self.measure_shg_btn)
+        layout.addLayout(run_buttons)
         layout.addWidget(self.abort_btn)
         layout.addWidget(self.canvas)
         self.setLayout(root_layout)
@@ -283,15 +286,21 @@ class PowerMeasurementWidget(QGroupBox):
             return None
         return sample_id, crystal_orientation, suffix
 
-    def start_measurement(self):
+    def start_fundamental_measurement(self):
+        self.start_measurement("fundamental")
+
+    def start_shg_measurement(self):
+        self.start_measurement("shg")
+
+    def start_measurement(self, measurement_task: str):
         dry_run = self.dry_run_checkbox.isChecked()
         try:
-            stage_rot = self.devices_tab.stage_rot_widget.controller
+            stage_rot = self.devices_tab.stage_rot_widget.controller if measurement_task == "shg" else None
             powermeter = None if dry_run else self.devices_tab.powermeter_widget.controller
         except AttributeError:
             QMessageBox.warning(self, "Not Ready", "MainWindow does not have required controller widgets.")
             return
-        if stage_rot is None:
+        if measurement_task == "shg" and stage_rot is None:
             QMessageBox.warning(self, "Not Ready", "Rotation stage is not connected.")
             return
         if not dry_run and powermeter is None:
@@ -325,9 +334,13 @@ class PowerMeasurementWidget(QGroupBox):
 
         estimated_angles = [float(spin.value()) for spin in self._angle_spins]
         self.runner = PowerMeasurementRunner(stage_rot=stage_rot, powermeter=powermeter)
-        self._setup_plot(len(estimated_angles))
+        if measurement_task == "shg":
+            self._setup_plot(len(estimated_angles))
+        else:
+            self._setup_plot(0)
         self.thread = PowerMeasurementThread(
             runner=self.runner,
+            measurement_task=measurement_task,
             sample=sample_id,
             material=material,
             crystal_orientation=crystal_orientation,
@@ -344,11 +357,11 @@ class PowerMeasurementWidget(QGroupBox):
             beam_profile_entry=self._selected_beam_profile_entry(),
             dry_run=dry_run,
         )
-        self.thread.fundamental_finished.connect(self.confirm_step2)
         self.thread.progress_updated.connect(self.update_plot)
         self.thread.finished.connect(self.finish_measurement)
         self.thread.failed.connect(self.measurement_failed)
-        self.run_btn.setEnabled(False)
+        self._stop_powermeter_widget_polling()
+        self._set_run_buttons_enabled(False)
         self.abort_btn.setEnabled(True)
         self.thread.start()
 
@@ -363,6 +376,12 @@ class PowerMeasurementWidget(QGroupBox):
     def _setup_plot(self, count: int):
         self.figure.clear()
         self.axes = []
+        if count <= 0:
+            ax = self.figure.add_subplot(111)
+            ax.set_axis_off()
+            ax.text(0.5, 0.5, "Fundamental power measurement", ha="center", va="center")
+            self.canvas.draw()
+            return
         for index in range(count):
             ax = self.figure.add_subplot(count, 1, index + 1)
             ax.set_xlabel("Angle (deg)")
@@ -371,16 +390,6 @@ class PowerMeasurementWidget(QGroupBox):
             self.axes.append(ax)
         self.figure.tight_layout()
         self.canvas.draw()
-
-    def confirm_step2(self, stats: dict):
-        mean_w = stats.get("mean_w", 0.0)
-        std_w = stats.get("std_w", 0.0)
-        message = f"Fundamental power: {mean_w:.6g} W (std {std_w:.3g} W).\nStart SHG power scan?"
-        answer = QMessageBox.question(self, "Step 1 Complete", message)
-        if answer == QMessageBox.StandardButton.Yes:
-            self.thread.allow_step2()
-        else:
-            self.abort_measurement()
 
     def update_plot(self, scan_index: int, pos: float, power: float):
         del pos, power
@@ -399,56 +408,76 @@ class PowerMeasurementWidget(QGroupBox):
     def abort_measurement(self):
         if self.runner is not None and self.runner.is_running:
             self.runner.abort()
-        if self.thread is not None:
-            self.thread.allow_step2()
         self.abort_btn.setEnabled(False)
 
     def finish_measurement(self, result_dict):
-        self.run_btn.setEnabled(True)
+        self._set_run_buttons_enabled(True)
         self.abort_btn.setEnabled(False)
+        self._restart_powermeter_widget_polling()
         if result_dict.get("base_dir"):
             fig_path = f"{result_dict['base_dir']}/power_measurement.png"
             self.figure.savefig(fig_path, dpi=300, bbox_inches="tight")
         if result_dict.get("aborted"):
             QMessageBox.information(self, "Aborted", "Power measurement aborted.")
+        elif result_dict.get("fundamental_power"):
+            stats = result_dict["fundamental_power"]
+            QMessageBox.information(
+                self,
+                "Done",
+                f"Fundamental power measurement complete.\n\n"
+                f"Mean: {stats.get('mean_w', 0.0):.6g} W\n"
+                f"Std: {stats.get('std_w', 0.0):.3g} W",
+            )
         else:
-            QMessageBox.information(self, "Done", "Power measurement complete.")
+            QMessageBox.information(self, "Done", "SHG power measurement complete.")
 
     def measurement_failed(self, message: str):
-        self.run_btn.setEnabled(True)
+        self._set_run_buttons_enabled(True)
         self.abort_btn.setEnabled(False)
+        self._restart_powermeter_widget_polling()
         QMessageBox.critical(self, "Measurement Error", message)
+
+    def _set_run_buttons_enabled(self, enabled: bool):
+        self.measure_fundamental_btn.setEnabled(enabled)
+        self.measure_shg_btn.setEnabled(enabled)
+
+    def _stop_powermeter_widget_polling(self):
+        if self.dry_run_checkbox.isChecked() or self.devices_tab is None:
+            return
+        powermeter_widget = getattr(self.devices_tab, "powermeter_widget", None)
+        if powermeter_widget is not None and hasattr(powermeter_widget, "stop_polling"):
+            powermeter_widget.stop_polling()
+
+    def _restart_powermeter_widget_polling(self):
+        if self.dry_run_checkbox.isChecked() or self.devices_tab is None:
+            return
+        powermeter_widget = getattr(self.devices_tab, "powermeter_widget", None)
+        if powermeter_widget is not None and hasattr(powermeter_widget, "start_polling"):
+            powermeter_widget.start_polling()
 
 
 class PowerMeasurementThread(QThread):
-    fundamental_finished = pyqtSignal(dict)
     progress_updated = pyqtSignal(int, float, float)
     finished = pyqtSignal(dict)
     failed = pyqtSignal(str)
 
-    def __init__(self, runner, **kwargs):
+    def __init__(self, runner, measurement_task: str, **kwargs):
         super().__init__()
         self.runner = runner
+        self.measurement_task = measurement_task
         self.kwargs = kwargs
-        self._continue_event = Event()
-
-    def allow_step2(self):
-        self._continue_event.set()
 
     def run(self):
-        def on_step1_complete(stats):
-            self.fundamental_finished.emit(stats)
-
         def on_progress(scan_index, pos, power):
             self.progress_updated.emit(scan_index, pos, power)
 
         try:
-            self.runner.run(
-                continue_event=self._continue_event,
-                on_step1_complete=on_step1_complete,
-                on_progress=on_progress,
-                **self.kwargs,
-            )
+            if self.measurement_task == "fundamental":
+                self.runner.run_fundamental_power(**self.kwargs)
+            elif self.measurement_task == "shg":
+                self.runner.run_shg_power_scan(on_progress=on_progress, **self.kwargs)
+            else:
+                raise RuntimeError(f"Unknown power measurement task: {self.measurement_task}")
         except Exception as exc:
             self.failed.emit(str(exc))
             return

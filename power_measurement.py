@@ -8,7 +8,6 @@ import os
 import random
 import time
 from datetime import datetime
-from threading import Event
 
 from measurement_metadata import beam_metadata_from_entry, sample_metadata_from_entry
 
@@ -42,7 +41,6 @@ class PowerMeasurementRunner:
         sample_entry: dict | None = None,
         beam_profile_entry: dict | None = None,
         dry_run: bool = False,
-        continue_event: Event | None = None,
         on_step1_complete=None,
         on_progress=None,
     ) -> dict:
@@ -89,57 +87,224 @@ class PowerMeasurementRunner:
             if on_step1_complete:
                 on_step1_complete(self.fundamental_power)
 
-            if continue_event is not None:
-                while not self._abort and not continue_event.wait(0.1):
-                    pass
-
             if self._abort:
                 return self._finish_result(base_dir, meta_path, csv_paths, aborted=True)
 
-            if not dry_run:
-                self.powermeter.set_power_mode()
-                self.powermeter.set_wavelength_nm(shg_wavelength_nm)
-
-            for scan_index, angle in enumerate(estimated_angles, start=1):
-                if self._abort:
-                    break
-                scan_label = f"theta{scan_index}"
-                scan_points = self._make_positive_scan_points(angle, scan_range, step)
-                csv_path = os.path.join(base_dir, f"{scan_label}.csv")
-                csv_paths.append(csv_path)
-                scan_record = {"label": scan_label, "estimated_angle": angle, "positions": [], "powers": []}
-                self.scans.append(scan_record)
-
-                with self._open_csv(csv_path, dry_run=dry_run) as writer:
-                    if writer is not None:
-                        writer.writerow(["angle_deg", "power_w", "min_w", "max_w", "std_w", "n"])
-                    for pos in scan_points:
-                        if self._abort:
-                            break
-                        logging.info("[Power] Moving to %.4f deg for %s", pos, scan_label)
-                        if not dry_run:
-                            self.stage_rot.move_to_angle(pos, "ccw")
-                            time.sleep(2.0)
-                            stats = self._average_power_tail(total_wait_s=4.0, tail_s=2.0)
-                        else:
-                            time.sleep(0.02)
-                            stats = self._dry_run_power(pos, angle)
-
-                        power = float(stats["mean_w"])
-                        scan_record["positions"].append(pos)
-                        scan_record["powers"].append(power)
-                        if writer is not None:
-                            writer.writerow([pos, power, stats["min_w"], stats["max_w"], stats["std_w"], stats["n"]])
-                        if on_progress:
-                            on_progress(scan_index - 1, pos, power)
+            csv_paths = self._measure_shg_power_scan(
+                base_dir=base_dir,
+                estimated_angles=estimated_angles,
+                scan_range=scan_range,
+                step=step,
+                shg_wavelength_nm=shg_wavelength_nm,
+                dry_run=dry_run,
+                on_progress=on_progress,
+            )
         finally:
             self.is_running = False
             self.result = self._finish_result(base_dir, meta_path, csv_paths, aborted=self._abort)
 
         return self.result
 
+    def run_fundamental_power(
+        self,
+        sample: str,
+        material: str,
+        crystal_orientation: str,
+        measurement_id: str,
+        axis: str,
+        fundamental_wavelength_nm: float,
+        shg_wavelength_nm: float,
+        estimated_angles: list[float],
+        scan_range: float,
+        step: float,
+        operator: str,
+        notes: str,
+        sample_entry: dict | None = None,
+        beam_profile_entry: dict | None = None,
+        dry_run: bool = False,
+    ) -> dict:
+        self._abort = False
+        self.is_running = True
+        self.scans = []
+        self.fundamental_power = None
+        base_dir, meta_path, metadata = self._prepare_run_context(
+            sample=sample,
+            material=material,
+            crystal_orientation=crystal_orientation,
+            measurement_id=measurement_id,
+            axis=axis,
+            fundamental_wavelength_nm=fundamental_wavelength_nm,
+            shg_wavelength_nm=shg_wavelength_nm,
+            estimated_angles=estimated_angles,
+            scan_range=scan_range,
+            step=step,
+            operator=operator,
+            notes=notes,
+            sample_entry=sample_entry,
+            beam_profile_entry=beam_profile_entry,
+            measurement_kind="fundamental_power",
+        )
+        try:
+            self.fundamental_power = self._measure_fundamental_power(fundamental_wavelength_nm, dry_run=dry_run)
+            metadata["fundamental_power"] = self.fundamental_power
+            self._write_metadata(meta_path, metadata, dry_run=dry_run)
+        finally:
+            self.is_running = False
+            self.result = self._finish_result(base_dir, meta_path, [], aborted=self._abort)
+        return self.result
+
+    def run_shg_power_scan(
+        self,
+        sample: str,
+        material: str,
+        crystal_orientation: str,
+        measurement_id: str,
+        estimated_angles: list[float],
+        scan_range: float,
+        step: float,
+        axis: str,
+        fundamental_wavelength_nm: float,
+        shg_wavelength_nm: float,
+        operator: str,
+        notes: str,
+        sample_entry: dict | None = None,
+        beam_profile_entry: dict | None = None,
+        dry_run: bool = False,
+        on_progress=None,
+    ) -> dict:
+        self._abort = False
+        self.is_running = True
+        self.scans = []
+        base_dir, meta_path, metadata = self._prepare_run_context(
+            sample=sample,
+            material=material,
+            crystal_orientation=crystal_orientation,
+            measurement_id=measurement_id,
+            axis=axis,
+            fundamental_wavelength_nm=fundamental_wavelength_nm,
+            shg_wavelength_nm=shg_wavelength_nm,
+            estimated_angles=estimated_angles,
+            scan_range=scan_range,
+            step=step,
+            operator=operator,
+            notes=notes,
+            sample_entry=sample_entry,
+            beam_profile_entry=beam_profile_entry,
+            measurement_kind="shg_power_scan",
+        )
+        csv_paths = []
+        try:
+            self._write_metadata(meta_path, metadata, dry_run=dry_run)
+            csv_paths = self._measure_shg_power_scan(
+                base_dir=base_dir,
+                estimated_angles=estimated_angles,
+                scan_range=scan_range,
+                step=step,
+                shg_wavelength_nm=shg_wavelength_nm,
+                dry_run=dry_run,
+                on_progress=on_progress,
+            )
+        finally:
+            self.is_running = False
+            self.result = self._finish_result(base_dir, meta_path, csv_paths, aborted=self._abort)
+        return self.result
+
     def abort(self):
         self._abort = True
+
+    def _prepare_run_context(
+        self,
+        sample: str,
+        material: str,
+        crystal_orientation: str,
+        measurement_id: str,
+        axis: str,
+        fundamental_wavelength_nm: float,
+        shg_wavelength_nm: float,
+        estimated_angles: list[float],
+        scan_range: float,
+        step: float,
+        operator: str,
+        notes: str,
+        measurement_kind: str,
+        sample_entry: dict | None,
+        beam_profile_entry: dict | None,
+    ) -> tuple[str, str, dict]:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        base_dir = os.path.join("results", f"{timestamp}_{sample}_power_{measurement_id}_{measurement_kind}")
+        os.makedirs(base_dir, exist_ok=True)
+        meta_path = os.path.join(base_dir, "power_measurement.json")
+        metadata = {
+            "sample": sample,
+            "material": material,
+            "crystal_orientation": crystal_orientation,
+            "measurement_id": measurement_id,
+            "measurement_kind": measurement_kind,
+            "method": "power_phase_matching_scan",
+            "rot/trans_axis": axis,
+            "fundamental_wavelength_nm": fundamental_wavelength_nm,
+            "shg_wavelength_nm": shg_wavelength_nm,
+            "estimated_pm_angles_deg": estimated_angles,
+            "scan_range_deg": scan_range,
+            "step_deg": step,
+            "operator": operator,
+            "notes": notes,
+            "timestamp": datetime.now().isoformat(),
+        }
+        if sample_entry is not None:
+            metadata.update(sample_metadata_from_entry(sample_entry))
+        if beam_profile_entry is not None:
+            metadata.update(beam_metadata_from_entry(beam_profile_entry))
+        return base_dir, meta_path, metadata
+
+    def _measure_shg_power_scan(
+        self,
+        base_dir: str,
+        estimated_angles: list[float],
+        scan_range: float,
+        step: float,
+        shg_wavelength_nm: float,
+        dry_run: bool,
+        on_progress=None,
+    ) -> list[str]:
+        csv_paths = []
+        if not dry_run:
+            self.powermeter.set_power_mode()
+            self.powermeter.set_wavelength_nm(shg_wavelength_nm)
+
+        for scan_index, angle in enumerate(estimated_angles, start=1):
+            if self._abort:
+                break
+            scan_label = f"theta{scan_index}"
+            scan_points = self._make_positive_scan_points(angle, scan_range, step)
+            csv_path = os.path.join(base_dir, f"{scan_label}.csv")
+            csv_paths.append(csv_path)
+            scan_record = {"label": scan_label, "estimated_angle": angle, "positions": [], "powers": []}
+            self.scans.append(scan_record)
+
+            with self._open_csv(csv_path, dry_run=dry_run) as writer:
+                if writer is not None:
+                    writer.writerow(["angle_deg", "power_w", "min_w", "max_w", "std_w", "n"])
+                for pos in scan_points:
+                    if self._abort:
+                        break
+                    logging.info("[Power] Moving to %.4f deg for %s", pos, scan_label)
+                    if not dry_run:
+                        self.stage_rot.move_to_angle(pos, "ccw")
+                        time.sleep(2.0)
+                        stats = self._average_power_tail(total_wait_s=4.0, tail_s=2.0)
+                    else:
+                        time.sleep(0.02)
+                        stats = self._dry_run_power(pos, angle)
+
+                    power = float(stats["mean_w"])
+                    scan_record["positions"].append(pos)
+                    scan_record["powers"].append(power)
+                    if writer is not None:
+                        writer.writerow([pos, power, stats["min_w"], stats["max_w"], stats["std_w"], stats["n"]])
+                    if on_progress:
+                        on_progress(scan_index - 1, pos, power)
+        return csv_paths
 
     def _measure_fundamental_power(self, wavelength_nm: float, dry_run: bool) -> dict:
         if dry_run:
