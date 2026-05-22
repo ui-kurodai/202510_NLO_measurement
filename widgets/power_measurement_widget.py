@@ -31,6 +31,17 @@ from power_measurement import PowerMeasurementRunner
 
 from crystaldatabase import CRYSTALS
 
+POWER_UNITS = [
+    ("Auto", None),
+    ("nW", 1e9),
+    ("uW", 1e6),
+    ("mW", 1e3),
+    ("W", 1.0),
+    ("kW", 1e-3),
+    ("MW", 1e-6),
+    ("GW", 1e-9),
+]
+
 
 class PowerMeasurementWidget(QGroupBox):
     def __init__(self, devices_tab=None, parent=None):
@@ -92,6 +103,11 @@ class PowerMeasurementWidget(QGroupBox):
         self.notes_edit.setFixedHeight(60)
 
         self.dry_run_checkbox = QCheckBox("Dry Run")
+        self.power_unit_combo = QComboBox()
+        for unit, scale in POWER_UNITS:
+            self.power_unit_combo.addItem(unit, scale)
+        self.power_unit_combo.setCurrentText("Auto")
+        self.power_unit_combo.currentIndexChanged.connect(self.refresh_plot_units)
 
         self.measure_fundamental_btn = QPushButton("Measure Fundamental Power")
         self.measure_fundamental_btn.clicked.connect(self.start_fundamental_measurement)
@@ -163,6 +179,11 @@ class PowerMeasurementWidget(QGroupBox):
         layout.addLayout(scan_layout)
 
         layout.addWidget(self.dry_run_checkbox)
+        unit_layout = QHBoxLayout()
+        unit_layout.addWidget(QLabel("Power unit:"))
+        unit_layout.addWidget(self.power_unit_combo)
+        unit_layout.addStretch(1)
+        layout.addLayout(unit_layout)
         layout.addWidget(QLabel("Notes:"))
         layout.addWidget(self.notes_edit)
         run_buttons = QHBoxLayout()
@@ -297,6 +318,7 @@ class PowerMeasurementWidget(QGroupBox):
         try:
             stage_rot = self.devices_tab.stage_rot_widget.controller if measurement_task == "shg" else None
             powermeter = None if dry_run else self.devices_tab.powermeter_widget.controller
+            laser = None if dry_run else self.devices_tab.laser_widget.controller
         except AttributeError:
             QMessageBox.warning(self, "Not Ready", "MainWindow does not have required controller widgets.")
             return
@@ -305,6 +327,9 @@ class PowerMeasurementWidget(QGroupBox):
             return
         if not dry_run and powermeter is None:
             QMessageBox.warning(self, "Not Ready", "Ophir power meter is not connected.")
+            return
+        if not dry_run and laser is None:
+            QMessageBox.warning(self, "Not Ready", "Laser controller is not connected.")
             return
         if not self._prepare_stage_widgets_for_measurement():
             return
@@ -333,7 +358,7 @@ class PowerMeasurementWidget(QGroupBox):
             material = self.material_combo.currentText()
 
         estimated_angles = [float(spin.value()) for spin in self._angle_spins]
-        self.runner = PowerMeasurementRunner(stage_rot=stage_rot, powermeter=powermeter)
+        self.runner = PowerMeasurementRunner(stage_rot=stage_rot, powermeter=powermeter, laser=laser)
         if measurement_task == "shg":
             self._setup_plot(len(estimated_angles))
         else:
@@ -360,7 +385,7 @@ class PowerMeasurementWidget(QGroupBox):
         self.thread.progress_updated.connect(self.update_plot)
         self.thread.finished.connect(self.finish_measurement)
         self.thread.failed.connect(self.measurement_failed)
-        self._stop_powermeter_widget_polling()
+        self._stop_device_polling_for_measurement()
         self._set_run_buttons_enabled(False)
         self.abort_btn.setEnabled(True)
         self.thread.start()
@@ -385,7 +410,7 @@ class PowerMeasurementWidget(QGroupBox):
         for index in range(count):
             ax = self.figure.add_subplot(count, 1, index + 1)
             ax.set_xlabel("Angle (deg)")
-            ax.set_ylabel("Power (W)")
+            ax.set_ylabel(f"Power ({self.current_power_unit()})")
             ax.set_title(f"theta{index + 1}")
             self.axes.append(ax)
         self.figure.tight_layout()
@@ -399,9 +424,9 @@ class PowerMeasurementWidget(QGroupBox):
         ax = self.axes[scan_index]
         ax.clear()
         ax.set_xlabel("Angle (deg)")
-        ax.set_ylabel("Power (W)")
+        ax.set_ylabel(f"Power ({self.current_power_unit()})")
         ax.set_title(scan["label"])
-        ax.plot(scan["positions"], scan["powers"], "-*", color="blue")
+        ax.plot(scan["positions"], [self.scale_power(power) for power in scan["powers"]], "-*", color="blue")
         self.figure.tight_layout()
         self.canvas.draw()
 
@@ -413,7 +438,7 @@ class PowerMeasurementWidget(QGroupBox):
     def finish_measurement(self, result_dict):
         self._set_run_buttons_enabled(True)
         self.abort_btn.setEnabled(False)
-        self._restart_powermeter_widget_polling()
+        self._restart_device_polling_after_measurement()
         if result_dict.get("base_dir"):
             fig_path = f"{result_dict['base_dir']}/power_measurement.png"
             self.figure.savefig(fig_path, dpi=300, bbox_inches="tight")
@@ -425,8 +450,8 @@ class PowerMeasurementWidget(QGroupBox):
                 self,
                 "Done",
                 f"Fundamental power measurement complete.\n\n"
-                f"Mean: {stats.get('mean_w', 0.0):.6g} W\n"
-                f"Std: {stats.get('std_w', 0.0):.3g} W",
+                f"Mean: {self.scale_power(stats.get('mean_w', 0.0)):.6g} {self.current_power_unit()}\n"
+                f"Std: {self.scale_power(stats.get('std_w', 0.0)):.3g} {self.current_power_unit()}",
             )
         else:
             QMessageBox.information(self, "Done", "SHG power measurement complete.")
@@ -434,26 +459,85 @@ class PowerMeasurementWidget(QGroupBox):
     def measurement_failed(self, message: str):
         self._set_run_buttons_enabled(True)
         self.abort_btn.setEnabled(False)
-        self._restart_powermeter_widget_polling()
+        self._restart_device_polling_after_measurement()
         QMessageBox.critical(self, "Measurement Error", message)
 
     def _set_run_buttons_enabled(self, enabled: bool):
         self.measure_fundamental_btn.setEnabled(enabled)
         self.measure_shg_btn.setEnabled(enabled)
 
-    def _stop_powermeter_widget_polling(self):
+    def _stop_device_polling_for_measurement(self):
         if self.dry_run_checkbox.isChecked() or self.devices_tab is None:
             return
         powermeter_widget = getattr(self.devices_tab, "powermeter_widget", None)
         if powermeter_widget is not None and hasattr(powermeter_widget, "stop_polling"):
             powermeter_widget.stop_polling()
+        laser_widget = getattr(self.devices_tab, "laser_widget", None)
+        laser_polling = getattr(laser_widget, "polling_thread", None)
+        if laser_polling is not None and hasattr(laser_polling, "stop"):
+            laser_polling.stop()
+            laser_widget.polling_thread = None
 
-    def _restart_powermeter_widget_polling(self):
+    def _restart_device_polling_after_measurement(self):
         if self.dry_run_checkbox.isChecked() or self.devices_tab is None:
             return
         powermeter_widget = getattr(self.devices_tab, "powermeter_widget", None)
         if powermeter_widget is not None and hasattr(powermeter_widget, "start_polling"):
             powermeter_widget.start_polling()
+        laser_widget = getattr(self.devices_tab, "laser_widget", None)
+        if (
+            laser_widget is not None
+            and getattr(laser_widget, "controller", None) is not None
+            and getattr(laser_widget, "polling_thread", None) is None
+        ):
+            from widgets.crylasQlaser_widget import LaserPollingThread
+
+            laser_widget.polling_thread = LaserPollingThread(laser_widget.controller, interval=1.0)
+            laser_widget.polling_thread.status_updated.connect(laser_widget.update_status)
+            laser_widget.polling_thread.start()
+
+    def current_power_unit(self) -> str:
+        selected = self.power_unit_combo.currentText() or "W"
+        if selected != "Auto":
+            return selected
+        return self.auto_power_unit()
+
+    def power_scale(self) -> float:
+        selected = self.power_unit_combo.currentText() or "W"
+        if selected == "Auto":
+            return dict(POWER_UNITS[1:]).get(self.auto_power_unit(), 1.0)
+        return float(self.power_unit_combo.currentData() or 1.0)
+
+    def scale_power(self, power_w: float) -> float:
+        return float(power_w) * self.power_scale()
+
+    def auto_power_unit(self) -> str:
+        values = []
+        if self.runner is not None:
+            for scan in self.runner.scans:
+                values.extend(abs(power) for power in scan.get("powers", []))
+            if self.runner.fundamental_power:
+                values.append(abs(float(self.runner.fundamental_power.get("mean_w", 0.0))))
+        peak = max(values, default=0.0)
+        if peak < 1e-6:
+            return "nW"
+        if peak < 1e-3:
+            return "uW"
+        if peak < 1.0:
+            return "mW"
+        if peak < 1e3:
+            return "W"
+        if peak < 1e6:
+            return "kW"
+        if peak < 1e9:
+            return "MW"
+        return "GW"
+
+    def refresh_plot_units(self):
+        if self.runner is None:
+            return
+        for index, _ in enumerate(self.axes):
+            self.update_plot(index, 0.0, 0.0)
 
 
 class PowerMeasurementThread(QThread):

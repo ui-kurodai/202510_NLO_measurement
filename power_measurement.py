@@ -15,9 +15,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - in
 
 
 class PowerMeasurementRunner:
-    def __init__(self, stage_rot, powermeter):
+    def __init__(self, stage_rot, powermeter, laser=None):
         self.stage_rot = stage_rot
         self.powermeter = powermeter
+        self.laser = laser
         self.scans = []
         self.fundamental_power = None
         self.result = None
@@ -77,6 +78,7 @@ class PowerMeasurementRunner:
 
         csv_paths = []
         try:
+            self._prepare_optical_measurement(wavelength_nm=fundamental_wavelength_nm, dry_run=dry_run)
             self.fundamental_power = self._measure_fundamental_power(
                 wavelength_nm=fundamental_wavelength_nm,
                 dry_run=dry_run,
@@ -90,6 +92,7 @@ class PowerMeasurementRunner:
             if self._abort:
                 return self._finish_result(base_dir, meta_path, csv_paths, aborted=True)
 
+            self._prepare_optical_measurement(wavelength_nm=shg_wavelength_nm, dry_run=dry_run)
             csv_paths = self._measure_shg_power_scan(
                 base_dir=base_dir,
                 estimated_angles=estimated_angles,
@@ -145,6 +148,7 @@ class PowerMeasurementRunner:
             measurement_kind="fundamental_power",
         )
         try:
+            self._prepare_optical_measurement(wavelength_nm=fundamental_wavelength_nm, dry_run=dry_run)
             self.fundamental_power = self._measure_fundamental_power(fundamental_wavelength_nm, dry_run=dry_run)
             metadata["fundamental_power"] = self.fundamental_power
             self._write_metadata(meta_path, metadata, dry_run=dry_run)
@@ -195,6 +199,7 @@ class PowerMeasurementRunner:
         csv_paths = []
         try:
             self._write_metadata(meta_path, metadata, dry_run=dry_run)
+            self._prepare_optical_measurement(wavelength_nm=shg_wavelength_nm, dry_run=dry_run)
             csv_paths = self._measure_shg_power_scan(
                 base_dir=base_dir,
                 estimated_angles=estimated_angles,
@@ -211,6 +216,27 @@ class PowerMeasurementRunner:
 
     def abort(self):
         self._abort = True
+
+    def _prepare_optical_measurement(self, wavelength_nm: float, dry_run: bool) -> None:
+        if dry_run:
+            return
+        self._ensure_laser_on()
+        self.powermeter.set_power_mode()
+        self.powermeter.set_wavelength_nm(wavelength_nm)
+        self.powermeter.zero(wait_s=30.0)
+
+    def _ensure_laser_on(self) -> None:
+        if self.laser is None:
+            return
+        try:
+            is_on = bool(self.laser.is_emission_on)
+        except Exception as exc:
+            logging.warning("Could not read laser emission state before power measurement: %s", exc)
+            is_on = False
+        if not is_on:
+            logging.info("[Power] Turning laser ON before power measurement.")
+            self.laser.start()
+            time.sleep(0.5)
 
     def _prepare_run_context(
         self,
@@ -269,7 +295,6 @@ class PowerMeasurementRunner:
     ) -> list[str]:
         csv_paths = []
         if not dry_run:
-            self.powermeter.set_power_mode()
             self.powermeter.set_wavelength_nm(shg_wavelength_nm)
 
         for scan_index, angle in enumerate(estimated_angles, start=1):
@@ -322,9 +347,7 @@ class PowerMeasurementRunner:
                 "zero_abs_limit_w": 1e-6,
             }
 
-        self.powermeter.set_power_mode()
         self.powermeter.set_wavelength_nm(wavelength_nm)
-        self.powermeter.zero(wait_s=30.0)
         zero_stats = self.powermeter.average_power(duration_s=3.0)
         zero_mean = float(zero_stats["mean_w"])
         if abs(zero_mean) > 1e-6:

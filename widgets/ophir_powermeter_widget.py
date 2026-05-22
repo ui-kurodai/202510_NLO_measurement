@@ -7,7 +7,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, Qt, QTime, pyqtSignal
+from PyQt6.QtCore import QLocale, QThread, Qt, QTime, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -43,6 +43,7 @@ Ophir3APowerMeterController = _ophir_control_module.Ophir3APowerMeterController
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - in %(filename)s - %(message)s")
 
 POWER_UNITS = [
+    ("Auto", None),
     ("nW", 1e9),
     ("uW", 1e6),
     ("mW", 1e3),
@@ -58,6 +59,7 @@ class OphirPowerMeterWidget(QGroupBox):
         super().__init__("Ophir 3A Power Meter", parent)
         self.controller = None
         self.polling_thread = None
+        self.zero_thread = None
         self._history = deque()
         self._last_power_w = None
 
@@ -75,6 +77,7 @@ class OphirPowerMeterWidget(QGroupBox):
 
         self.sensor_label = QLabel("Sensor: ---")
         self.version_label = QLabel("COM version: ---")
+        self.status_label = QLabel("Status: idle")
 
         self.mode_combo = QComboBox()
         self.wavelength_combo = QComboBox()
@@ -90,31 +93,38 @@ class OphirPowerMeterWidget(QGroupBox):
         self.pulse_length_combo = QComboBox()
 
         self.refresh_settings_btn = QPushButton("Refresh Settings")
+        self.refresh_settings_btn.setToolTip("Read the current mode, wavelength, range, and pulse length from the Ophir device. It does not erase settings.")
         self.refresh_settings_btn.clicked.connect(self.refresh_settings)
         self.apply_settings_btn = QPushButton("Apply Settings")
         self.apply_settings_btn.clicked.connect(self.apply_settings)
         self.zero_btn = QPushButton("Zero")
         self.zero_btn.clicked.connect(self.zero_device)
         self.reset_btn = QPushButton("Reset Device")
+        self.reset_btn.setToolTip("Send Ophir ResetDevice to reinitialize the meter. It should not delete saved wavelength/calibration settings.")
         self.reset_btn.clicked.connect(self.reset_device)
 
         self.stream_mode_combo = QComboBox()
         self.stream_mode_combo.addItems(["Default", "Immediate", "Turbo"])
         self.stream_mode_combo.currentTextChanged.connect(self.update_stream_mode_hint)
         self.turbo_freq_spin = QDoubleSpinBox()
+        self.turbo_freq_spin.setLocale(QLocale.c())
         self.turbo_freq_spin.setDecimals(2)
         self.turbo_freq_spin.setRange(0.1, 1000.0)
         self.turbo_freq_spin.setValue(15.0)
         self.turbo_freq_spin.setSuffix(" Hz")
         self.apply_stream_btn = QPushButton("Apply Stream Mode")
+        self.apply_stream_btn.setToolTip("Configure how Ophir streams readings. This is separate from the widget starting/stopping live polling.")
         self.apply_stream_btn.clicked.connect(self.apply_stream_mode)
-        self.stream_hint_label = QLabel("Turbo sets the requested high-speed sampling frequency when supported.")
+        self.stream_hint_label = QLabel(
+            "Stream mode configures how the meter sends data; live polling starts automatically after connection."
+        )
 
         self.history_window_edit = QTimeEdit()
         self.history_window_edit.setDisplayFormat("HH:mm:ss")
         self.history_window_edit.setTime(QTime(0, 1, 0))
         self.history_window_edit.timeChanged.connect(lambda _: self.update_plot())
         self.poll_interval_spin = QDoubleSpinBox()
+        self.poll_interval_spin.setLocale(QLocale.c())
         self.poll_interval_spin.setDecimals(2)
         self.poll_interval_spin.setRange(0.02, 10.0)
         self.poll_interval_spin.setValue(0.2)
@@ -122,16 +132,17 @@ class OphirPowerMeterWidget(QGroupBox):
         self.poll_interval_spin.valueChanged.connect(self.update_poll_interval)
         self.auto_y_checkbox = QCheckBox("Auto Y")
         self.auto_y_checkbox.setChecked(True)
-        self.auto_y_checkbox.toggled.connect(lambda _: self.update_plot())
+        self.auto_y_checkbox.toggled.connect(self.on_auto_y_changed)
         self.power_unit_combo = QComboBox()
         for unit, scale in POWER_UNITS:
             self.power_unit_combo.addItem(unit, scale)
-        self.power_unit_combo.setCurrentText("W")
+        self.power_unit_combo.setCurrentText("Auto")
         self.power_unit_combo.currentIndexChanged.connect(lambda _: self.update_power_display())
         self.power_unit_combo.currentIndexChanged.connect(lambda _: self.update_plot())
         self.y_min_spin = QDoubleSpinBox()
         self.y_max_spin = QDoubleSpinBox()
         for spin in (self.y_min_spin, self.y_max_spin):
+            spin.setLocale(QLocale.c())
             spin.setDecimals(6)
             spin.setRange(-1e6, 1e6)
         self.y_min_spin.setValue(0.0)
@@ -161,6 +172,7 @@ class OphirPowerMeterWidget(QGroupBox):
         layout.addWidget(self.power_label)
         layout.addWidget(self.sensor_label)
         layout.addWidget(self.version_label)
+        layout.addWidget(self.status_label)
 
         settings_layout = QFormLayout()
         settings_layout.addRow("Mode:", self.mode_combo)
@@ -206,6 +218,7 @@ class OphirPowerMeterWidget(QGroupBox):
         layout.addLayout(legacy_layout)
         layout.addWidget(self.legacy_response_label)
         self.setLayout(layout)
+        self.on_auto_y_changed(self.auto_y_checkbox.isChecked())
         self.set_controls_enabled(False)
 
     def scan_devices(self):
@@ -227,6 +240,7 @@ class OphirPowerMeterWidget(QGroupBox):
                 self.controller.connect(serial)
                 self.controller.set_power_mode()
                 self.connect_btn.setText("Close Device")
+                self.status_label.setText("Status: connected")
                 self._refresh_device_labels()
                 self.refresh_settings()
                 self.set_controls_enabled(True)
@@ -242,6 +256,7 @@ class OphirPowerMeterWidget(QGroupBox):
             self.power_label.setText("Power: ---- W")
             self.sensor_label.setText("Sensor: ---")
             self.version_label.setText("COM version: ---")
+            self.status_label.setText("Status: disconnected")
             self.clear_settings()
             self.set_controls_enabled(False)
 
@@ -306,6 +321,7 @@ class OphirPowerMeterWidget(QGroupBox):
             self._populate_combo(self.range_combo, ranges.current_index, ranges.options)
             self._populate_combo(self.pulse_length_combo, pulse_lengths.current_index, pulse_lengths.options)
             self._refresh_device_labels()
+            self.status_label.setText("Status: settings refreshed")
         except Exception as exc:
             QMessageBox.critical(self, "Settings Error", str(exc))
 
@@ -327,6 +343,7 @@ class OphirPowerMeterWidget(QGroupBox):
             if self.pulse_length_combo.count():
                 self.controller.set_pulse_length_index(int(self.pulse_length_combo.currentData()))
             self.refresh_settings()
+            self.status_label.setText("Status: settings applied")
         except Exception as exc:
             QMessageBox.critical(self, "Apply Settings Error", str(exc))
         finally:
@@ -402,6 +419,7 @@ class OphirPowerMeterWidget(QGroupBox):
                 self.controller.configure_immediate_stream_mode()
             elif mode == "Turbo":
                 self.controller.configure_turbo_stream_mode(self.turbo_freq_spin.value())
+            self.status_label.setText(f"Status: stream mode set to {mode}")
         except Exception as exc:
             QMessageBox.critical(self, "Stream Mode Error", str(exc))
         finally:
@@ -421,14 +439,35 @@ class OphirPowerMeterWidget(QGroupBox):
     def zero_device(self):
         if self.controller is None:
             return
+        if self.zero_thread is not None and self.zero_thread.isRunning():
+            return
         was_polling = self.stop_polling()
-        try:
-            self.controller.zero(wait_s=30.0)
-        except Exception as exc:
-            QMessageBox.critical(self, "Zero Error", str(exc))
-        finally:
-            if was_polling:
-                self.start_polling()
+        self.set_controls_enabled(False)
+        self.zero_btn.setEnabled(False)
+        self.zero_btn.setText("Zeroing...")
+        self.zero_btn.setStyleSheet("QPushButton { background-color: #c62828; color: white; font-weight: bold; }")
+        self.status_label.setText("Status: zeroing... keep beam blocked until this finishes")
+        self.zero_thread = OphirZeroThread(self.controller, wait_s=30.0, restart_polling=was_polling)
+        self.zero_thread.finished_ok.connect(self.finish_zero)
+        self.zero_thread.failed.connect(self.zero_failed)
+        self.zero_thread.start()
+
+    def finish_zero(self, restart_polling: bool):
+        self.zero_btn.setText("Zero")
+        self.zero_btn.setStyleSheet("")
+        self.set_controls_enabled(True)
+        self.status_label.setText("Status: zero complete")
+        if restart_polling:
+            self.start_polling()
+
+    def zero_failed(self, message: str, restart_polling: bool):
+        self.zero_btn.setText("Zero")
+        self.zero_btn.setStyleSheet("")
+        self.set_controls_enabled(True)
+        self.status_label.setText("Status: zero failed")
+        if restart_polling:
+            self.start_polling()
+        QMessageBox.critical(self, "Zero Error", message)
 
     def reset_device(self):
         if self.controller is None:
@@ -437,6 +476,7 @@ class OphirPowerMeterWidget(QGroupBox):
         try:
             self.controller.reset_device()
             self.refresh_settings()
+            self.status_label.setText("Status: device reset")
         except Exception as exc:
             QMessageBox.critical(self, "Reset Error", str(exc))
         finally:
@@ -496,6 +536,8 @@ class OphirPowerMeterWidget(QGroupBox):
             now += 1e-6
             self.update_power_label(reading.power_w)
         self.trim_history()
+        if self.auto_y_checkbox.isChecked() and self.power_unit_combo.currentText() == "Auto":
+            self.update_power_display()
         self.update_plot()
 
     def trim_history(self):
@@ -509,13 +551,50 @@ class OphirPowerMeterWidget(QGroupBox):
         return max(1.0, float(seconds))
 
     def current_power_unit(self) -> str:
-        return self.power_unit_combo.currentText() or "W"
+        selected = self.power_unit_combo.currentText() or "W"
+        if selected != "Auto":
+            return selected
+        return self.auto_power_unit()
 
     def power_scale(self) -> float:
+        selected = self.power_unit_combo.currentText() or "W"
+        if selected == "Auto":
+            unit = self.auto_power_unit()
+            return dict(POWER_UNITS[1:]).get(unit, 1.0)
         return float(self.power_unit_combo.currentData() or 1.0)
 
     def scale_power(self, power_w: float) -> float:
         return power_w * self.power_scale()
+
+    def auto_power_unit(self) -> str:
+        values = [abs(power) for _, power in self._history if power is not None]
+        if self._last_power_w is not None:
+            values.append(abs(self._last_power_w))
+        peak = max(values, default=0.0)
+        if peak < 1e-6:
+            return "nW"
+        if peak < 1e-3:
+            return "uW"
+        if peak < 1.0:
+            return "mW"
+        if peak < 1e3:
+            return "W"
+        if peak < 1e6:
+            return "kW"
+        if peak < 1e9:
+            return "MW"
+        return "GW"
+
+    def on_auto_y_changed(self, checked: bool):
+        if checked:
+            self.power_unit_combo.setCurrentText("Auto")
+            self.power_unit_combo.setEnabled(False)
+        else:
+            self.power_unit_combo.setEnabled(True)
+            if self.power_unit_combo.currentText() == "Auto":
+                self.power_unit_combo.setCurrentText("W")
+        self.update_power_display()
+        self.update_plot()
 
     def update_plot(self):
         if not hasattr(self, "line"):
@@ -543,6 +622,8 @@ class OphirPowerMeterWidget(QGroupBox):
         self.canvas.draw_idle()
 
     def shutdown(self):
+        if self.zero_thread is not None and self.zero_thread.isRunning():
+            self.zero_thread.wait(1000)
         self.stop_polling()
         if self.controller is not None:
             try:
@@ -581,3 +662,22 @@ class OphirPollingThread(QThread):
     def stop(self):
         self._running = False
         self.wait()
+
+
+class OphirZeroThread(QThread):
+    finished_ok = pyqtSignal(bool)
+    failed = pyqtSignal(str, bool)
+
+    def __init__(self, controller, wait_s: float, restart_polling: bool, parent=None):
+        super().__init__(parent)
+        self.controller = controller
+        self.wait_s = wait_s
+        self.restart_polling = restart_polling
+
+    def run(self):
+        try:
+            self.controller.zero(wait_s=self.wait_s)
+        except Exception as exc:
+            self.failed.emit(str(exc), self.restart_polling)
+            return
+        self.finished_ok.emit(self.restart_polling)
