@@ -24,6 +24,7 @@ class PowerMeasurementRunner:
         self.result = None
         self.is_running = False
         self._abort = False
+        self._last_zero_stats = None
 
     def run(
         self,
@@ -39,6 +40,10 @@ class PowerMeasurementRunner:
         shg_wavelength_nm: float,
         operator: str,
         notes: str,
+        fundamental_range_index: int | None = None,
+        shg_range_index: int | None = None,
+        fundamental_range_label: str | None = None,
+        shg_range_label: str | None = None,
         sample_entry: dict | None = None,
         beam_profile_entry: dict | None = None,
         dry_run: bool = False,
@@ -49,6 +54,7 @@ class PowerMeasurementRunner:
         self.is_running = True
         self.scans = []
         self.fundamental_power = None
+        self._last_zero_stats = None
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         base_dir = os.path.join("results", f"{timestamp}_{sample}_power_{measurement_id}")
@@ -64,6 +70,8 @@ class PowerMeasurementRunner:
             "rot/trans_axis": axis,
             "fundamental_wavelength_nm": fundamental_wavelength_nm,
             "shg_wavelength_nm": shg_wavelength_nm,
+            "fundamental_measurement_range": fundamental_range_label or "Auto",
+            "shg_measurement_range": shg_range_label or "Auto",
             "estimated_pm_angles_deg": estimated_angles,
             "scan_range_deg": scan_range,
             "step_deg": step,
@@ -78,7 +86,11 @@ class PowerMeasurementRunner:
 
         csv_paths = []
         try:
-            self._prepare_optical_measurement(wavelength_nm=fundamental_wavelength_nm, dry_run=dry_run)
+            self._prepare_optical_measurement(
+                wavelength_nm=fundamental_wavelength_nm,
+                range_index=fundamental_range_index,
+                dry_run=dry_run,
+            )
             self.fundamental_power = self._measure_fundamental_power(
                 wavelength_nm=fundamental_wavelength_nm,
                 dry_run=dry_run,
@@ -92,7 +104,11 @@ class PowerMeasurementRunner:
             if self._abort:
                 return self._finish_result(base_dir, meta_path, csv_paths, aborted=True)
 
-            self._prepare_optical_measurement(wavelength_nm=shg_wavelength_nm, dry_run=dry_run)
+            self._prepare_optical_measurement(
+                wavelength_nm=shg_wavelength_nm,
+                range_index=shg_range_index,
+                dry_run=dry_run,
+            )
             csv_paths = self._measure_shg_power_scan(
                 base_dir=base_dir,
                 estimated_angles=estimated_angles,
@@ -122,6 +138,10 @@ class PowerMeasurementRunner:
         step: float,
         operator: str,
         notes: str,
+        fundamental_range_index: int | None = None,
+        shg_range_index: int | None = None,
+        fundamental_range_label: str | None = None,
+        shg_range_label: str | None = None,
         sample_entry: dict | None = None,
         beam_profile_entry: dict | None = None,
         dry_run: bool = False,
@@ -130,6 +150,7 @@ class PowerMeasurementRunner:
         self.is_running = True
         self.scans = []
         self.fundamental_power = None
+        self._last_zero_stats = None
         base_dir, meta_path, metadata = self._prepare_run_context(
             sample=sample,
             material=material,
@@ -138,6 +159,8 @@ class PowerMeasurementRunner:
             axis=axis,
             fundamental_wavelength_nm=fundamental_wavelength_nm,
             shg_wavelength_nm=shg_wavelength_nm,
+            fundamental_range_label=fundamental_range_label,
+            shg_range_label=shg_range_label,
             estimated_angles=estimated_angles,
             scan_range=scan_range,
             step=step,
@@ -148,7 +171,11 @@ class PowerMeasurementRunner:
             measurement_kind="fundamental_power",
         )
         try:
-            self._prepare_optical_measurement(wavelength_nm=fundamental_wavelength_nm, dry_run=dry_run)
+            self._prepare_optical_measurement(
+                wavelength_nm=fundamental_wavelength_nm,
+                range_index=fundamental_range_index,
+                dry_run=dry_run,
+            )
             self.fundamental_power = self._measure_fundamental_power(fundamental_wavelength_nm, dry_run=dry_run)
             metadata["fundamental_power"] = self.fundamental_power
         finally:
@@ -170,6 +197,10 @@ class PowerMeasurementRunner:
         shg_wavelength_nm: float,
         operator: str,
         notes: str,
+        fundamental_range_index: int | None = None,
+        shg_range_index: int | None = None,
+        fundamental_range_label: str | None = None,
+        shg_range_label: str | None = None,
         sample_entry: dict | None = None,
         beam_profile_entry: dict | None = None,
         dry_run: bool = False,
@@ -178,6 +209,7 @@ class PowerMeasurementRunner:
         self._abort = False
         self.is_running = True
         self.scans = []
+        self._last_zero_stats = None
         base_dir, meta_path, metadata = self._prepare_run_context(
             sample=sample,
             material=material,
@@ -186,6 +218,8 @@ class PowerMeasurementRunner:
             axis=axis,
             fundamental_wavelength_nm=fundamental_wavelength_nm,
             shg_wavelength_nm=shg_wavelength_nm,
+            fundamental_range_label=fundamental_range_label,
+            shg_range_label=shg_range_label,
             estimated_angles=estimated_angles,
             scan_range=scan_range,
             step=step,
@@ -197,7 +231,11 @@ class PowerMeasurementRunner:
         )
         csv_paths = []
         try:
-            self._prepare_optical_measurement(wavelength_nm=shg_wavelength_nm, dry_run=dry_run)
+            self._prepare_optical_measurement(
+                wavelength_nm=shg_wavelength_nm,
+                range_index=shg_range_index,
+                dry_run=dry_run,
+            )
             csv_paths = self._measure_shg_power_scan(
                 base_dir=None,
                 estimated_angles=estimated_angles,
@@ -215,13 +253,52 @@ class PowerMeasurementRunner:
     def abort(self):
         self._abort = True
 
-    def _prepare_optical_measurement(self, wavelength_nm: float, dry_run: bool) -> None:
+    def _prepare_optical_measurement(self, wavelength_nm: float, range_index: int | None, dry_run: bool) -> None:
         if dry_run:
             return
-        self._ensure_laser_on()
+        self._ensure_laser_off()
         self.powermeter.set_power_mode()
         self.powermeter.set_wavelength_nm(wavelength_nm)
+        self.powermeter.set_range_index_or_auto(range_index)
         self.powermeter.zero(wait_s=30.0)
+        self._last_zero_stats = self._verify_zero_after_zeroing()
+        self._ensure_laser_on()
+
+    def _ensure_laser_off(self) -> None:
+        if self.laser is None:
+            return
+        try:
+            is_on = bool(self.laser.is_emission_on)
+        except Exception as exc:
+            logging.warning("Could not read laser emission state before zeroing: %s", exc)
+            is_on = True
+        if not is_on:
+            logging.info("[Power] Laser emission already OFF for zeroing.")
+            return
+
+        logging.info("[Power] Turning laser OFF before Ophir zeroing.")
+        self.laser.stop()
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            try:
+                if not self.laser.is_emission_on:
+                    logging.info("[Power] Laser emission confirmed OFF for zeroing.")
+                    return
+            except Exception as exc:
+                logging.warning("Could not verify laser emission OFF state: %s", exc)
+            time.sleep(0.5)
+        raise RuntimeError("Laser stop command was sent, but emission did not turn OFF within 8 s.")
+
+    def _verify_zero_after_zeroing(self, duration_s: float = 3.0, abs_limit_w: float = 1e-6) -> dict:
+        zero_stats = dict(self.powermeter.average_power(duration_s=duration_s))
+        zero_stats.pop("values_w", None)
+        zero_mean = float(zero_stats["mean_w"])
+        zero_stats["zero_check_passed"] = abs(zero_mean) <= abs_limit_w
+        zero_stats["zero_mean_w"] = zero_mean
+        zero_stats["zero_abs_limit_w"] = abs_limit_w
+        if not zero_stats["zero_check_passed"]:
+            raise RuntimeError(f"Zero check failed: mean power {zero_mean:.6g} W exceeds +/- 1 uW.")
+        return zero_stats
 
     def _ensure_laser_on(self) -> None:
         if self.laser is None:
@@ -262,6 +339,8 @@ class PowerMeasurementRunner:
         axis: str,
         fundamental_wavelength_nm: float,
         shg_wavelength_nm: float,
+        fundamental_range_label: str | None,
+        shg_range_label: str | None,
         estimated_angles: list[float],
         scan_range: float,
         step: float,
@@ -284,6 +363,8 @@ class PowerMeasurementRunner:
             "rot/trans_axis": axis,
             "fundamental_wavelength_nm": fundamental_wavelength_nm,
             "shg_wavelength_nm": shg_wavelength_nm,
+            "fundamental_measurement_range": fundamental_range_label or "Auto",
+            "shg_measurement_range": shg_range_label or "Auto",
             "estimated_pm_angles_deg": estimated_angles,
             "scan_range_deg": scan_range,
             "step_deg": step,
@@ -369,16 +450,11 @@ class PowerMeasurementRunner:
                 "zero_abs_limit_w": 1e-6,
             }
 
-        self.powermeter.set_wavelength_nm(wavelength_nm)
-        zero_stats = self.powermeter.average_power(duration_s=3.0)
-        zero_mean = float(zero_stats["mean_w"])
-        if abs(zero_mean) > 1e-6:
-            raise RuntimeError(f"Zero check failed: mean power {zero_mean:.6g} W exceeds +/- 1 uW.")
-
         stats = dict(self.powermeter.average_power(duration_s=3.0))
-        stats["zero_check_passed"] = True
-        stats["zero_mean_w"] = zero_mean
-        stats["zero_abs_limit_w"] = 1e-6
+        zero_stats = self._last_zero_stats or {}
+        stats["zero_check_passed"] = bool(zero_stats.get("zero_check_passed", False))
+        stats["zero_mean_w"] = float(zero_stats.get("zero_mean_w", 0.0))
+        stats["zero_abs_limit_w"] = float(zero_stats.get("zero_abs_limit_w", 1e-6))
         stats.pop("values_w", None)
         return stats
 

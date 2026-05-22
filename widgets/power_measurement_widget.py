@@ -120,6 +120,12 @@ class PowerMeasurementWidget(QGroupBox):
             self.power_unit_combo.addItem(unit, scale)
         self.power_unit_combo.setCurrentText("Auto")
         self.power_unit_combo.currentIndexChanged.connect(self.refresh_plot_units)
+        self.fundamental_range_combo = QComboBox()
+        self.shg_range_combo = QComboBox()
+        for combo in (self.fundamental_range_combo, self.shg_range_combo):
+            combo.addItem("Auto", None)
+        self.refresh_ranges_btn = QPushButton("Refresh Ranges")
+        self.refresh_ranges_btn.clicked.connect(self.refresh_measurement_ranges)
 
         self.measure_fundamental_btn = QPushButton("Measure Fundamental Power")
         self.measure_fundamental_btn.clicked.connect(self.start_fundamental_measurement)
@@ -197,6 +203,13 @@ class PowerMeasurementWidget(QGroupBox):
         unit_layout.addWidget(self.power_unit_combo)
         unit_layout.addStretch(1)
         layout.addLayout(unit_layout)
+        range_layout = QHBoxLayout()
+        range_layout.addWidget(QLabel("Fundamental range:"))
+        range_layout.addWidget(self.fundamental_range_combo)
+        range_layout.addWidget(QLabel("SHG range:"))
+        range_layout.addWidget(self.shg_range_combo)
+        range_layout.addWidget(self.refresh_ranges_btn)
+        layout.addLayout(range_layout)
         layout.addWidget(QLabel("Notes:"))
         layout.addWidget(self.notes_edit)
         run_buttons = QHBoxLayout()
@@ -345,6 +358,8 @@ class PowerMeasurementWidget(QGroupBox):
         if not dry_run and laser is None:
             QMessageBox.warning(self, "Not Ready", "Laser controller is not connected.")
             return
+        if not dry_run:
+            self.refresh_measurement_ranges(show_errors=False)
         if not self._prepare_stage_widgets_for_measurement():
             return
 
@@ -392,6 +407,10 @@ class PowerMeasurementWidget(QGroupBox):
             axis=self.axis_edit.text().strip(),
             fundamental_wavelength_nm=float(self.fundamental_wavelength_spin.value()),
             shg_wavelength_nm=float(self.shg_wavelength_spin.value()),
+            fundamental_range_index=self.fundamental_range_combo.currentData(),
+            shg_range_index=self.shg_range_combo.currentData(),
+            fundamental_range_label=self.fundamental_range_combo.currentText(),
+            shg_range_label=self.shg_range_combo.currentText(),
             operator="user",
             notes=self.notes_edit.toPlainText(),
             sample_entry=selected_sample,
@@ -405,6 +424,46 @@ class PowerMeasurementWidget(QGroupBox):
         self._set_run_buttons_enabled(False)
         self.abort_btn.setEnabled(True)
         self.thread.start()
+
+    def refresh_measurement_ranges(self, show_errors: bool = True):
+        if self.dry_run_checkbox.isChecked():
+            return
+        try:
+            powermeter = self.devices_tab.powermeter_widget.controller
+        except AttributeError:
+            if show_errors:
+                QMessageBox.warning(self, "Not Ready", "Ophir power meter widget is not available.")
+            return
+        if powermeter is None:
+            if show_errors:
+                QMessageBox.warning(self, "Not Ready", "Ophir power meter is not connected.")
+            return
+        try:
+            ranges = powermeter.get_range_options()
+        except Exception as exc:
+            if show_errors:
+                QMessageBox.warning(self, "Range Error", str(exc))
+            return
+        self._set_range_combo_options(self.fundamental_range_combo, ranges.options)
+        self._set_range_combo_options(self.shg_range_combo, ranges.options)
+
+    def _set_range_combo_options(self, combo: QComboBox, labels: list[str]):
+        current_data = combo.currentData()
+        current_text = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Auto", None)
+        for index, label in enumerate(labels):
+            if "auto" in label.lower():
+                continue
+            combo.addItem(label, index)
+        restored_index = 0
+        for index in range(combo.count()):
+            if combo.itemData(index) == current_data or combo.itemText(index) == current_text:
+                restored_index = index
+                break
+        combo.setCurrentIndex(restored_index)
+        combo.blockSignals(False)
 
     def _prepare_stage_widgets_for_measurement(self):
         stage_widget = getattr(self.devices_tab, "stage_rot_widget", None)

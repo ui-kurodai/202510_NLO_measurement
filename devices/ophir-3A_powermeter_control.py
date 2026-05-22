@@ -286,6 +286,19 @@ class Ophir3APowerMeterController:
         ranges = self.get_range_options().options
         return self._set_indexed_option("SetRange", index, ranges)
 
+    def set_range_auto(self) -> str | None:
+        ranges = self.get_range_options().options
+        auto_index = next((index for index, label in enumerate(ranges) if "auto" in label.lower()), None)
+        if auto_index is None:
+            logging.info("Ophir range list does not expose an Auto range; leaving current range unchanged.")
+            return None
+        return self.set_range_index(auto_index)
+
+    def set_range_index_or_auto(self, index: int | None) -> str | None:
+        if index is None:
+            return self.set_range_auto()
+        return self.set_range_index(int(index))
+
     def get_pulse_length_options(self) -> OphirOptionSet:
         self._require_connected()
         try:
