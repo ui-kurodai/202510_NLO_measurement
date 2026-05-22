@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -418,16 +419,42 @@ class Ophir3APowerMeterController:
             readings.append(OphirPowerReading(power_w=float(value), timestamp=timestamp, status=status))
         return readings
 
-    def average_power(self, duration_s: float, sample_interval_s: float = 0.1) -> dict[str, float | int | list[float]]:
+    @staticmethod
+    def _is_valid_reading(reading: OphirPowerReading) -> bool:
+        if not math.isfinite(reading.power_w):
+            return False
+        if reading.status is None:
+            return True
+        status_text = str(reading.status).strip().lower()
+        if not status_text:
+            return True
+        invalid_tokens = ("error", "invalid", "over", "under", "missing", "saturated")
+        return not any(token in status_text for token in invalid_tokens)
+
+    def average_power(
+        self,
+        duration_s: float,
+        sample_interval_s: float = 0.1,
+        warmup_s: float = 0.0,
+    ) -> dict[str, float | int | list[float]]:
         values: list[float] = []
-        deadline = time.monotonic() + max(0.0, duration_s)
         self.start_stream()
         try:
-            while time.monotonic() < deadline:
+            try:
+                self._lm.GetData(self._device_handle, self.channel)
+            except Exception:
+                pass
+            if warmup_s > 0:
+                time.sleep(warmup_s)
                 try:
-                    values.append(self.read_power())
-                except RuntimeError:
+                    self._lm.GetData(self._device_handle, self.channel)
+                except Exception:
                     pass
+
+            deadline = time.monotonic() + max(0.0, duration_s)
+            while time.monotonic() < deadline:
+                readings = self.read_available_data()
+                values.extend(reading.power_w for reading in readings if self._is_valid_reading(reading))
                 time.sleep(sample_interval_s)
         finally:
             self.stop_stream()
