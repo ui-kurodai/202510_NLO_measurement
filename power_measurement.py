@@ -236,7 +236,24 @@ class PowerMeasurementRunner:
         if not is_on:
             logging.info("[Power] Turning laser ON before power measurement.")
             self.laser.start()
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            try:
+                if self.laser.is_emission_on:
+                    logging.info("[Power] Laser emission confirmed ON.")
+                    return
+            except Exception as exc:
+                logging.warning("Could not verify laser emission state: %s", exc)
             time.sleep(0.5)
+
+        try:
+            error_message = self.laser.last_error_message
+        except Exception:
+            error_message = "unavailable"
+        raise RuntimeError(
+            "Laser start command was sent, but emission did not turn ON within 8 s. "
+            f"Check interlock, fatal error, laser readiness, and controller status. Last error: {error_message}"
+        )
 
     def _prepare_run_context(
         self,

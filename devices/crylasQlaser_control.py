@@ -274,9 +274,16 @@ class CrylasQLaserController:
         """
         try:
             self.send_command("st")
-            logging.info("laser on")
+            logging.info("laser start command sent")
+            time.sleep(0.5)
+            if self.is_emission_on:
+                logging.info("laser emission confirmed on")
+                return True
+            logging.warning("laser start command was sent, but emission is still off")
+            return False
         except (serial.SerialException, OSError) as e:
             logging.error(f"Failed to start laser: {e}")
+            return False
 
 
     def stop(self):
