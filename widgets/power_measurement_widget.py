@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import csv
+import json
+import os
+from datetime import datetime
+
 from PyQt6.QtCore import QLocale, QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -52,6 +57,13 @@ class PowerMeasurementWidget(QGroupBox):
         self._angle_spins = []
         self._sample_catalog_map = {}
         self._beam_profile_catalog_map = {}
+        self._fundamental_completed = False
+        self._shg_completed = False
+        self._laser_controller = None
+        self._last_fundamental_stats = None
+        self._last_shg_scans = []
+        self._last_metadata = {}
+        self._last_saved_dir = None
 
         self.sample_preset_combo = QComboBox()
         self.sample_preset_combo.currentIndexChanged.connect(self._apply_selected_sample_preset)
@@ -116,6 +128,7 @@ class PowerMeasurementWidget(QGroupBox):
         self.abort_btn = QPushButton("Abort")
         self.abort_btn.setEnabled(False)
         self.abort_btn.clicked.connect(self.abort_measurement)
+        self.fundamental_result_label = QLabel("Fundamental power: ---")
 
         self.figure = Figure(figsize=(5, 3))
         self.canvas = FigureCanvas(self.figure)
@@ -191,6 +204,7 @@ class PowerMeasurementWidget(QGroupBox):
         run_buttons.addWidget(self.measure_shg_btn)
         layout.addLayout(run_buttons)
         layout.addWidget(self.abort_btn)
+        layout.addWidget(self.fundamental_result_label)
         layout.addWidget(self.canvas)
         self.setLayout(root_layout)
 
@@ -359,10 +373,12 @@ class PowerMeasurementWidget(QGroupBox):
 
         estimated_angles = [float(spin.value()) for spin in self._angle_spins]
         self.runner = PowerMeasurementRunner(stage_rot=stage_rot, powermeter=powermeter, laser=laser)
+        if not dry_run:
+            self._laser_controller = laser
         if measurement_task == "shg":
             self._setup_plot(len(estimated_angles))
-        else:
-            self._setup_plot(0)
+        elif not self.axes:
+            self._setup_plot(len(estimated_angles))
         self.thread = PowerMeasurementThread(
             runner=self.runner,
             measurement_task=measurement_task,
@@ -408,7 +424,7 @@ class PowerMeasurementWidget(QGroupBox):
             self.canvas.draw()
             return
         for index in range(count):
-            ax = self.figure.add_subplot(count, 1, index + 1)
+            ax = self.figure.add_subplot(1, count, index + 1)
             ax.set_xlabel("Angle (deg)")
             ax.set_ylabel(f"Power ({self.current_power_unit()})")
             ax.set_title(f"theta{index + 1}")
@@ -420,7 +436,10 @@ class PowerMeasurementWidget(QGroupBox):
         del pos, power
         if self.runner is None or scan_index >= len(self.axes):
             return
-        scan = self.runner.scans[scan_index]
+        scans = self.runner.scans if scan_index < len(self.runner.scans) else self._last_shg_scans
+        if scan_index >= len(scans):
+            return
+        scan = scans[scan_index]
         ax = self.axes[scan_index]
         ax.clear()
         ax.set_xlabel("Angle (deg)")
@@ -438,29 +457,131 @@ class PowerMeasurementWidget(QGroupBox):
     def finish_measurement(self, result_dict):
         self._set_run_buttons_enabled(True)
         self.abort_btn.setEnabled(False)
-        self._restart_device_polling_after_measurement()
-        if result_dict.get("base_dir"):
-            fig_path = f"{result_dict['base_dir']}/power_measurement.png"
-            self.figure.savefig(fig_path, dpi=300, bbox_inches="tight")
+        self._last_metadata.update(result_dict.get("metadata") or {})
         if result_dict.get("aborted"):
             QMessageBox.information(self, "Aborted", "Power measurement aborted.")
         elif result_dict.get("fundamental_power"):
+            self._fundamental_completed = True
             stats = result_dict["fundamental_power"]
-            QMessageBox.information(
-                self,
-                "Done",
+            self._last_fundamental_stats = stats
+            self.fundamental_result_label.setText(
                 f"Fundamental power measurement complete.\n\n"
                 f"Mean: {self.scale_power(stats.get('mean_w', 0.0)):.6g} {self.current_power_unit()}\n"
-                f"Std: {self.scale_power(stats.get('std_w', 0.0)):.3g} {self.current_power_unit()}",
+                f"Std: {self.scale_power(stats.get('std_w', 0.0)):.3g} {self.current_power_unit()}\n"
+                f"Min: {self.scale_power(stats.get('min_w', 0.0)):.6g} {self.current_power_unit()}\n"
+                f"Max: {self.scale_power(stats.get('max_w', 0.0)):.6g} {self.current_power_unit()}",
             )
         else:
-            QMessageBox.information(self, "Done", "SHG power measurement complete.")
+            self._shg_completed = True
+            self._last_shg_scans = result_dict.get("scans", [])
+        self._stop_laser_if_measurement_pair_complete()
+        self._restart_device_polling_after_measurement()
+        self._prompt_save_or_retake_if_ready()
 
     def measurement_failed(self, message: str):
         self._set_run_buttons_enabled(True)
         self.abort_btn.setEnabled(False)
         self._restart_device_polling_after_measurement()
         QMessageBox.critical(self, "Measurement Error", message)
+
+    def _prompt_save_or_retake_if_ready(self):
+        if not (self._last_fundamental_stats and self._last_shg_scans):
+            return
+        message = QMessageBox(self)
+        message.setWindowTitle("Power Measurement Complete")
+        message.setText("Fundamental and SHG power data are both available. Do you want to save the results?")
+        save_button = message.addButton("Save Results", QMessageBox.ButtonRole.AcceptRole)
+        retake_fundamental_button = message.addButton("Retake Fundamental", QMessageBox.ButtonRole.ActionRole)
+        retake_shg_button = message.addButton("Retake SHG", QMessageBox.ButtonRole.ActionRole)
+        retake_both_button = message.addButton("Retake Both", QMessageBox.ButtonRole.ActionRole)
+        message.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        message.exec()
+
+        clicked = message.clickedButton()
+        if clicked == save_button:
+            self.save_combined_results()
+        elif clicked == retake_fundamental_button:
+            self._last_fundamental_stats = None
+            self._fundamental_completed = False
+            self.fundamental_result_label.setText("Fundamental power: ---")
+            self.start_fundamental_measurement()
+        elif clicked == retake_shg_button:
+            self._last_shg_scans = []
+            self._shg_completed = False
+            self.start_shg_measurement()
+        elif clicked == retake_both_button:
+            self._last_fundamental_stats = None
+            self._last_shg_scans = []
+            self._fundamental_completed = False
+            self._shg_completed = False
+            self.fundamental_result_label.setText("Fundamental power: ---")
+            self.figure.clear()
+            self.axes = []
+            self.canvas.draw()
+            self.start_fundamental_measurement()
+
+    def save_combined_results(self):
+        if not self._last_fundamental_stats or not self._last_shg_scans:
+            QMessageBox.warning(self, "Save Error", "Fundamental and SHG data are both required before saving.")
+            return
+
+        metadata = dict(self._last_metadata)
+        metadata["measurement_kind"] = "fundamental_and_shg_power"
+        metadata["saved_timestamp"] = datetime.now().isoformat()
+        metadata["fundamental_power"] = self._last_fundamental_stats
+
+        sample = str(metadata.get("sample") or "sample")
+        measurement_id = str(metadata.get("measurement_id") or "power")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_dir = os.path.join("PM_power_results", f"{timestamp}_{sample}_power_{measurement_id}")
+        os.makedirs(base_dir, exist_ok=True)
+
+        meta_path = os.path.join(base_dir, "power_measurement.json")
+        with open(meta_path, "w", encoding="utf-8") as meta_file:
+            json.dump(metadata, meta_file, indent=2)
+
+        csv_paths = []
+        for scan in self._last_shg_scans:
+            label = scan.get("label") or "theta"
+            csv_path = os.path.join(base_dir, f"{label}.csv")
+            csv_paths.append(csv_path)
+            with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow(["angle_deg", "power_w", "std_w", "n"])
+                stats_list = scan.get("stats", [])
+                for index, (pos, power) in enumerate(zip(scan.get("positions", []), scan.get("powers", []))):
+                    stats = stats_list[index] if index < len(stats_list) else {}
+                    writer.writerow([
+                        pos,
+                        power,
+                        stats.get("std_w", ""),
+                        stats.get("n", ""),
+                    ])
+
+        fig_path = os.path.join(base_dir, "power_measurement.png")
+        self.figure.savefig(fig_path, dpi=300, bbox_inches="tight")
+        self._last_saved_dir = base_dir
+        QMessageBox.information(
+            self,
+            "Saved",
+            f"Saved power measurement results.\n\nFolder: {base_dir}\nJSON: {meta_path}\nCSV files: {len(csv_paths)}",
+        )
+
+    def _stop_laser_if_measurement_pair_complete(self):
+        if not (self._fundamental_completed and self._shg_completed):
+            return
+        if self._laser_controller is None:
+            return
+        try:
+            if self._laser_controller.is_emission_on:
+                self._laser_controller.stop()
+        except Exception:
+            try:
+                self._laser_controller.stop()
+            except Exception:
+                pass
+        self._fundamental_completed = False
+        self._shg_completed = False
 
     def _set_run_buttons_enabled(self, enabled: bool):
         self.measure_fundamental_btn.setEnabled(enabled)
@@ -534,8 +655,15 @@ class PowerMeasurementWidget(QGroupBox):
         return "GW"
 
     def refresh_plot_units(self):
-        if self.runner is None:
-            return
+        if self._last_fundamental_stats:
+            stats = self._last_fundamental_stats
+            self.fundamental_result_label.setText(
+                f"Fundamental power measurement complete.\n\n"
+                f"Mean: {self.scale_power(stats.get('mean_w', 0.0)):.6g} {self.current_power_unit()}\n"
+                f"Std: {self.scale_power(stats.get('std_w', 0.0)):.3g} {self.current_power_unit()}\n"
+                f"Min: {self.scale_power(stats.get('min_w', 0.0)):.6g} {self.current_power_unit()}\n"
+                f"Max: {self.scale_power(stats.get('max_w', 0.0)):.6g} {self.current_power_unit()}"
+            )
         for index, _ in enumerate(self.axes):
             self.update_plot(index, 0.0, 0.0)
 

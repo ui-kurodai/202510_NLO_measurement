@@ -133,6 +133,8 @@ class OphirPowerMeterWidget(QGroupBox):
         self.auto_y_checkbox = QCheckBox("Auto Y")
         self.auto_y_checkbox.setChecked(True)
         self.auto_y_checkbox.toggled.connect(self.on_auto_y_changed)
+        self.clear_stream_btn = QPushButton("Clear Stream")
+        self.clear_stream_btn.clicked.connect(self.clear_stream_history)
         self.power_unit_combo = QComboBox()
         for unit, scale in POWER_UNITS:
             self.power_unit_combo.addItem(unit, scale)
@@ -202,6 +204,7 @@ class OphirPowerMeterWidget(QGroupBox):
         plot_controls.addWidget(self.history_window_edit, 0, 1)
         plot_controls.addWidget(QLabel("Poll:"), 0, 2)
         plot_controls.addWidget(self.poll_interval_spin, 0, 3)
+        plot_controls.addWidget(self.clear_stream_btn, 0, 4)
         plot_controls.addWidget(QLabel("Unit:"), 1, 0)
         plot_controls.addWidget(self.power_unit_combo, 1, 1)
         plot_controls.addWidget(self.auto_y_checkbox, 1, 2)
@@ -283,6 +286,7 @@ class OphirPowerMeterWidget(QGroupBox):
             self.stream_mode_combo,
             self.turbo_freq_spin,
             self.apply_stream_btn,
+            self.clear_stream_btn,
             self.legacy_command_edit,
             self.legacy_ask_btn,
         ):
@@ -291,8 +295,14 @@ class OphirPowerMeterWidget(QGroupBox):
     def clear_settings(self):
         for combo in (self.mode_combo, self.wavelength_combo, self.range_combo, self.pulse_length_combo):
             combo.clear()
+        self.clear_stream_history()
+
+    def clear_stream_history(self):
         self._history.clear()
+        self._last_power_w = None
+        self.update_power_display()
         self.update_plot()
+        self.status_label.setText("Status: stream cleared")
 
     def _populate_combo(self, combo: QComboBox, current_index: int | None, options: list[str]):
         combo.blockSignals(True)

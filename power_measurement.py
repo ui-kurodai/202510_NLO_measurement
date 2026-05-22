@@ -151,10 +151,9 @@ class PowerMeasurementRunner:
             self._prepare_optical_measurement(wavelength_nm=fundamental_wavelength_nm, dry_run=dry_run)
             self.fundamental_power = self._measure_fundamental_power(fundamental_wavelength_nm, dry_run=dry_run)
             metadata["fundamental_power"] = self.fundamental_power
-            self._write_metadata(meta_path, metadata, dry_run=dry_run)
         finally:
             self.is_running = False
-            self.result = self._finish_result(base_dir, meta_path, [], aborted=self._abort)
+            self.result = self._finish_result(None, None, [], aborted=self._abort, metadata=metadata)
         return self.result
 
     def run_shg_power_scan(
@@ -198,10 +197,9 @@ class PowerMeasurementRunner:
         )
         csv_paths = []
         try:
-            self._write_metadata(meta_path, metadata, dry_run=dry_run)
             self._prepare_optical_measurement(wavelength_nm=shg_wavelength_nm, dry_run=dry_run)
             csv_paths = self._measure_shg_power_scan(
-                base_dir=base_dir,
+                base_dir=None,
                 estimated_angles=estimated_angles,
                 scan_range=scan_range,
                 step=step,
@@ -211,7 +209,7 @@ class PowerMeasurementRunner:
             )
         finally:
             self.is_running = False
-            self.result = self._finish_result(base_dir, meta_path, csv_paths, aborted=self._abort)
+            self.result = self._finish_result(None, None, csv_paths, aborted=self._abort, metadata=metadata)
         return self.result
 
     def abort(self):
@@ -274,8 +272,7 @@ class PowerMeasurementRunner:
         beam_profile_entry: dict | None,
     ) -> tuple[str, str, dict]:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        base_dir = os.path.join("results", f"{timestamp}_{sample}_power_{measurement_id}_{measurement_kind}")
-        os.makedirs(base_dir, exist_ok=True)
+        base_dir = os.path.join("PM_power_results", f"{timestamp}_{sample}_power_{measurement_id}_{measurement_kind}")
         meta_path = os.path.join(base_dir, "power_measurement.json")
         metadata = {
             "sample": sample,
@@ -302,7 +299,7 @@ class PowerMeasurementRunner:
 
     def _measure_shg_power_scan(
         self,
-        base_dir: str,
+        base_dir: str | None,
         estimated_angles: list[float],
         scan_range: float,
         step: float,
@@ -319,14 +316,21 @@ class PowerMeasurementRunner:
                 break
             scan_label = f"theta{scan_index}"
             scan_points = self._make_positive_scan_points(angle, scan_range, step)
-            csv_path = os.path.join(base_dir, f"{scan_label}.csv")
-            csv_paths.append(csv_path)
-            scan_record = {"label": scan_label, "estimated_angle": angle, "positions": [], "powers": []}
+            csv_path = None if base_dir is None else os.path.join(base_dir, f"{scan_label}.csv")
+            if csv_path is not None:
+                csv_paths.append(csv_path)
+            scan_record = {
+                "label": scan_label,
+                "estimated_angle": angle,
+                "positions": [],
+                "powers": [],
+                "stats": [],
+            }
             self.scans.append(scan_record)
 
-            with self._open_csv(csv_path, dry_run=dry_run) as writer:
+            with self._open_csv(csv_path, dry_run=dry_run or csv_path is None) as writer:
                 if writer is not None:
-                    writer.writerow(["angle_deg", "power_w", "min_w", "max_w", "std_w", "n"])
+                    writer.writerow(["angle_deg", "power_w", "std_w", "n"])
                 for pos in scan_points:
                     if self._abort:
                         break
@@ -342,8 +346,9 @@ class PowerMeasurementRunner:
                     power = float(stats["mean_w"])
                     scan_record["positions"].append(pos)
                     scan_record["powers"].append(power)
+                    scan_record["stats"].append(dict(stats))
                     if writer is not None:
-                        writer.writerow([pos, power, stats["min_w"], stats["max_w"], stats["std_w"], stats["n"]])
+                        writer.writerow([pos, power, stats["std_w"], stats["n"]])
                     if on_progress:
                         on_progress(scan_index - 1, pos, power)
         return csv_paths
@@ -423,7 +428,7 @@ class PowerMeasurementRunner:
         with open(meta_path, "w", encoding="utf-8") as meta_file:
             json.dump(metadata, meta_file, indent=2)
 
-    def _open_csv(self, csv_path: str, dry_run: bool):
+    def _open_csv(self, csv_path: str | None, dry_run: bool):
         class NullCsv:
             def __enter__(self):
                 return None
@@ -445,7 +450,14 @@ class PowerMeasurementRunner:
 
         return CsvContext()
 
-    def _finish_result(self, base_dir: str, meta_path: str, csv_paths: list[str], aborted: bool) -> dict:
+    def _finish_result(
+        self,
+        base_dir: str | None,
+        meta_path: str | None,
+        csv_paths: list[str],
+        aborted: bool,
+        metadata: dict | None = None,
+    ) -> dict:
         return {
             "base_dir": base_dir,
             "meta_path": meta_path,
@@ -453,4 +465,5 @@ class PowerMeasurementRunner:
             "fundamental_power": self.fundamental_power,
             "scans": self.scans,
             "aborted": aborted,
+            "metadata": metadata or {},
         }
