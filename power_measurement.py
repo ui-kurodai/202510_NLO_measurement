@@ -261,7 +261,7 @@ class PowerMeasurementRunner:
         self.powermeter.set_wavelength_nm(wavelength_nm)
         self.powermeter.set_range_index_or_auto(range_index)
         self.powermeter.zero(wait_s=30.0)
-        self._last_zero_stats = self._verify_zero_after_zeroing()
+        self._last_zero_stats = self._read_zero_after_zeroing()
         self._ensure_laser_on()
 
     def _ensure_laser_off(self) -> None:
@@ -289,15 +289,13 @@ class PowerMeasurementRunner:
             time.sleep(0.5)
         raise RuntimeError("Laser stop command was sent, but emission did not turn OFF within 8 s.")
 
-    def _verify_zero_after_zeroing(self, duration_s: float = 3.0, abs_limit_w: float = 1e-6) -> dict:
+    def _read_zero_after_zeroing(self, duration_s: float = 3.0, abs_limit_w: float = 1e-6) -> dict:
         zero_stats = dict(self.powermeter.average_power(duration_s=duration_s))
         zero_stats.pop("values_w", None)
         zero_mean = float(zero_stats["mean_w"])
         zero_stats["zero_check_passed"] = abs(zero_mean) <= abs_limit_w
         zero_stats["zero_mean_w"] = zero_mean
         zero_stats["zero_abs_limit_w"] = abs_limit_w
-        if not zero_stats["zero_check_passed"]:
-            raise RuntimeError(f"Zero check failed: mean power {zero_mean:.6g} W exceeds +/- 1 uW.")
         return zero_stats
 
     def _ensure_laser_on(self) -> None:
@@ -391,6 +389,7 @@ class PowerMeasurementRunner:
         csv_paths = []
         if not dry_run:
             self.powermeter.set_wavelength_nm(shg_wavelength_nm)
+            self._return_rotation_stage_origin()
 
         for scan_index, angle in enumerate(estimated_angles, start=1):
             if self._abort:
@@ -436,6 +435,7 @@ class PowerMeasurementRunner:
 
     def _measure_fundamental_power(self, wavelength_nm: float, dry_run: bool) -> dict:
         if dry_run:
+            time.sleep(0.02)
             values = [1.0002 + random.uniform(-0.000002, 0.000002) for _ in range(30)]
             mean = sum(values) / len(values)
             variance = sum((value - mean) ** 2 for value in values) / len(values)
@@ -450,6 +450,7 @@ class PowerMeasurementRunner:
                 "zero_abs_limit_w": 1e-6,
             }
 
+        self._wait_for_laser_settling(duration_s=20.0)
         stats = dict(self.powermeter.average_power(duration_s=3.0))
         zero_stats = self._last_zero_stats or {}
         stats["zero_check_passed"] = bool(zero_stats.get("zero_check_passed", False))
@@ -457,6 +458,23 @@ class PowerMeasurementRunner:
         stats["zero_abs_limit_w"] = float(zero_stats.get("zero_abs_limit_w", 1e-6))
         stats.pop("values_w", None)
         return stats
+
+    def _wait_for_laser_settling(self, duration_s: float) -> None:
+        logging.info("[Power] Waiting %.1f s for laser power to settle before fundamental measurement.", duration_s)
+        deadline = time.monotonic() + max(0.0, duration_s)
+        while time.monotonic() < deadline:
+            if self._abort:
+                return
+            time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+
+    def _return_rotation_stage_origin(self) -> None:
+        if self.stage_rot is None:
+            return
+        logging.info("[Power] Returning rotation stage to origin before SHG scan.")
+        try:
+            self.stage_rot.reset()
+        except TypeError:
+            self.stage_rot.reset("-")
 
     def _average_power_tail(self, total_wait_s: float, tail_s: float) -> dict:
         values = []
