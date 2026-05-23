@@ -6,6 +6,7 @@ from PyQt6.QtCore import QLocale, Qt, QSize
 
 # Workflow widgets
 from widgets.measurement_widget import SHGMeasurementWidget
+from widgets.power_measurement_widget import PowerMeasurementWidget
 from widgets.analysis_widget import FittingAnalysisWidget
 from widgets.comparison_widget import ComparisonWidget
 from widgets.data_management_widget import DataManagementWidget
@@ -15,6 +16,7 @@ from widgets.crylasQlaser_widget import CrylasQlaserWidget
 from widgets.elliptec_rotator_widget import ElliptecRotatorWidget
 from widgets.gsc02_stage_widget import OSMS2035Widget, OSMS60YAWWidget
 from widgets.boxcar_widget import BoxcarWidget
+from widgets.ophir_powermeter_widget import OphirPowerMeterWidget
 
 
 class DevicesPanel(QWidget):
@@ -44,6 +46,7 @@ class DevicesPanel(QWidget):
         self.stage_lin_widget = OSMS2035Widget(axis=1)   # translation stage
         self.stage_rot_widget = OSMS60YAWWidget(axis=2) # rotation stage
         self.boxcar_widget = BoxcarWidget()
+        self.powermeter_widget = OphirPowerMeterWidget()
         self.elliptec_widget = ElliptecRotatorWidget()
 
         # Ordered list of (name, widget)
@@ -52,6 +55,7 @@ class DevicesPanel(QWidget):
             ("Stage (Translation)", self.stage_lin_widget),
             ("Stage (Rotation)", self.stage_rot_widget),
             ("Boxcar", self.boxcar_widget),
+            ("Ophir Power Meter", self.powermeter_widget),
             ("Analyzer", self.elliptec_widget),
         ]
 
@@ -90,6 +94,7 @@ class DevicesPanel(QWidget):
             self.stage_lin_widget,
             self.stage_rot_widget,
             self.boxcar_widget,
+            self.powermeter_widget,
             self.elliptec_widget,
         ]
 
@@ -118,13 +123,16 @@ class MainWindow(QWidget):
 
         # Workflow tabs
         self.home_widget = SHGMeasurementWidget(devices_tab=self.devices_tab)
+        self.power_measurement_widget = PowerMeasurementWidget(devices_tab=self.devices_tab)
         self.analysis_widget = FittingAnalysisWidget()
         self.comparison_widget = ComparisonWidget()
         self.data_management_widget = DataManagementWidget()
         self.data_management_widget.catalog_updated.connect(self.home_widget.reload_reference_catalogs)
+        self.data_management_widget.catalog_updated.connect(self.power_measurement_widget.reload_reference_catalogs)
 
         # Add tabs in the requested order
         self.tabs.addTab(self.home_widget, "Home")
+        self.tabs.addTab(self.power_measurement_widget, "Power measurement")
         self.tabs.addTab(self.analysis_widget, "Fitting analysis")
         self.tabs.addTab(self.comparison_widget, "d-calculation")
         self.tabs.addTab(self.data_management_widget, "Reference Data")
