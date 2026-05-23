@@ -47,6 +47,15 @@
       }
     },
     {
+      "sample": "BMF12-C-1",
+      "material": "BaMgF4",
+      "crystal_orientation": "010",
+      "thickness_info": {
+        "wedge_angle_deg": 0.0,
+        "t_center_mm": 9.662
+      }
+    },
+    {
       "sample": "BMF36-A-1",
       "material": "BaMgF4",
       "crystal_orientation": "010",
@@ -71,6 +80,24 @@
       "thickness_info": {
         "wedge_angle_deg": 0.0,
         "t_center_mm": 1.389
+      }
+    },
+    {
+      "sample": "BMF57-A",
+      "material": "BaMgF4",
+      "crystal_orientation": "010",
+      "thickness_info": {
+        "wedge_angle_deg": 0.0,
+        "t_center_mm": 9.507
+      }
+    },
+    {
+      "sample": "BMF58-A",
+      "material": "BaMgF4",
+      "crystal_orientation": "010",
+      "thickness_info": {
+        "wedge_angle_deg": 0.0,
+        "t_center_mm": 8.606
       }
     },
     {
