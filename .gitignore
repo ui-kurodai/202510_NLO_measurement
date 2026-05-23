@@ -2,6 +2,8 @@
 results/*
 !results/mock_result_generator.py
 !results/20250820_1412_fitting_test
+PM_power_results/*
+!PM_power_results/.gitkeep
 
 # python cache files
 __pycache__/
