@@ -10,6 +10,8 @@ FITTING_RESULT_KEYS: tuple[str, ...] = (
     "k_scale_std",
     "Pm0",
     "Pm0_stderr",
+    "d_rel_abs",
+    "d_component",
     "d_factor",
     "Lc_mean_mm",
     "Lc_std_mm",

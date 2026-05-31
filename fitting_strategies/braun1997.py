@@ -42,6 +42,7 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
     DEFAULT_PARALLEL = False
     DEFAULT_PARALLEL_THRESHOLD = 64
     LIVE_UPDATE_ON_SLIDER = False
+    INTENSITY_SCALE_PARAMETER = "d_rel_abs"
     GEOMETRY_D_COMPONENTS = {
         ("BaMgF4", "010", "100", 0, 90): "d_31",
         ("BaMgF4", "100", "010", 0, 90): "d_32",
@@ -1003,15 +1004,19 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
         theta_flat = np.ravel(theta_arr)
 
         values = self._evaluate_angles(theta_flat, meta, override)
-        env = np.array([item["envelope"] for item in values], dtype=float).reshape(theta_arr.shape)
+        raw_intensity = np.array([item["envelope"] for item in values], dtype=float).reshape(theta_arr.shape)
         psi = np.array([np.real(item["psi"]) for item in values], dtype=float).reshape(theta_arr.shape)
 
-        env0 = self._single_angle_model(0.0, meta, override)["envelope"]
-        if not np.isfinite(env0) or env0 <= 0.0:
-            env0 = float(np.nanmax(env)) if np.isfinite(env).any() and np.nanmax(env) > 0.0 else 1.0
+        intensity0 = self._single_angle_model(0.0, meta, override)["envelope"]
+        if not np.isfinite(intensity0) or intensity0 <= 0.0:
+            intensity0 = (
+                float(np.nanmax(raw_intensity))
+                if np.isfinite(raw_intensity).any() and np.nanmax(raw_intensity) > 0.0
+                else 1.0
+            )
 
-        normalized_env = env / env0
-        model = normalized_env
+        normalize = bool(override.get("normalize", False))
+        model = raw_intensity / intensity0 if normalize else raw_intensity
 
         if scalar_input:
             model = float(np.asarray(model))
@@ -1020,7 +1025,7 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
             return model
 
         aux = {
-            "d_factor": float(env0),
+            "d_factor": float(intensity0),
             "Psi": psi,
             "delta_k": np.array([np.real(item["delta_k"]) for item in values], dtype=float).reshape(theta_arr.shape),
             "raytrace_factor": np.array([item["raytrace_factor"] for item in values], dtype=float).reshape(theta_arr.shape),
@@ -1039,73 +1044,45 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
         """
         App-friendly Braun 1997 fit.
 
-        The nonlinear 4x4 model is comparatively expensive, so this first
-        fitting pipeline uses the metadata thickness and fits only the measured
-        intensity scale after centering and offset subtraction.
+        Fit the relative absolute d coefficient using the raw Braun intensity.
+        No external intensity scale or additive offset is fitted here:
+        measured_voltage(theta) ~= d_rel_abs**2 * I_Braun(theta; d_ij=1).
         """
-        data, centering_info = self._position_centering(self.analysis.data)
-        try:
-            data, offset_info = self._subtract_offset(data)
-        except Exception:
-            offset = float(np.nanmin(np.asarray(data["intensity_corrected"], dtype=float)))
-            data = data.copy()
-            data["offset_corrected"] = np.asarray(data["intensity_corrected"], dtype=float) - offset
-            offset_info = {"offset": offset, "minima_idx": np.array([], dtype=int)}
+        data, _centering_info = self._position_centering(self.analysis.data)
         meta = self._model_meta(self.analysis.meta, {})
 
         theta_deg = np.asarray(data.get("position_centered", data["position"]), dtype=float)
-        y = np.asarray(data.get("offset_corrected", data["intensity_corrected"]), dtype=float)
-        model, fit_aux = self._maker_fringes(
+        y = np.asarray(data.get("intensity_corrected", data.get("ch2")), dtype=float)
+        unit_model, _fit_aux = self._maker_fringes(
             override={
                 "meta": meta,
                 "data": data,
                 "theta_deg": theta_deg,
                 "L": meta["thickness_info"]["t_center_mm"],
+                "normalize": False,
             },
             return_aux=True,
         )
-        model = np.asarray(model, dtype=float)
+        unit_model = np.asarray(unit_model, dtype=float)
 
-        finite = np.isfinite(model) & np.isfinite(y)
+        finite = np.isfinite(unit_model) & np.isfinite(y)
         if not np.any(finite):
             raise ValueError("No finite points available for Braun1997 fitting.")
-        denom = float(np.dot(model[finite], model[finite]))
+        denom = float(np.dot(unit_model[finite], unit_model[finite]))
         if denom <= 0.0:
-            raise ValueError("Braun1997 model has zero norm; cannot scale fit.")
+            raise ValueError("Braun1997 unit-d model has zero norm; cannot fit d_rel_abs.")
 
-        k_scale = float(np.dot(model[finite], y[finite]) / denom)
-        offset = float(offset_info.get("offset", 0.0))
-        fit_curve = k_scale * model + offset
-        residual_rms = float(np.sqrt(np.mean((np.asarray(data["intensity_corrected"], dtype=float)[finite] - fit_curve[finite]) ** 2)))
+        d_squared = float(np.dot(unit_model[finite], y[finite]) / denom)
+        d_rel_abs = float(np.sqrt(max(d_squared, 0.0)))
+        fit_curve = d_rel_abs**2 * unit_model
 
         out = data.copy()
         out["fit"] = fit_curve
 
         results = {
-            "L_mm": float(meta["thickness_info"]["t_center_mm"]),
-            "L_mm_std": float("nan"),
-            "k_scale": k_scale,
-            "k_scale_std": float("nan"),
-            "Pm0": k_scale,
-            "Pm0_stderr": float("nan"),
-            "residual_rms": residual_rms,
             "d_component": str(meta.get("d_component", "")),
-            "position_center_deg": float(centering_info.get("c_best", float("nan"))) if isinstance(centering_info, dict) else float("nan"),
+            "d_rel_abs": d_rel_abs,
         }
-        if isinstance(fit_aux, dict):
-            if fit_aux.get("d_factor") is not None:
-                results["d_factor"] = self._coerce_scalar(fit_aux["d_factor"])
-            for key in (
-                "raytrace_factor",
-                "raytrace_field_scale",
-                "reference_internal_intensity",
-                "raytrace_internal_intensity",
-            ):
-                if key in fit_aux:
-                    value = np.asarray(fit_aux[key], dtype=float)
-                    finite_value = value[np.isfinite(value)]
-                    if finite_value.size:
-                        results[f"{key}_mean"] = float(np.mean(finite_value))
 
         self.analysis.meta = upsert_fitting_result(
             self.analysis.meta,
@@ -1115,7 +1092,6 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
             strategy_display_name=self.__class__.__name__,
         )
 
-        self.analysis.meta["braun1997_d_component"] = str(meta.get("d_component", ""))
         self.analysis.data = out
         out.to_csv(self.analysis.csv_path, index=False)
         with open(self.analysis.json_path, "w", encoding="utf-8") as f:

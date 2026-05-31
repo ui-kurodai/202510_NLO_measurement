@@ -123,6 +123,7 @@ class FittingAnalysisWidget(QWidget):
         self._transient_strategy_names: List[str] = []
         self._analysis_context: Dict[str, Any] = {}
         self._live_curve_cache: Dict[str, Any] = {}
+        self._use_saved_fit_preview = False
         self._manual_controls: Dict[str, Dict[str, QDoubleSpinBox | QSlider]] = {}
         self._manual_syncing = False
         self._extrema_force_reset = False
@@ -505,8 +506,8 @@ class FittingAnalysisWidget(QWidget):
             label="Peak:",
             minimum=0.0,
             maximum=1e9,
-            decimals=2,
-            step=0.01,
+            decimals=6,
+            step=0.001,
         )
         self.sb_manual_centering = QDoubleSpinBox()
         self.sb_manual_centering.setLocale(QLocale.c())
@@ -747,10 +748,11 @@ class FittingAnalysisWidget(QWidget):
         self.cmb_strategy.currentIndexChanged.connect(self._picker_strategy_changed)
         self.btn_add_strategy.clicked.connect(self._add_strategy_from_picker)
         self.cmb_lc_source.currentIndexChanged.connect(lambda *_args: self._render_analysis_plots())
+        self.plot_tabs.currentChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_data.stateChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_fitting.stateChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_envelope.stateChanged.connect(lambda *_args: self._render_analysis_plots())
-        self.sb_manual_centering.valueChanged.connect(lambda *_args: self._render_analysis_plots())
+        self.sb_manual_centering.valueChanged.connect(lambda *_args: self._manual_centering_changed())
         self.btn_nfit_select_folders.clicked.connect(self._nfit_select_folders_clicked)
         self.btn_nfit_refresh.clicked.connect(lambda: self._refresh_analysis_views(reset_manual=False))
 
@@ -1526,7 +1528,7 @@ class FittingAnalysisWidget(QWidget):
         payload = self.extrema_widget.merge_into_metadata(payload)
         return payload
 
-    def _write_json_metadata(self, show_message: bool = False) -> Tuple[bool, str]:
+    def _write_json_metadata(self, show_message: bool = False, refresh_views: bool = True) -> Tuple[bool, str]:
         if not self.json_path:
             return False, "Load a result folder first."
         try:
@@ -1547,7 +1549,8 @@ class FittingAnalysisWidget(QWidget):
         self.extrema_widget.mark_saved()
         self._apply_saved_strategy_selection(meta)
         self._populate_table_from_json(meta)
-        self._refresh_analysis_views(reset_manual=False)
+        if refresh_views:
+            self._refresh_analysis_views(reset_manual=False)
         if show_message:
             QMessageBox.information(self, "Updated", "JSON metadata updated.")
         return True, "OK"
@@ -1561,7 +1564,7 @@ class FittingAnalysisWidget(QWidget):
             QMessageBox.critical(self, "Missing module", "shg_analysis is not importable.")
             return
         # Ensure JSON reflects current editor values before fitting
-        ok, message = self._write_json_metadata(show_message=False)
+        ok, message = self._write_json_metadata(show_message=False, refresh_views=False)
         if not ok:
             QMessageBox.critical(self, "Update failed", message)
             return
@@ -1609,6 +1612,8 @@ class FittingAnalysisWidget(QWidget):
             ("k_scale_std", "k scale std"),
             ("Pm0", "Peak Pm0"),
             ("Pm0_stderr", "Peak Pm0 std"),
+            ("d_rel_abs", "|d| relative"),
+            ("d_component", "d component"),
             ("d_factor", "d factor"),
             ("Lc_mean_mm", "Lc mean [mm]"),
             ("Lc_std_mm", "Lc std [mm]"),
@@ -1658,6 +1663,11 @@ class FittingAnalysisWidget(QWidget):
         self._live_curve_cache = {}
         if reset_manual or not self._manual_controls_ready():
             self._initialize_manual_controls_from_context()
+            self._use_saved_fit_preview = bool(
+                isinstance(self._df, pd.DataFrame)
+                and "fit" in self._df.columns
+                and self._is_strategy_saved(self._selected_strategy_name())
+            )
         self._extrema_force_reset = bool(reset_manual)
         self._render_analysis_plots()
 
@@ -1840,6 +1850,9 @@ class FittingAnalysisWidget(QWidget):
         return 0.0
 
     def _infer_auto_peak(self, meta: Dict[str, Any], strategy: Any, data: pd.DataFrame) -> float:
+        d_rel_abs = self._safe_float(meta.get("d_rel_abs"))
+        if np.isfinite(d_rel_abs):
+            return float(d_rel_abs**2)
         for key in ("Pm0", "k_scale"):
             value = self._safe_float(meta.get(key))
             if np.isfinite(value):
@@ -1858,6 +1871,57 @@ class FittingAnalysisWidget(QWidget):
             if np.isfinite(value):
                 return max(value, 0.0)
         return 1.0
+
+    def _strategy_uses_d_rel_abs(self, strategy: Any | None = None) -> bool:
+        if strategy is None and isinstance(self._analysis_context, dict):
+            strategy = self._analysis_context.get("strategy")
+        return str(getattr(strategy, "INTENSITY_SCALE_PARAMETER", "")).strip() == "d_rel_abs"
+
+    def _intensity_scale_from_control(self, peak_value: float, strategy: Any | None = None) -> float:
+        return float(peak_value)
+
+    def _decimals_for_sigfigs(self, reference: float, sigfigs: int = 3) -> int:
+        reference = abs(float(reference))
+        if not np.isfinite(reference) or reference <= 0.0:
+            return sigfigs
+        exponent = math.floor(math.log10(reference))
+        return max(0, min(12, int(sigfigs - 1 - exponent)))
+
+    def _step_for_sigfigs(self, reference: float, sigfigs: int = 3) -> float:
+        reference = abs(float(reference))
+        if not np.isfinite(reference) or reference <= 0.0:
+            return 10.0 ** (1 - sigfigs)
+        exponent = math.floor(math.log10(reference))
+        return 10.0 ** (exponent - sigfigs + 1)
+
+    def _precision_reference(self, *values: float) -> float:
+        finite_positive = [
+            abs(float(value))
+            for value in values
+            if np.isfinite(float(value)) and abs(float(value)) > 0.0
+        ]
+        if finite_positive:
+            return min(finite_positive)
+        finite_abs = [
+            abs(float(value))
+            for value in values
+            if np.isfinite(float(value))
+        ]
+        return max(finite_abs) if finite_abs else 1.0
+
+    def _apply_peak_spinbox_precision(self, controls: Dict[str, Any], *values: float) -> None:
+        reference = self._precision_reference(*values)
+        decimals = self._decimals_for_sigfigs(reference)
+        step = self._step_for_sigfigs(reference)
+        for name in ("value", "min", "max"):
+            controls[name].setDecimals(decimals)
+            controls[name].setSingleStep(step)
+
+    def _format_sigfigs(self, value: float, sigfigs: int = 3) -> str:
+        value = float(value)
+        if not np.isfinite(value):
+            return "nan"
+        return f"{value:.{sigfigs}g}"
 
     def _safe_float(self, value: Any, default: float = float("nan")) -> float:
         try:
@@ -2256,6 +2320,8 @@ class FittingAnalysisWidget(QWidget):
         if maximum <= minimum:
             maximum = minimum + 1e-9
         value = min(max(value, minimum), maximum)
+        if key == "peak":
+            self._apply_peak_spinbox_precision(controls, minimum, maximum, value)
 
         self._manual_syncing = True
         try:
@@ -2284,6 +2350,7 @@ class FittingAnalysisWidget(QWidget):
     def _manual_range_changed(self, key: str):
         if self._manual_syncing:
             return
+        self._use_saved_fit_preview = False
         controls = self._manual_controls[key]
         minimum = float(controls["min"].value())
         maximum = float(controls["max"].value())
@@ -2294,8 +2361,11 @@ class FittingAnalysisWidget(QWidget):
                 controls["max"].setValue(maximum)
             finally:
                 self._manual_syncing = False
+        current_before = float(controls["value"].value())
+        if key == "peak":
+            self._apply_peak_spinbox_precision(controls, minimum, maximum, current_before)
         controls["value"].setRange(minimum, maximum)
-        current = min(max(float(controls["value"].value()), minimum), maximum)
+        current = min(max(current_before, minimum), maximum)
         self._manual_syncing = True
         try:
             controls["value"].setValue(current)
@@ -2307,8 +2377,17 @@ class FittingAnalysisWidget(QWidget):
     def _manual_value_changed(self, key: str):
         if self._manual_syncing:
             return
+        self._use_saved_fit_preview = False
         self._manual_syncing = True
         try:
+            if key == "peak":
+                controls = self._manual_controls[key]
+                self._apply_peak_spinbox_precision(
+                    controls,
+                    float(controls["min"].value()),
+                    float(controls["max"].value()),
+                    float(controls["value"].value()),
+                )
             self._sync_slider_to_value(key)
         finally:
             self._manual_syncing = False
@@ -2317,6 +2396,7 @@ class FittingAnalysisWidget(QWidget):
     def _manual_slider_changed(self, key: str):
         if self._manual_syncing:
             return
+        self._use_saved_fit_preview = False
         controls = self._manual_controls[key]
         minimum = float(controls["min"].value())
         maximum = float(controls["max"].value())
@@ -2326,6 +2406,8 @@ class FittingAnalysisWidget(QWidget):
             value = minimum + (maximum - minimum) * int(controls["slider"].value()) / self._SLIDER_STEPS
         self._manual_syncing = True
         try:
+            if key == "peak":
+                self._apply_peak_spinbox_precision(controls, minimum, maximum, value)
             controls["value"].setValue(value)
         finally:
             self._manual_syncing = False
@@ -2341,10 +2423,22 @@ class FittingAnalysisWidget(QWidget):
     def _manual_slider_released(self, key: str):
         if self._manual_syncing:
             return
+        self._use_saved_fit_preview = False
+        self._render_analysis_plots()
+
+    def _manual_centering_changed(self):
+        if self._manual_syncing:
+            return
+        self._use_saved_fit_preview = False
         self._render_analysis_plots()
 
     def _reset_manual_controls_clicked(self):
         self._initialize_manual_controls_from_context()
+        self._use_saved_fit_preview = bool(
+            isinstance(self._df, pd.DataFrame)
+            and "fit" in self._df.columns
+            and self._is_strategy_saved(self._selected_strategy_name())
+        )
         self._render_analysis_plots()
 
     def _manual_value(self, key: str) -> float:
@@ -2435,22 +2529,66 @@ class FittingAnalysisWidget(QWidget):
         except Exception as e:
             return {"error": f"Failed to evaluate current fit: {e}"}
 
-        fit_curve = peak_value * fit_base
-        envelope_curve = peak_value * env_base
+        intensity_scale = self._intensity_scale_from_control(peak_value, strategy)
+        fit_curve = intensity_scale * fit_base
+        envelope_curve = intensity_scale * env_base
         residual = fit_curve - y
 
         return {
             "x": x,
             "y": y,
+            "strategy": strategy,
             "fit_curve": fit_curve,
             "envelope_curve": envelope_curve,
             "residual": residual,
             "L_value": L_value,
             "peak_value": peak_value,
+            "intensity_scale": intensity_scale,
             "centering_value": self._manual_centering_value(),
             "fit_curve_raw": fit_curve + float(context.get("offset", 0.0)),
             "fit_aux": fit_aux,
             "d_factor": fit_aux.get("d_factor"),
+        }
+
+    def _compute_saved_fit_curves(self) -> Dict[str, Any]:
+        context = self._analysis_context
+        if context.get("error"):
+            return {"error": context["error"]}
+        if not isinstance(self._df, pd.DataFrame) or "fit" not in self._df.columns:
+            return {"error": "No saved fit curve is available in the CSV."}
+
+        x, y, _prepared = self._current_display_xy()
+        fit_raw = np.asarray(self._df["fit"], dtype=float)
+        if fit_raw.shape != y.shape:
+            return {"error": "Saved fit curve length does not match the displayed data."}
+
+        offset = float(context.get("offset", 0.0))
+        fit_curve = fit_raw - offset if "offset_corrected" in self._current_prepared_data().columns else fit_raw
+        if "fit_envelope" in self._df.columns and len(self._df["fit_envelope"]) == len(fit_raw):
+            envelope_curve = np.asarray(self._df["fit_envelope"], dtype=float)
+        else:
+            envelope_curve = fit_curve
+
+        L_value = self._safe_float((context.get("saved_fit") or {}).get("L_mm"))
+        if not np.isfinite(L_value):
+            L_value = self._manual_value("L")
+        peak_value = self._manual_value("peak")
+
+        return {
+            "x": x,
+            "y": y,
+            "strategy": context.get("strategy"),
+            "fit_curve": fit_curve,
+            "envelope_curve": envelope_curve,
+            "residual": fit_curve - y,
+            "L_value": L_value,
+            "peak_value": peak_value,
+            "intensity_scale": peak_value,
+            "centering_value": self._manual_centering_value(),
+            "fit_curve_raw": fit_raw,
+            "fit_aux": {},
+            "d_factor": None,
+            "saved_preview": True,
         }
 
     def _make_fit_theory_dataframe(self, L_value: float, peak_value: float) -> pd.DataFrame:
@@ -2462,7 +2600,8 @@ class FittingAnalysisWidget(QWidget):
         dn_override = self._dn_override_from_saved_fit(
             context.get("saved_fit", {}) if isinstance(context.get("saved_fit"), dict) else {}
         )
-        theory = peak_value * np.asarray(
+        intensity_scale = self._intensity_scale_from_control(peak_value, strategy)
+        theory = intensity_scale * np.asarray(
             strategy._maker_fringes(
                 override={
                     "L": L_value,
@@ -2687,7 +2826,7 @@ class FittingAnalysisWidget(QWidget):
             self.lbl_manual_hint.setText(f"Fitting unavailable. Showing data only. {message}")
             return
 
-        live = self._compute_live_curves()
+        live = self._compute_saved_fit_curves() if self._use_saved_fit_preview else self._compute_live_curves()
         if "error" in live:
             message = str(live["error"])
             self._render_fit_data_only_plot(message)
@@ -2701,18 +2840,28 @@ class FittingAnalysisWidget(QWidget):
             self.lbl_manual_hint.setText(f"Fitting unavailable. Showing data only. {message}{note_text}")
             return
 
-        extrema = self._compute_auto_extrema_info()
-        lc_info = self._compute_lc_diagnostics(
-            L_value=float(live.get("L_value", self._manual_value("L"))),
-            peak_value=float(live.get("peak_value", self._manual_value("peak"))),
+        current_plot = self._current_plot_key()
+        extrema = self._compute_auto_extrema_info() if current_plot == "extrema" else {
+            "minima_idx": np.array([], dtype=int),
+            "maxima_idx": np.array([], dtype=int),
+        }
+        lc_info = (
+            self._compute_lc_diagnostics(
+                L_value=float(live.get("L_value", self._manual_value("L"))),
+                peak_value=float(live.get("peak_value", self._manual_value("peak"))),
+            )
+            if current_plot == "lc"
+            else {"error": "Open the Lc tab to compute Lc diagnostics."}
         )
 
         self._render_fit_plot(live)
         self._render_residual_plot(live)
         self._render_centering_plot()
         self._render_extrema_plot(live, extrema)
-        self._render_lc_plot(lc_info)
-        self._render_nfit_page()
+        if current_plot == "lc":
+            self._render_lc_plot(lc_info)
+        if self._current_page_key == "nfit":
+            self._render_nfit_page()
         self.btn_apply_manual.setEnabled("error" not in live)
 
         notes = self._analysis_context.get("notes") or []
@@ -2787,7 +2936,8 @@ class FittingAnalysisWidget(QWidget):
         ax.text(
             0.02,
             0.98,
-            f"L = {live['L_value']:.4f} mm (ΔL= {delta_um:+.1f} um)\nPeak = {live['peak_value']:.2f}",
+            f"L = {live['L_value']:.4f} mm (ΔL= {delta_um:+.1f} um)\n"
+            f"Peak = {self._format_sigfigs(live['peak_value'], 3)}",
             transform=ax.transAxes,
             va="top",
             ha="left",
@@ -2938,20 +3088,23 @@ class FittingAnalysisWidget(QWidget):
             QMessageBox.critical(self, "No strategy", "No fitting strategy is available/selected.")
             return
 
-        ok, message = self._write_json_metadata(show_message=False)
+        ok, message = self._write_json_metadata(show_message=False, refresh_views=False)
         if not ok:
             QMessageBox.critical(self, "Update failed", message)
             return
 
-        live = self._compute_live_curves()
+        live = self._compute_saved_fit_curves() if self._use_saved_fit_preview else self._compute_live_curves()
         if "error" in live:
             QMessageBox.critical(self, "Manual fit failed", str(live["error"]))
             return
 
-        lc_info = self._compute_lc_diagnostics(
-            L_value=float(live["L_value"]),
-            peak_value=float(live["peak_value"]),
-        )
+        if self._strategy_uses_d_rel_abs(live.get("strategy")):
+            lc_info = {"error": "Lc diagnostics skipped for Braun1997 manual save."}
+        else:
+            lc_info = self._compute_lc_diagnostics(
+                L_value=float(live["L_value"]),
+                peak_value=float(live["peak_value"]),
+            )
 
         try:
             with open(self.json_path, "r", encoding="utf-8") as f:
@@ -2960,24 +3113,32 @@ class FittingAnalysisWidget(QWidget):
             QMessageBox.critical(self, "Read failed", str(e))
             return
 
-        fit_result = {
-            "L_mm": float(live["L_value"]),
-            "L_mm_std": 0.0,
-            "centering_pos": self._manual_centering_value(),
-            "k_scale": float(live["peak_value"]),
-            "k_scale_std": 0.0,
-            "Pm0": float(live["peak_value"]),
-            "Pm0_stderr": 0.0,
-            "residual_rms": float(np.sqrt(np.mean(np.square(live["residual"])))),
-        }
+        if self._strategy_uses_d_rel_abs(live.get("strategy")):
+            linear_coeff = max(float(live["peak_value"]), 0.0)
+            fit_result = {
+                "L_mm": float(live["L_value"]),
+                "d_rel_abs": float(np.sqrt(linear_coeff)),
+                "d_component": str((self._analysis_context.get("saved_fit") or {}).get("d_component") or meta.get("d_component", "")),
+            }
+        else:
+            fit_result = {
+                "L_mm": float(live["L_value"]),
+                "L_mm_std": 0.0,
+                "centering_pos": self._manual_centering_value(),
+                "k_scale": float(live["peak_value"]),
+                "k_scale_std": 0.0,
+                "Pm0": float(live["peak_value"]),
+                "Pm0_stderr": 0.0,
+                "residual_rms": float(np.sqrt(np.mean(np.square(live["residual"])))),
+            }
         existing_fit = self._fit_payload_for_strategy(meta, selected)
-        if existing_fit:
+        if existing_fit and not self._strategy_uses_d_rel_abs(live.get("strategy")):
             fit_result = {**existing_fit, **fit_result}
         d_factor = self._safe_float(live.get("d_factor"))
-        if np.isfinite(d_factor):
+        if np.isfinite(d_factor) and not self._strategy_uses_d_rel_abs(live.get("strategy")):
             fit_result["d_factor"] = float(d_factor)
 
-        if "error" not in lc_info:
+        if "error" not in lc_info and not self._strategy_uses_d_rel_abs(live.get("strategy")):
             result = lc_info["result"]
             for key in ("Lc_mean_mm", "Lc_std_mm", "minima_count", "n_count"):
                 if key in result:
@@ -3013,10 +3174,10 @@ class FittingAnalysisWidget(QWidget):
             return
 
         self._meta = meta
-        ok, msg = self._load_folder(self._current_dir)
-        if not ok:
-            QMessageBox.warning(self, "Reload failed", msg)
-            return
+        self._df = csv_df
+        self._use_saved_fit_preview = True
+        self.extrema_widget.mark_saved()
+        self._refresh_saved_strategy_list(meta)
         self._populate_table_from_json(meta)
         QMessageBox.information(self, "Saved", "Current L, Peak, and Centering values were written to JSON/CSV.")
 

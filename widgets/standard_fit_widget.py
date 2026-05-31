@@ -284,8 +284,8 @@ class StandardFitWidget(QWidget):
             label="Peak:",
             minimum=0.0,
             maximum=1e9,
-            decimals=2,
-            step=0.01,
+            decimals=6,
+            step=0.001,
         )
         self.sb_manual_centering = QDoubleSpinBox()
         self.sb_manual_centering.setLocale(QLocale.c())
