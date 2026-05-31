@@ -32,37 +32,33 @@ class RefractiveIndexGlobalFitWidget(QWidget):
 
         folder_group = QGroupBox("Folder & Global n-Fit Setup")
         folder_layout = QVBoxLayout(folder_group)
-        self.btn_open_folder = QPushButton("Open Base Folder…")
+        self.btn_nfit_select_folders = QPushButton("Select Measurement Folder(s)…")
         self.lbl_current_folder = QLabel("No folder loaded.")
         self.lbl_current_folder.setWordWrap(True)
         self.lbl_current_folder.setStyleSheet("color: gray;")
         self.lbl_nfit_intro = QLabel(
-            "Use one measurement folder per line. Update JSON or Run Fit to save the list into "
-            "`n_fit_group_paths`. If the list is empty, only the current folder is used."
+            "Select one measurement folder for a single-folder fit, or select multiple folders "
+            "to include them in one global n-fit. Run Fit stores the shared global result in every selected JSON."
         )
         self.lbl_nfit_intro.setWordWrap(True)
         self.lbl_nfit_intro.setStyleSheet("color: gray;")
         self.txt_nfit_group_paths = QPlainTextEdit()
         self.txt_nfit_group_paths.setPlaceholderText(
-            "One folder path per line.\n"
-            "Relative paths are resolved from the current folder and its parent."
+            "Selected group folders are shown here.\n"
+            "One folder path per line."
         )
         self.txt_nfit_group_paths.setTabChangesFocus(True)
         self.txt_nfit_group_paths.setFixedHeight(96)
 
         button_row = QHBoxLayout()
-        self.btn_nfit_select_folders = QPushButton("Select Folders…")
-        self.btn_nfit_current_only = QPushButton("Use Current Folder Only")
         self.btn_nfit_refresh = QPushButton("Refresh Preview")
-        button_row.addWidget(self.btn_nfit_select_folders)
-        button_row.addWidget(self.btn_nfit_current_only)
         button_row.addWidget(self.btn_nfit_refresh)
 
         self.lbl_nfit_hint = QLabel("Select a global n-fit strategy to preview grouped measurements.")
         self.lbl_nfit_hint.setWordWrap(True)
         self.lbl_nfit_hint.setStyleSheet("color: gray;")
 
-        folder_layout.addWidget(self.btn_open_folder)
+        folder_layout.addWidget(self.btn_nfit_select_folders)
         folder_layout.addWidget(self.lbl_current_folder)
         folder_layout.addWidget(self.lbl_nfit_intro)
         folder_layout.addWidget(self.txt_nfit_group_paths)

@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QGroupBox, QMessageBox,
     QTableWidget, QTableWidgetItem,
     QDoubleSpinBox, QSlider, QDialog, QDialogButtonBox, QCheckBox,
-    QListWidgetItem, QMenu, QStackedWidget
+    QListWidgetItem, QMenu, QStackedWidget,
 )
 
 import logging
@@ -64,6 +64,7 @@ from fitting_results import (
 )
 from widgets.refractive_index_global_fit_widget import RefractiveIndexGlobalFitWidget
 from widgets.standard_fit_widget import MplCanvas, SavedStrategyListWidget, StandardFitWidget
+from windows_dialogs import select_multiple_directories
 # self made database
 # from crystaldatabase import CRYSTALS
 # from crystaldatabase import *
@@ -232,11 +233,9 @@ class FittingAnalysisWidget(QWidget):
         self._manual_controls = self.standard_fit_widget._manual_controls
 
         for attr in [
-            "btn_open_folder",
             "lbl_nfit_intro",
             "txt_nfit_group_paths",
             "btn_nfit_select_folders",
-            "btn_nfit_current_only",
             "btn_nfit_refresh",
             "lbl_nfit_hint",
             "nfit_measurements_host",
@@ -723,7 +722,6 @@ class FittingAnalysisWidget(QWidget):
 
     def _connect(self):
         self.btn_open.clicked.connect(self._select_folder)
-        self.btn_open_folder.clicked.connect(self._select_folder)
         self.btn_update_json.clicked.connect(self._update_json_clicked)
         self.btn_fit.clicked.connect(self._run_fit_clicked)
         self.btn_save.clicked.connect(self._save_figures_clicked)
@@ -754,7 +752,6 @@ class FittingAnalysisWidget(QWidget):
         self.chk_fit_show_envelope.stateChanged.connect(lambda *_args: self._render_analysis_plots())
         self.sb_manual_centering.valueChanged.connect(lambda *_args: self._render_analysis_plots())
         self.btn_nfit_select_folders.clicked.connect(self._nfit_select_folders_clicked)
-        self.btn_nfit_current_only.clicked.connect(self._nfit_use_current_folder_only)
         self.btn_nfit_refresh.clicked.connect(lambda: self._refresh_analysis_views(reset_manual=False))
 
         for key in self._manual_controls:
@@ -1265,29 +1262,28 @@ class FittingAnalysisWidget(QWidget):
             self.txt_nfit_group_paths.blockSignals(False)
 
     def _select_multiple_directories(self, start_dir: Optional[Path] = None) -> List[str]:
-        dialog = QFileDialog(self, "Select experiment folders", str(start_dir or self._current_dir or Path.cwd()))
-        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
-        dialog.setFileMode(QFileDialog.FileMode.Directory)
-
-        for view in dialog.findChildren(QListView):
-            view.setSelectionMode(view.SelectionMode.ExtendedSelection)
-        for view in dialog.findChildren(QTreeView):
-            view.setSelectionMode(view.SelectionMode.ExtendedSelection)
-
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        initial_dir = str(start_dir or self._current_dir or Path.cwd())
+        try:
+            folders = select_multiple_directories(
+                parent_hwnd=int(self.window().winId()) if self.window() is not None else None,
+                title="Select measurement folder(s)",
+                initial_dir=initial_dir,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Selection failed", f"Failed to open native folder picker: {exc}")
             return []
-        return [str(Path(path)) for path in dialog.selectedFiles() if str(path).strip()]
+        return [str(path) for path in folders if str(path).strip()]
 
     def _nfit_select_folders_clicked(self):
         selected = self._select_multiple_directories()
         if not selected:
             return
-        self._set_nfit_group_paths(selected)
-        self._refresh_analysis_views(reset_manual=False)
-
-    def _nfit_use_current_folder_only(self):
-        self._set_nfit_group_paths([])
+        selected_paths = [str(Path(path).resolve()) for path in selected]
+        ok, msg = self._load_folder(Path(selected_paths[0]))
+        if not ok:
+            QMessageBox.warning(self, "Load failed", msg)
+            return
+        self._set_nfit_group_paths(selected_paths if len(selected_paths) > 1 else [])
         self._refresh_analysis_views(reset_manual=False)
 
     def _append_selected_filter_preset(self):
@@ -1688,6 +1684,11 @@ class FittingAnalysisWidget(QWidget):
             mod = importlib.import_module(selected.qualname)
             strategy_cls = getattr(mod, selected.class_name)
             analysis = SHGDataAnalysis(str(self._current_dir))
+            n_fit_group_paths = self._parse_nfit_group_paths()
+            if n_fit_group_paths:
+                analysis.meta["n_fit_group_paths"] = n_fit_group_paths
+            else:
+                analysis.meta.pop("n_fit_group_paths", None)
             strategy = strategy_cls(analysis)
         except Exception as e:
             context["error"] = f"Failed to initialize strategy: {e}"

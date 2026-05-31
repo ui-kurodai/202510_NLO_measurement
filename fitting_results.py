@@ -18,6 +18,7 @@ FITTING_RESULT_KEYS: tuple[str, ...] = (
     "n_count",
     "n_peaks",
     "group_size",
+    "thickness_group_count",
     "phase_pair_count",
     "n_fit_cost",
     "n_fit_success",
