@@ -1,8 +1,8 @@
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QTabWidget, QSplitter,
-    QListWidget, QListWidgetItem, QStackedWidget, QLabel
+    QListWidget, QListWidgetItem, QStackedWidget, QLabel, QScrollArea
 )
-from PyQt6.QtCore import QLocale, Qt, QSize
+from PyQt6.QtCore import QEvent, QLocale, Qt, QSize
 
 # Workflow widgets
 from widgets.measurement_widget import SHGMeasurementWidget
@@ -17,6 +17,36 @@ from widgets.elliptec_rotator_widget import ElliptecRotatorWidget
 from widgets.gsc02_stage_widget import OSMS2035Widget, OSMS60YAWWidget
 from widgets.boxcar_widget import BoxcarWidget
 from widgets.ophir_powermeter_widget import OphirPowerMeterWidget
+
+
+class ScrollablePage(QScrollArea):
+    """Page wrapper that scrolls whenever the contained widget outgrows the viewport."""
+    def __init__(self, widget, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setWidget(widget)
+        widget.installEventFilter(self)
+        self._refresh_child_minimum()
+
+    def eventFilter(self, watched, event):
+        if watched is self.widget() and event.type() in (
+            QEvent.Type.LayoutRequest,
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+        ):
+            self._refresh_child_minimum()
+        return super().eventFilter(watched, event)
+
+    def _refresh_child_minimum(self):
+        widget = self.widget()
+        if widget is not None:
+            widget.setMinimumSize(widget.sizeHint())
+
+
+def make_scrollable_page(widget):
+    return ScrollablePage(widget)
 
 
 class DevicesPanel(QWidget):
@@ -131,12 +161,12 @@ class MainWindow(QWidget):
         self.data_management_widget.catalog_updated.connect(self.power_measurement_widget.reload_reference_catalogs)
 
         # Add tabs in the requested order
-        self.tabs.addTab(self.home_widget, "Home")
-        self.tabs.addTab(self.power_measurement_widget, "Power measurement")
-        self.tabs.addTab(self.analysis_widget, "Fitting analysis")
-        self.tabs.addTab(self.comparison_widget, "d-calculation")
-        self.tabs.addTab(self.data_management_widget, "Reference Data")
-        self.tabs.addTab(self.devices_tab, "Devices")
+        self.tabs.addTab(make_scrollable_page(self.home_widget), "Home")
+        self.tabs.addTab(make_scrollable_page(self.power_measurement_widget), "Power measurement")
+        self.tabs.addTab(make_scrollable_page(self.analysis_widget), "Fitting analysis")
+        self.tabs.addTab(make_scrollable_page(self.comparison_widget), "d-calculation")
+        self.tabs.addTab(make_scrollable_page(self.data_management_widget), "Reference Data")
+        self.tabs.addTab(make_scrollable_page(self.devices_tab), "Devices")
 
         # Root layout
         layout = QVBoxLayout(self)
