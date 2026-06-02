@@ -234,16 +234,15 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
         dL_neg = differential_L(th_neg, pol_in, pol_out)
 
         parts = [arr for arr in (dL_pos, dL_neg) if len(arr) > 0]
-        if not parts:
-            raise ValueError("No valid adjacent-minima pairs to compute Lc.")
-
-        diffs = np.concatenate(parts)
+        diffs = np.concatenate(parts) if parts else np.array([], dtype=float)
         diffs = np.asarray(diffs, dtype=float)
-        if diffs.size == 0:
-            raise ValueError("No valid adjacent-minima pairs after filtering.")
 
-        Lc_mean = float(np.mean(diffs))
-        Lc_std = float(np.std(diffs, ddof=1)) if diffs.size >= 2 else float("nan")
+        if diffs.size == 0:
+            Lc_mean = float("nan")
+            Lc_std = float("nan")
+        else:
+            Lc_mean = float(np.mean(diffs))
+            Lc_std = float(np.std(diffs, ddof=1)) if diffs.size >= 2 else float("nan")
 
         fit_data = {
             "minima_idx" : valid_minima_idx,

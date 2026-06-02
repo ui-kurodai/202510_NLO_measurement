@@ -204,7 +204,9 @@ class FittingAnalysisWidget(QWidget):
             "sb_input_pol",
             "sb_detected_pol",
             "cmb_boxcar_sensitivity",
-            "le_filters",
+            "btn_metadata_edit",
+            "no_filter_checkbox",
+            "filter_list",
             "lbl_sample",
             "lbl_method",
             "lbl_time",
@@ -879,6 +881,18 @@ class FittingAnalysisWidget(QWidget):
                 return True
         return False
 
+    def _csv_fit_matches_selected_strategy(self) -> bool:
+        selected = str(self._selected_strategy_name() or "").strip()
+        active = str((self._meta or {}).get("fitting_active_strategy") or "").strip()
+        return bool(
+            selected
+            and active
+            and selected == active
+            and isinstance(self._df, pd.DataFrame)
+            and "fit" in self._df.columns
+            and self._is_strategy_saved(selected)
+        )
+
     def _display_name_for_strategy(
         self,
         strategy_name: str | None,
@@ -1092,6 +1106,7 @@ class FittingAnalysisWidget(QWidget):
         self._refresh_analysis_views(reset_manual=True)
 
     def _strategy_selection_changed(self, *_args):
+        self._use_saved_fit_preview = False
         selected_name = self._selected_strategy_name(allow_picker_fallback=False)
         if selected_name:
             self._set_picker_strategy(selected_name)
@@ -1172,6 +1187,11 @@ class FittingAnalysisWidget(QWidget):
 
     def reload_filter_catalog(self):
         current_id = self.filter_preset_combo.currentData()
+        selected_ids = {
+            str(item.data(Qt.ItemDataRole.UserRole))
+            for item in self.filter_list.selectedItems()
+        }
+        no_filter_checked = self.no_filter_checkbox.isChecked()
         catalog = load_nd_filter_catalog()
         self._filter_catalog_map = {
             entry["filter_id"]: entry for entry in catalog["filters"]
@@ -1192,6 +1212,19 @@ class FittingAnalysisWidget(QWidget):
         self.filter_preset_combo.setCurrentIndex(restored_index)
         self.filter_preset_combo.blockSignals(False)
 
+        self.filter_list.blockSignals(True)
+        try:
+            self.filter_list.clear()
+            for entry in catalog["filters"]:
+                item = QListWidgetItem(format_filter_display(entry))
+                item.setData(Qt.ItemDataRole.UserRole, entry["filter_id"])
+                item.setSelected(entry["filter_id"] in selected_ids)
+                self.filter_list.addItem(item)
+        finally:
+            self.filter_list.blockSignals(False)
+        self.no_filter_checkbox.setChecked(no_filter_checked and not selected_ids)
+        self.standard_fit_widget._toggle_filter_selection(self.no_filter_checkbox.isChecked())
+
     def _selected_sample_entry(self) -> Optional[Dict[str, Any]]:
         sample_key = self.sample_preset_combo.currentData()
         if sample_key is None:
@@ -1209,6 +1242,41 @@ class FittingAnalysisWidget(QWidget):
         if filter_id is None:
             return None
         return self._filter_catalog_map.get(filter_id)
+
+    def _selected_filter_entries(self) -> List[Dict[str, Any]]:
+        if self.no_filter_checkbox.isChecked():
+            return []
+        selected_entries: List[Dict[str, Any]] = []
+        for item in self.filter_list.selectedItems():
+            filter_id = item.data(Qt.ItemDataRole.UserRole)
+            entry = self._filter_catalog_map.get(filter_id)
+            if entry is not None:
+                selected_entries.append(entry)
+        return selected_entries
+
+    def _selected_filters_dict(self) -> Dict[str, float]:
+        wavelength_nm = self._safe_float(self._meta.get("wavelength_nm"))
+        filters, _warnings = resolve_selected_filters(
+            selected_filters=self._selected_filter_entries(),
+            fundamental_wavelength_nm=wavelength_nm if np.isfinite(wavelength_nm) else None,
+        )
+        return filters
+
+    def _set_selected_filters_from_dict(self, filters: Dict[str, Any]) -> None:
+        selected_ids = {str(key) for key, value in filters.items() if np.isfinite(self._safe_float(value))}
+        self.filter_list.blockSignals(True)
+        try:
+            if not selected_ids:
+                self.no_filter_checkbox.setChecked(True)
+                self.filter_list.clearSelection()
+            else:
+                self.no_filter_checkbox.setChecked(False)
+                for index in range(self.filter_list.count()):
+                    item = self.filter_list.item(index)
+                    item.setSelected(str(item.data(Qt.ItemDataRole.UserRole)) in selected_ids)
+            self.standard_fit_widget._toggle_filter_selection(self.no_filter_checkbox.isChecked())
+        finally:
+            self.filter_list.blockSignals(False)
 
     def _apply_selected_sample_preset(self, *_args):
         entry = self._selected_sample_entry()
@@ -1229,24 +1297,6 @@ class FittingAnalysisWidget(QWidget):
             self.sb_beam_rx.setValue(float(entry["beam_r_x"]))
         if entry.get("beam_r_y") is not None:
             self.sb_beam_ry.setValue(float(entry["beam_r_y"]))
-
-    def _parse_filters_text(self, text: str) -> Dict[str, float]:
-        parsed_filters: Dict[str, float] = {}
-        for chunk in str(text).split(","):
-            part = chunk.strip()
-            if not part or "=" not in part:
-                continue
-            filter_id, transmission = part.split("=", 1)
-            try:
-                parsed_filters[filter_id.strip()] = float(transmission.strip())
-            except ValueError:
-                continue
-        return parsed_filters
-
-    def _format_filters_text(self, filters: Dict[str, float]) -> str:
-        if not filters:
-            return ""
-        return ", ".join(f"{filter_id}={transmission:g}" for filter_id, transmission in filters.items())
 
     def _parse_nfit_group_paths(self) -> List[str]:
         lines = []
@@ -1303,9 +1353,17 @@ class FittingAnalysisWidget(QWidget):
             QMessageBox.warning(self, "Filter not applied", warning_text)
             return
 
-        current = self._parse_filters_text(self.le_filters.text())
-        current.update(filters)
-        self.le_filters.setText(self._format_filters_text(current))
+        selected_ids = set(filters.keys())
+        self.no_filter_checkbox.setChecked(False)
+        self.filter_list.blockSignals(True)
+        try:
+            for index in range(self.filter_list.count()):
+                item = self.filter_list.item(index)
+                if str(item.data(Qt.ItemDataRole.UserRole)) in selected_ids:
+                    item.setSelected(True)
+        finally:
+            self.filter_list.blockSignals(False)
+        self.standard_fit_widget._toggle_filter_selection(False)
         if warnings:
             QMessageBox.information(self, "Filter added with warning", "\n".join(warnings))
 
@@ -1419,16 +1477,7 @@ class FittingAnalysisWidget(QWidget):
             self.cmb_boxcar_sensitivity.setCurrentText("")
 
         filters = meta.get("filters")
-        if isinstance(filters, dict) and filters:
-            normalized_filters = {}
-            for key, value in filters.items():
-                numeric = self._safe_float(value)
-                if np.isfinite(numeric):
-                    normalized_filters[str(key)] = numeric
-            filter_text = self._format_filters_text(normalized_filters)
-        else:
-            filter_text = ""
-        self.le_filters.setText(filter_text)
+        self._set_selected_filters_from_dict(filters if isinstance(filters, dict) else {})
         raw_group_paths = meta.get("n_fit_group_paths")
         if isinstance(raw_group_paths, list):
             self._set_nfit_group_paths([str(path) for path in raw_group_paths])
@@ -1515,11 +1564,7 @@ class FittingAnalysisWidget(QWidget):
         else:
             payload.pop("boxcar_sensitivity", None)
 
-        filters_text = self.le_filters.text().strip()
-        if filters_text:
-            payload["filters"] = self._parse_filters_text(filters_text)
-        else:
-            payload["filters"] = {}
+        payload["filters"] = self._selected_filters_dict()
         n_fit_group_paths = self._parse_nfit_group_paths()
         if n_fit_group_paths:
             payload["n_fit_group_paths"] = n_fit_group_paths
@@ -1531,6 +1576,7 @@ class FittingAnalysisWidget(QWidget):
     def _write_json_metadata(self, show_message: bool = False, refresh_views: bool = True) -> Tuple[bool, str]:
         if not self.json_path:
             return False, "Load a result folder first."
+        preferred_strategy_name = self._selected_strategy_name()
         try:
             with open(self.json_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
@@ -1547,7 +1593,11 @@ class FittingAnalysisWidget(QWidget):
 
         self._meta = meta
         self.extrema_widget.mark_saved()
-        self._apply_saved_strategy_selection(meta)
+        if preferred_strategy_name:
+            self._set_picker_strategy(preferred_strategy_name)
+            self._refresh_saved_strategy_list(meta, preferred_strategy_name=preferred_strategy_name)
+        else:
+            self._apply_saved_strategy_selection(meta)
         self._populate_table_from_json(meta)
         if refresh_views:
             self._refresh_analysis_views(reset_manual=False)
@@ -1563,6 +1613,7 @@ class FittingAnalysisWidget(QWidget):
         if SHGDataAnalysis is None:
             QMessageBox.critical(self, "Missing module", "shg_analysis is not importable.")
             return
+        requested_strategy_name = self._selected_strategy_name()
         # Ensure JSON reflects current editor values before fitting
         ok, message = self._write_json_metadata(show_message=False, refresh_views=False)
         if not ok:
@@ -1570,7 +1621,9 @@ class FittingAnalysisWidget(QWidget):
             return
 
         # Resolve strategy class
-        s = self._get_selected_strategy()
+        s = self._find_strategy_info(requested_strategy_name) if requested_strategy_name else None
+        if s is None:
+            s = self._get_selected_strategy()
         if s is None:
             QMessageBox.critical(self, "No strategy", "No fitting strategy is available/selected.")
             return
@@ -1597,6 +1650,11 @@ class FittingAnalysisWidget(QWidget):
         if not ok:
             QMessageBox.warning(self, "Reload failed", msg)
             return
+        if requested_strategy_name:
+            self._set_picker_strategy(requested_strategy_name)
+            self._refresh_saved_strategy_list(self._meta, preferred_strategy_name=requested_strategy_name)
+            if self._meta:
+                self._populate_table_from_json(self._meta)
         self._refresh_analysis_views(reset_manual=True)
 
     # ------------------------------ Table/plots ------------------------------
@@ -1663,11 +1721,7 @@ class FittingAnalysisWidget(QWidget):
         self._live_curve_cache = {}
         if reset_manual or not self._manual_controls_ready():
             self._initialize_manual_controls_from_context()
-            self._use_saved_fit_preview = bool(
-                isinstance(self._df, pd.DataFrame)
-                and "fit" in self._df.columns
-                and self._is_strategy_saved(self._selected_strategy_name())
-            )
+            self._use_saved_fit_preview = self._csv_fit_matches_selected_strategy()
         self._extrema_force_reset = bool(reset_manual)
         self._render_analysis_plots()
 
@@ -2031,29 +2085,19 @@ class FittingAnalysisWidget(QWidget):
             show_fit_annotation=True,
         )
 
-    def _parse_optional_float(self, text: str) -> Optional[float]:
+    def _parse_range_bound(self, text: str) -> Optional[float]:
         stripped = str(text).strip()
         if not stripped:
             return None
         return float(stripped)
 
-    def _format_optional_range(self, min_value: Optional[float], max_value: Optional[float]) -> str:
-        if min_value is None and max_value is None:
-            return ""
-        left = "" if min_value is None else f"{min_value:g}"
-        right = "" if max_value is None else f"{max_value:g}"
-        return f"{left}, {right}"
-
-    def _parse_optional_range(self, text: str) -> Tuple[Optional[float], Optional[float]]:
-        stripped = str(text).strip()
-        if not stripped:
-            return None, None
-        normalized = stripped.replace(":", ",").replace("~", ",")
-        parts = [part.strip() for part in normalized.split(",")]
-        if len(parts) != 2:
-            raise ValueError("Range must be entered as 'min, max'.")
-        range_min = float(parts[0]) if parts[0] else None
-        range_max = float(parts[1]) if parts[1] else None
+    def _parse_optional_range_bounds(
+        self,
+        min_text: str,
+        max_text: str,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        range_min = self._parse_range_bound(min_text)
+        range_max = self._parse_range_bound(max_text)
         if range_min is not None and range_max is not None and range_min > range_max:
             raise ValueError("Range min must be less than or equal to max.")
         return range_min, range_max
@@ -2067,6 +2111,10 @@ class FittingAnalysisWidget(QWidget):
         if style == "line+markers":
             kwargs["linestyle"] = "-"
             kwargs["linewidth"] = 1.0
+        elif style == "line":
+            kwargs["linestyle"] = "-"
+            kwargs["linewidth"] = 1.2
+            kwargs["marker"] = None
         else:
             kwargs["linestyle"] = "none"
         return kwargs
@@ -2092,6 +2140,7 @@ class FittingAnalysisWidget(QWidget):
         cmb_data_style = QComboBox()
         cmb_data_style.addItem("Markers only", userData="markers")
         cmb_data_style.addItem("Markers + line", userData="line+markers")
+        cmb_data_style.addItem("Line only", userData="line")
         data_style_index = max(cmb_data_style.findData(settings.data_plot_style), 0)
         cmb_data_style.setCurrentIndex(data_style_index)
 
@@ -2105,10 +2154,30 @@ class FittingAnalysisWidget(QWidget):
         sb_aspect.setSpecialValueText("Auto")
         sb_aspect.setValue(settings.box_aspect)
 
-        le_x_range = QLineEdit(self._format_optional_range(settings.x_min, settings.x_max))
-        le_x_range.setPlaceholderText("min, max   (blank side = auto)")
-        le_y_range = QLineEdit(self._format_optional_range(settings.y_min, settings.y_max))
-        le_y_range.setPlaceholderText("min, max   (blank side = auto)")
+        le_x_min = QLineEdit("" if settings.x_min is None else f"{settings.x_min:g}")
+        le_x_min.setPlaceholderText("auto")
+        le_x_max = QLineEdit("" if settings.x_max is None else f"{settings.x_max:g}")
+        le_x_max.setPlaceholderText("auto")
+        le_y_min = QLineEdit("" if settings.y_min is None else f"{settings.y_min:g}")
+        le_y_min.setPlaceholderText("auto")
+        le_y_max = QLineEdit("" if settings.y_max is None else f"{settings.y_max:g}")
+        le_y_max.setPlaceholderText("auto")
+
+        x_range_row = QWidget()
+        x_range_layout = QHBoxLayout(x_range_row)
+        x_range_layout.setContentsMargins(0, 0, 0, 0)
+        x_range_layout.setSpacing(6)
+        x_range_layout.addWidget(le_x_min)
+        x_range_layout.addWidget(QLabel("-"))
+        x_range_layout.addWidget(le_x_max)
+
+        y_range_row = QWidget()
+        y_range_layout = QHBoxLayout(y_range_row)
+        y_range_layout.setContentsMargins(0, 0, 0, 0)
+        y_range_layout.setSpacing(6)
+        y_range_layout.addWidget(le_y_min)
+        y_range_layout.addWidget(QLabel("-"))
+        y_range_layout.addWidget(le_y_max)
 
         form.addRow("Font size:", sb_font)
         form.addRow("", cb_legend)
@@ -2116,8 +2185,8 @@ class FittingAnalysisWidget(QWidget):
             form.addRow("Data style:", cmb_data_style)
             form.addRow("", cb_fit_annotation)
         form.addRow("Box aspect:", sb_aspect)
-        form.addRow("X range:", le_x_range)
-        form.addRow("Y range:", le_y_range)
+        form.addRow("X range:", x_range_row)
+        form.addRow("Y range:", y_range_row)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(
@@ -2134,8 +2203,10 @@ class FittingAnalysisWidget(QWidget):
                 sb_font=sb_font,
                 cb_legend=cb_legend,
                 sb_aspect=sb_aspect,
-                le_x_range=le_x_range,
-                le_y_range=le_y_range,
+                le_x_min=le_x_min,
+                le_x_max=le_x_max,
+                le_y_min=le_y_min,
+                le_y_max=le_y_max,
                 cmb_data_style=cmb_data_style,
                 cb_fit_annotation=cb_fit_annotation,
             )
@@ -2145,8 +2216,8 @@ class FittingAnalysisWidget(QWidget):
             return
 
         try:
-            x_min, x_max = self._parse_optional_range(le_x_range.text())
-            y_min, y_max = self._parse_optional_range(le_y_range.text())
+            x_min, x_max = self._parse_optional_range_bounds(le_x_min.text(), le_x_max.text())
+            y_min, y_max = self._parse_optional_range_bounds(le_y_min.text(), le_y_max.text())
             self._plot_settings[plot_key] = PlotSettings(
                 font_size=float(sb_font.value()),
                 show_legend=bool(cb_legend.isChecked()),
@@ -2171,8 +2242,10 @@ class FittingAnalysisWidget(QWidget):
         sb_font: QDoubleSpinBox,
         cb_legend: QCheckBox,
         sb_aspect: QDoubleSpinBox,
-        le_x_range: QLineEdit,
-        le_y_range: QLineEdit,
+        le_x_min: QLineEdit,
+        le_x_max: QLineEdit,
+        le_y_min: QLineEdit,
+        le_y_max: QLineEdit,
         cmb_data_style: QComboBox,
         cb_fit_annotation: QCheckBox,
     ) -> None:
@@ -2180,8 +2253,10 @@ class FittingAnalysisWidget(QWidget):
         sb_font.setValue(defaults.font_size)
         cb_legend.setChecked(defaults.show_legend)
         sb_aspect.setValue(defaults.box_aspect)
-        le_x_range.clear()
-        le_y_range.clear()
+        le_x_min.clear()
+        le_x_max.clear()
+        le_y_min.clear()
+        le_y_max.clear()
         cmb_data_style.setCurrentIndex(max(cmb_data_style.findData(defaults.data_plot_style), 0))
         cb_fit_annotation.setChecked(defaults.show_fit_annotation)
 
@@ -2434,11 +2509,7 @@ class FittingAnalysisWidget(QWidget):
 
     def _reset_manual_controls_clicked(self):
         self._initialize_manual_controls_from_context()
-        self._use_saved_fit_preview = bool(
-            isinstance(self._df, pd.DataFrame)
-            and "fit" in self._df.columns
-            and self._is_strategy_saved(self._selected_strategy_name())
-        )
+        self._use_saved_fit_preview = self._csv_fit_matches_selected_strategy()
         self._render_analysis_plots()
 
     def _manual_value(self, key: str) -> float:
@@ -2643,7 +2714,10 @@ class FittingAnalysisWidget(QWidget):
             )
             return {"result": result, "aux": aux, "source": source, "data": lc_data}
         except Exception as e:
-            return {"error": str(e), "source": source}
+            message = str(e)
+            if "No valid adjacent-minima pairs to compute Lc." in message or "No valid adjacent-minima pairs after filtering." in message:
+                return {"skipped": True, "message": message, "source": source}
+            return {"error": message, "source": source}
 
     def _dn_override_from_saved_fit(self, fit_payload: Dict[str, Any]) -> Dict[str, float]:
         dn_override: Dict[str, float] = {}
@@ -3020,6 +3094,10 @@ class FittingAnalysisWidget(QWidget):
             return
         self.canvas_lc.clear()
         ax = self.canvas_lc.ax
+        if lc_info.get("skipped"):
+            message = str(lc_info.get("message") or "Lc diagnostics were skipped.")
+            self._show_plot_message(self.canvas_lc, f"Lc plot skipped: {message}")
+            return
         if "error" in lc_info:
             self._show_plot_message(self.canvas_lc, f"Lc plot unavailable: {lc_info['error']}")
             return
@@ -3138,7 +3216,11 @@ class FittingAnalysisWidget(QWidget):
         if np.isfinite(d_factor) and not self._strategy_uses_d_rel_abs(live.get("strategy")):
             fit_result["d_factor"] = float(d_factor)
 
-        if "error" not in lc_info and not self._strategy_uses_d_rel_abs(live.get("strategy")):
+        if (
+            "error" not in lc_info
+            and not lc_info.get("skipped")
+            and not self._strategy_uses_d_rel_abs(live.get("strategy"))
+        ):
             result = lc_info["result"]
             for key in ("Lc_mean_mm", "Lc_std_mm", "minima_count", "n_count"):
                 if key in result:
