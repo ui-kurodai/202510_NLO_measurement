@@ -107,7 +107,14 @@ class StandardFitWidget(QWidget):
         reference_form.addRow("Filter preset:", filter_row)
 
         meta_edit = QGroupBox("Metadata (editable before fitting)")
-        form = QFormLayout(meta_edit)
+        meta_edit_layout = QVBoxLayout(meta_edit)
+        meta_header = QHBoxLayout()
+        meta_header.addStretch(1)
+        self.btn_metadata_edit = QPushButton("Edit")
+        self.btn_metadata_edit.setCheckable(True)
+        meta_header.addWidget(self.btn_metadata_edit)
+        meta_edit_layout.addLayout(meta_header)
+        form = QFormLayout()
         self.le_material = QLineEdit()
         self.le_crystal_orientation = QLineEdit()
         self.le_axis = QLineEdit()
@@ -141,8 +148,11 @@ class StandardFitWidget(QWidget):
         self.cmb_boxcar_sensitivity = QComboBox()
         self.cmb_boxcar_sensitivity.setEditable(True)
         self.cmb_boxcar_sensitivity.addItems(COMMON_BOXCAR_SENSITIVITIES)
-        self.le_filters = QLineEdit()
-        self.le_filters.setPlaceholderText("filter_id=value, ...")
+        self.no_filter_checkbox = QCheckBox("No ND filter")
+        self.no_filter_checkbox.setChecked(False)
+        self.filter_list = QListWidget()
+        self.filter_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self.filter_list.setFixedHeight(110)
         form.addRow("material:", self.le_material)
         form.addRow("crystal_orientation (e.g. 0,1,1):", self.le_crystal_orientation)
         form.addRow("rotation/translation axis:", self.le_axis)
@@ -153,7 +163,32 @@ class StandardFitWidget(QWidget):
         form.addRow("beam_r_x:", self.sb_beam_rx)
         form.addRow("beam_r_y:", self.sb_beam_ry)
         form.addRow("boxcar_sensitivity:", self.cmb_boxcar_sensitivity)
-        form.addRow("filters:", self.le_filters)
+        meta_edit_layout.addLayout(form)
+        filter_header = QHBoxLayout()
+        filter_header.addWidget(QLabel("ND filters:"))
+        filter_header.addStretch(1)
+        meta_edit_layout.addLayout(filter_header)
+        meta_edit_layout.addWidget(self.no_filter_checkbox)
+        meta_edit_layout.addWidget(self.filter_list)
+
+        self._metadata_edit_widgets = [
+            self.le_material,
+            self.le_crystal_orientation,
+            self.le_axis,
+            self.sb_t_thin,
+            self.sb_wedge,
+            self.sb_beam_rx,
+            self.sb_beam_ry,
+            self.sb_input_pol,
+            self.sb_detected_pol,
+            self.cmb_boxcar_sensitivity,
+            self.no_filter_checkbox,
+            self.filter_list,
+        ]
+        self.no_filter_checkbox.toggled.connect(self._toggle_filter_selection)
+        self.filter_list.itemSelectionChanged.connect(self._sync_filter_checkbox)
+        self.btn_metadata_edit.toggled.connect(self.set_metadata_edit_enabled)
+        self.set_metadata_edit_enabled(False)
 
         meta_view = QGroupBox("Loaded Metadata (read-only excerpt)")
         meta_view_form = QFormLayout(meta_view)
@@ -264,6 +299,25 @@ class StandardFitWidget(QWidget):
             "extrema": self.extrema_widget.canvas,
             "lc": self.canvas_lc,
         }
+
+    def set_metadata_edit_enabled(self, enabled: bool) -> None:
+        for widget in self._metadata_edit_widgets:
+            widget.setEnabled(enabled)
+        self.btn_metadata_edit.setChecked(enabled)
+        self.btn_metadata_edit.setText("Done" if enabled else "Edit")
+        self._toggle_filter_selection(self.no_filter_checkbox.isChecked())
+
+    def _toggle_filter_selection(self, checked: bool) -> None:
+        if checked:
+            self.filter_list.clearSelection()
+        self.filter_list.setEnabled((not checked) and self.btn_metadata_edit.isChecked())
+
+    def _sync_filter_checkbox(self) -> None:
+        if self.filter_list.selectedItems():
+            self.no_filter_checkbox.blockSignals(True)
+            self.no_filter_checkbox.setChecked(False)
+            self.no_filter_checkbox.blockSignals(False)
+            self.filter_list.setEnabled(self.btn_metadata_edit.isChecked())
 
     def _build_manual_fit_group(self) -> QGroupBox:
         group = QGroupBox("Manual Fit Control")
