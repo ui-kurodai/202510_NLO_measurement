@@ -45,7 +45,9 @@ class CrylasQlaserWidget(QGroupBox):
         self.rep_rate_spin.setRange(1, 10000)
         self.rep_rate_spin.setSingleStep(10)
         self.rep_rate_spin.setEnabled(False)
-        self.rep_rate_spin.valueChanged.connect(self.update_rep_rate)
+        self.rep_rate_set_btn = QPushButton("Set")
+        self.rep_rate_set_btn.setEnabled(False)
+        self.rep_rate_set_btn.clicked.connect(self.update_rep_rate)
 
         # Layout
         layout = QVBoxLayout()
@@ -59,6 +61,7 @@ class CrylasQlaserWidget(QGroupBox):
         hlayout = QHBoxLayout()
         hlayout.addWidget(self.rep_rate_label)
         hlayout.addWidget(self.rep_rate_spin)
+        hlayout.addWidget(self.rep_rate_set_btn)
         layout.addLayout(hlayout)
 
         layout.addWidget(self.pd_voltage_label)
@@ -92,6 +95,7 @@ class CrylasQlaserWidget(QGroupBox):
                 logging.info("CrylasQLaser device connected")
                 self.connect_btn.setText("Connected")
                 self.set_controls_enabled(True)
+                self.refresh_rep_rate_limits()
 
                 self.polling_thread = LaserPollingThread(self.controller, interval=1.0)
                 self.polling_thread.status_updated.connect(self.update_status)
@@ -134,10 +138,31 @@ class CrylasQlaserWidget(QGroupBox):
     def set_controls_enabled(self, enabled):
         self.laser_btn.setEnabled(enabled)
         self.rep_rate_spin.setEnabled(enabled)
+        self.rep_rate_set_btn.setEnabled(enabled)
 
-    def update_rep_rate(self, value):
+    def refresh_rep_rate_limits(self):
+        if self.controller is None:
+            return
         try:
-            self.controller.rep_rate = int(value)
+            max_rate = self.controller.max_allowed_rep_rate
+        except Exception as e:
+            logging.error(f"Failed to get max rep rate: {e}")
+            return
+        if max_rate is None:
+            return
+        try:
+            max_rate = int(max_rate)
+        except (TypeError, ValueError):
+            logging.warning(f"Unexpected max rep rate value: {max_rate}")
+            return
+        if max_rate >= 1:
+            self.rep_rate_spin.setRange(1, max_rate)
+
+    def update_rep_rate(self):
+        if self.controller is None:
+            return
+        try:
+            self.controller.rep_rate = int(self.rep_rate_spin.value())
         except Exception as e:
             logging.error(f"Failed to set rep rate: {e}")
 

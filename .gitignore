@@ -10,3 +10,6 @@ __pycache__/
 
 # jupyter cache files
 .ipynb_checkpoints/
+
+# codex files
+.codex_tmp_test/

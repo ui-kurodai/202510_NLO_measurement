@@ -360,7 +360,7 @@ class CrylasQLaserController:
         max_val = self.max_allowed_rep_rate
         if max_val is None:
             return
-        if 1 < new_rep_rate <= max_val:
+        if 1 <= new_rep_rate <= max_val:
             try:
                 self.send_command(f"mf {new_rep_rate}")
             except (serial.SerialException, OSError) as e:
