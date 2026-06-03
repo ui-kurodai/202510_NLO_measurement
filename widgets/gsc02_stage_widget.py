@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QPushButton, QLabel, QVBoxLayout, QHBoxLayout,
     QMessageBox, QComboBox, QDoubleSpinBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QLocale
 from devices.osms2035_control import OSMS2035Controller
 from devices.osms60yaw_control import OSMS60YAWController
 import serial.tools.list_ports
@@ -52,6 +52,7 @@ class StageCommonWidget(QGroupBox):
 
         # stage control
         self.target_spin = QDoubleSpinBox()
+        self.target_spin.setLocale(QLocale.c())
         self.target_spin.setDecimals(4)
         self.target_spin.setSingleStep(0.1)
         self.target_spin.setSuffix(f" {self.unit}")
