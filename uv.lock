@@ -1156,7 +1156,7 @@ wheels = [
 [[package]]
 name = "thorlabs-power-meter-controller"
 version = "0.1.0"
-source = { git = "https://github.com/ui-kurodai/thorlabs-power-meter-controller#62ca4e464d12860aa9970cd18d9bbd6826c0dd5e" }
+source = { git = "https://github.com/ui-kurodai/thorlabs-power-meter-controller#282314ca9b4800db4132a9bf97770e53902a0a11" }
 dependencies = [
     { name = "pythonnet", marker = "sys_platform == 'win32'" },
     { name = "pywin32", marker = "sys_platform == 'win32'" },

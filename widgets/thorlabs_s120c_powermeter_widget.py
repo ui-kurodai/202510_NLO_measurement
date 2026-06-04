@@ -12,10 +12,12 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTimeEdit,
@@ -59,6 +61,10 @@ class ThorlabsS120CPowerMeterWidget(QGroupBox):
         self.scan_btn = QPushButton("Scan Thorlabs USB")
         self.scan_btn.clicked.connect(self.scan_devices)
         self.device_combo = QComboBox()
+        self.library_path_edit = QLineEdit()
+        self.library_path_edit.setPlaceholderText("Optional folder containing Thorlabs.TLPM_64.Interop.dll")
+        self.browse_library_btn = QPushButton("Browse DLL Folder")
+        self.browse_library_btn.clicked.connect(self.browse_library_path)
 
         self.connect_btn = QPushButton("Open Device")
         self.connect_btn.clicked.connect(self.toggle_connection)
@@ -126,6 +132,10 @@ class ThorlabsS120CPowerMeterWidget(QGroupBox):
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self.scan_btn)
         layout.addWidget(self.device_combo)
+        library_layout = QHBoxLayout()
+        library_layout.addWidget(self.library_path_edit, 1)
+        library_layout.addWidget(self.browse_library_btn)
+        layout.addLayout(library_layout)
         layout.addWidget(self.connect_btn)
         layout.addWidget(self.power_label)
         layout.addWidget(self.sensor_label)
@@ -160,7 +170,7 @@ class ThorlabsS120CPowerMeterWidget(QGroupBox):
     def scan_devices(self):
         self.device_combo.clear()
         try:
-            controller = self.controller or ThorlabsS120CPowerMeterController()
+            controller = self.controller or self._make_controller()
             for resource in controller.scan_usb():
                 self.device_combo.addItem(resource, resource)
             if self.device_combo.count() == 0:
@@ -168,11 +178,23 @@ class ThorlabsS120CPowerMeterWidget(QGroupBox):
         except Exception as exc:
             QMessageBox.critical(self, "Thorlabs Scan Error", str(exc))
 
+    def browse_library_path(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Thorlabs TLPM DLL Folder")
+        if folder:
+            self.library_path_edit.setText(folder)
+
+    def _library_path(self) -> str | None:
+        text = self.library_path_edit.text().strip()
+        return text or None
+
+    def _make_controller(self):
+        return ThorlabsS120CPowerMeterController(library_path=self._library_path())
+
     def toggle_connection(self):
         if self.controller is None:
             resource = self.device_combo.currentData()
             try:
-                self.controller = ThorlabsS120CPowerMeterController()
+                self.controller = self._make_controller()
                 self.controller.connect(resource)
                 self.controller.set_wavelength_nm(self.wavelength_spin.value())
                 self.controller.set_average_time(self.average_time_spin.value())
