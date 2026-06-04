@@ -260,8 +260,10 @@ class PowerMeasurementRunner:
         self.powermeter.set_power_mode()
         self.powermeter.set_wavelength_nm(wavelength_nm)
         self.powermeter.set_range_index_or_auto(range_index)
-        self.powermeter.zero(wait_s=30.0)
-        self._last_zero_stats = self._read_zero_after_zeroing()
+        self.powermeter.zero(wait_s=float(getattr(self.powermeter, "zero_wait_s", 30.0)))
+        self._last_zero_stats = self._read_zero_after_zeroing(
+            duration_s=float(getattr(self.powermeter, "zero_check_duration_s", 3.0))
+        )
         self._ensure_laser_on()
 
     def _ensure_laser_off(self) -> None:
@@ -276,7 +278,7 @@ class PowerMeasurementRunner:
             logging.info("[Power] Laser emission already OFF for zeroing.")
             return
 
-        logging.info("[Power] Turning laser OFF before Ophir zeroing.")
+        logging.info("[Power] Turning laser OFF before power meter zeroing.")
         self.laser.stop()
         deadline = time.monotonic() + 8.0
         while time.monotonic() < deadline:
@@ -419,7 +421,10 @@ class PowerMeasurementRunner:
                         logging.info("[Power] Moving to %.4f deg for %s", pos, scan_label)
                         if not dry_run:
                             self.stage_rot.move_to_angle(pos, "ccw")
-                            stats = self._average_power_after_settle_tail(total_wait_s=4.0, tail_s=2.0)
+                            stats = self._average_power_after_settle_tail(
+                                total_wait_s=float(getattr(self.powermeter, "scan_average_total_s", 4.0)),
+                                tail_s=float(getattr(self.powermeter, "scan_average_tail_s", 2.0)),
+                            )
                         else:
                             time.sleep(0.02)
                             stats = self._dry_run_power(pos, angle)
@@ -495,7 +500,7 @@ class PowerMeasurementRunner:
                 )
             time.sleep(0.1)
         if not values:
-            raise RuntimeError("No Ophir readings were collected during SHG averaging.")
+            raise RuntimeError("No power meter readings were collected during SHG averaging.")
         mean = sum(values) / len(values)
         variance = sum((value - mean) ** 2 for value in values) / len(values)
         return {"mean_w": mean, "min_w": min(values), "max_w": max(values), "std_w": variance ** 0.5, "n": len(values)}
@@ -524,7 +529,7 @@ class PowerMeasurementRunner:
         finally:
             self.powermeter.stop_stream()
         if not values:
-            raise RuntimeError("No Ophir readings were collected during scan averaging.")
+            raise RuntimeError("No power meter readings were collected during scan averaging.")
         mean = sum(values) / len(values)
         variance = sum((value - mean) ** 2 for value in values) / len(values)
         return {"mean_w": mean, "min_w": min(values), "max_w": max(values), "std_w": variance ** 0.5, "n": len(values)}

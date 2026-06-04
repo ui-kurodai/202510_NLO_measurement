@@ -17,6 +17,7 @@ from widgets.elliptec_rotator_widget import ElliptecRotatorWidget
 from widgets.gsc02_stage_widget import OSMS2035Widget, OSMS60YAWWidget
 from widgets.boxcar_widget import BoxcarWidget
 from widgets.ophir_powermeter_widget import OphirPowerMeterWidget
+from widgets.thorlabs_s120c_powermeter_widget import ThorlabsS120CPowerMeterWidget
 
 
 class ScrollablePage(QScrollArea):
@@ -77,6 +78,7 @@ class DevicesPanel(QWidget):
         self.stage_rot_widget = OSMS60YAWWidget(axis=2) # rotation stage
         self.boxcar_widget = BoxcarWidget()
         self.powermeter_widget = OphirPowerMeterWidget()
+        self.thorlabs_powermeter_widget = ThorlabsS120CPowerMeterWidget()
         self.elliptec_widget = ElliptecRotatorWidget()
 
         # Ordered list of (name, widget)
@@ -86,6 +88,7 @@ class DevicesPanel(QWidget):
             ("Stage (Rotation)", self.stage_rot_widget),
             ("Boxcar", self.boxcar_widget),
             ("Ophir Power Meter", self.powermeter_widget),
+            ("Thorlabs S120C Power Meter", self.thorlabs_powermeter_widget),
             ("Analyzer", self.elliptec_widget),
         ]
 
@@ -125,6 +128,7 @@ class DevicesPanel(QWidget):
             self.stage_rot_widget,
             self.boxcar_widget,
             self.powermeter_widget,
+            self.thorlabs_powermeter_widget,
             self.elliptec_widget,
         ]
 

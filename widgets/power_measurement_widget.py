@@ -115,6 +115,10 @@ class PowerMeasurementWidget(QGroupBox):
         self.notes_edit.setFixedHeight(60)
 
         self.dry_run_checkbox = QCheckBox("Dry Run")
+        self.powermeter_combo = QComboBox()
+        self.powermeter_combo.addItem("Ophir 3A", "ophir")
+        self.powermeter_combo.addItem("Thorlabs S120C", "thorlabs_s120c")
+        self.powermeter_combo.currentIndexChanged.connect(lambda _: self.refresh_measurement_ranges(show_errors=False))
         self.power_unit_combo = QComboBox()
         for unit, scale in POWER_UNITS:
             self.power_unit_combo.addItem(unit, scale)
@@ -197,7 +201,12 @@ class PowerMeasurementWidget(QGroupBox):
         scan_layout.addWidget(self.step_spin)
         layout.addLayout(scan_layout)
 
-        layout.addWidget(self.dry_run_checkbox)
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(self.dry_run_checkbox)
+        mode_layout.addWidget(QLabel("Power meter:"))
+        mode_layout.addWidget(self.powermeter_combo)
+        mode_layout.addStretch(1)
+        layout.addLayout(mode_layout)
         unit_layout = QHBoxLayout()
         unit_layout.addWidget(QLabel("Power unit:"))
         unit_layout.addWidget(self.power_unit_combo)
@@ -344,7 +353,7 @@ class PowerMeasurementWidget(QGroupBox):
         dry_run = self.dry_run_checkbox.isChecked()
         try:
             stage_rot = self.devices_tab.stage_rot_widget.controller if measurement_task == "shg" else None
-            powermeter = None if dry_run else self.devices_tab.powermeter_widget.controller
+            powermeter = None if dry_run else self._selected_powermeter_controller()
             laser = None if dry_run else self.devices_tab.laser_widget.controller
         except AttributeError:
             QMessageBox.warning(self, "Not Ready", "MainWindow does not have required controller widgets.")
@@ -353,7 +362,7 @@ class PowerMeasurementWidget(QGroupBox):
             QMessageBox.warning(self, "Not Ready", "Rotation stage is not connected.")
             return
         if not dry_run and powermeter is None:
-            QMessageBox.warning(self, "Not Ready", "Ophir power meter is not connected.")
+            QMessageBox.warning(self, "Not Ready", f"{self._selected_powermeter_label()} is not connected.")
             return
         if not dry_run and laser is None:
             QMessageBox.warning(self, "Not Ready", "Laser controller is not connected.")
@@ -429,14 +438,14 @@ class PowerMeasurementWidget(QGroupBox):
         if self.dry_run_checkbox.isChecked():
             return
         try:
-            powermeter = self.devices_tab.powermeter_widget.controller
+            powermeter = self._selected_powermeter_controller()
         except AttributeError:
             if show_errors:
-                QMessageBox.warning(self, "Not Ready", "Ophir power meter widget is not available.")
+                QMessageBox.warning(self, "Not Ready", f"{self._selected_powermeter_label()} widget is not available.")
             return
         if powermeter is None:
             if show_errors:
-                QMessageBox.warning(self, "Not Ready", "Ophir power meter is not connected.")
+                QMessageBox.warning(self, "Not Ready", f"{self._selected_powermeter_label()} is not connected.")
             return
         try:
             ranges = powermeter.get_range_options()
@@ -464,6 +473,23 @@ class PowerMeasurementWidget(QGroupBox):
                 break
         combo.setCurrentIndex(restored_index)
         combo.blockSignals(False)
+
+    def _selected_powermeter_key(self) -> str:
+        return str(self.powermeter_combo.currentData() or "ophir")
+
+    def _selected_powermeter_label(self) -> str:
+        return self.powermeter_combo.currentText() or "power meter"
+
+    def _selected_powermeter_widget(self):
+        if self.devices_tab is None:
+            return None
+        if self._selected_powermeter_key() == "thorlabs_s120c":
+            return getattr(self.devices_tab, "thorlabs_powermeter_widget", None)
+        return getattr(self.devices_tab, "powermeter_widget", None)
+
+    def _selected_powermeter_controller(self):
+        widget = self._selected_powermeter_widget()
+        return None if widget is None else getattr(widget, "controller", None)
 
     def _prepare_stage_widgets_for_measurement(self):
         stage_widget = getattr(self.devices_tab, "stage_rot_widget", None)
@@ -649,7 +675,7 @@ class PowerMeasurementWidget(QGroupBox):
     def _stop_device_polling_for_measurement(self):
         if self.dry_run_checkbox.isChecked() or self.devices_tab is None:
             return
-        powermeter_widget = getattr(self.devices_tab, "powermeter_widget", None)
+        powermeter_widget = self._selected_powermeter_widget()
         if powermeter_widget is not None and hasattr(powermeter_widget, "stop_polling"):
             powermeter_widget.stop_polling()
         laser_widget = getattr(self.devices_tab, "laser_widget", None)
@@ -661,7 +687,7 @@ class PowerMeasurementWidget(QGroupBox):
     def _restart_device_polling_after_measurement(self):
         if self.dry_run_checkbox.isChecked() or self.devices_tab is None:
             return
-        powermeter_widget = getattr(self.devices_tab, "powermeter_widget", None)
+        powermeter_widget = self._selected_powermeter_widget()
         if powermeter_widget is not None and hasattr(powermeter_widget, "start_polling"):
             powermeter_widget.start_polling()
         laser_widget = getattr(self.devices_tab, "laser_widget", None)
