@@ -12,6 +12,20 @@ from threading import Lock
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - in %(filename)s - %(message)s')
 
 _STAGE_PORT_LOCKS = {}
+_JOG_SPEEDS = {
+    "slow": {
+        "range": 2,
+        "min": (200, 200),
+        "max": (500, 500),
+        "acceleration": (200, 200),
+    },
+    "fast": {
+        "range": 2,
+        "min": (2000, 2000),
+        "max": (5000, 5000),
+        "acceleration": (200, 200),
+    },
+}
 
 
 def _lock_for_port(port):
@@ -72,16 +86,20 @@ class StageCommonWidget(QGroupBox):
         self.return_origin_btn.setEnabled(False)
 
         self.jog_label = QLabel("Jogging:")
-        self.jog_plus_btn = QPushButton("+")
-        self.jog_minus_btn = QPushButton("-")
-        self.jog_plus_btn.clicked.connect(lambda: self.jog("+"))
-        self.jog_minus_btn.clicked.connect(lambda: self.jog("-"))
-        self.jog_plus_btn.setEnabled(False)
-        self.jog_minus_btn.setEnabled(False)
-
         self.stop_btn = QPushButton("stop")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.stop)
+        self.jog_buttons = []
+        for label, direction, speed_key in (
+            ("<<", "-", "fast"),
+            ("<", "-", "slow"),
+            (">", "+", "slow"),
+            (">>", "+", "fast"),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(lambda _checked=False, d=direction, s=speed_key: self.jog(d, s))
+            button.setEnabled(False)
+            self.jog_buttons.append(button)
 
         self.emergency_btn = QPushButton("Immediate Stop")
         self.emergency_btn.clicked.connect(self.immediate_stop)
@@ -109,9 +127,11 @@ class StageCommonWidget(QGroupBox):
 
         jog_layout = QHBoxLayout()
         jog_layout.addWidget(self.jog_label)
-        jog_layout.addWidget(self.jog_plus_btn)
-        jog_layout.addWidget(self.jog_minus_btn)
+        jog_layout.addWidget(self.jog_buttons[0])
+        jog_layout.addWidget(self.jog_buttons[1])
         jog_layout.addWidget(self.stop_btn)
+        jog_layout.addWidget(self.jog_buttons[2])
+        jog_layout.addWidget(self.jog_buttons[3])
         layout.addLayout(jog_layout)
         
         manual_layout = QHBoxLayout()
@@ -128,8 +148,8 @@ class StageCommonWidget(QGroupBox):
 
     def _configure_target_spin(self):
         if self.unit == "deg":
-            self.target_spin.setRange(-180.0, 179.9975)
-            self.target_spin.setSingleStep(1.0)
+            self.target_spin.setRange(-180.0, 179.9)
+            self.target_spin.setSingleStep(0.1)
         else:
             self.target_spin.setRange(-1000000.0, 1000000.0)
 
@@ -146,8 +166,8 @@ class StageCommonWidget(QGroupBox):
         self.return_origin_btn.setEnabled(enabled)
         self.motor_energize_btn.setEnabled(enabled)
         self.emergency_btn.setEnabled(enabled)
-        self.jog_plus_btn.setEnabled(enabled)
-        self.jog_minus_btn.setEnabled(enabled)
+        for button in self.jog_buttons:
+            button.setEnabled(enabled)
         self.stop_btn.setEnabled(enabled)
         self.target_spin.setEnabled(enabled)
         self.move_to_btn.setEnabled(enabled)
@@ -246,18 +266,24 @@ class StageCommonWidget(QGroupBox):
         self._start_command(command, f"Moving to {target:.4f} {self.unit}...")
 
 
-    def jog(self, direction: str):
+    def jog(self, direction: str, speed_key: str = "fast"):
         if self.controller is not None:
             if self.controller.is_connected:
-                self.jog_plus_btn.setEnabled(False)
-                self.jog_minus_btn.setEnabled(False)
+                for button in self.jog_buttons:
+                    button.setEnabled(False)
 
                 def command():
-                    self.controller.set_speed(2, (2000, 2000), (5000, 5000), (200, 200))
+                    speed = _JOG_SPEEDS.get(speed_key, _JOG_SPEEDS["fast"])
+                    self.controller.set_speed(
+                        speed["range"],
+                        speed["min"],
+                        speed["max"],
+                        speed["acceleration"],
+                    )
                     self.controller.jog(direction=direction, axis=self.axis)
                     self.controller.driving()
 
-                self._start_command(command, f"Jogging {direction}...", keep_busy=True)
+                self._start_command(command, f"Jogging {direction} ({speed_key})...", keep_busy=True)
 
 
     def stop(self):
@@ -281,7 +307,7 @@ class StageCommonWidget(QGroupBox):
     def update_status(self, status_dict):
         if not status_dict:
             return
-        self.position_label.setText(f"Position: {status_dict['position']} {self.unit}")
+        self.position_label.setText(f"Position: {self._format_position(status_dict['position'])} {self.unit}")
         self.ready_label.setText(f"Ready: {status_dict['ready']}")
         self.motor_label.setText(f"Motor energized: {status_dict['motor']}")
         self.status_label.setText(f"Last command state: {status_dict['status']}")
@@ -301,6 +327,16 @@ class StageCommonWidget(QGroupBox):
     def _has_controller(self):
         return self.controller is not None and self.controller.is_connected
 
+    def _format_position(self, position):
+        if position is None:
+            return "---"
+        try:
+            value = float(position)
+        except (TypeError, ValueError):
+            return str(position)
+        if self.unit == "deg":
+            value = (value + 180.0) % 360.0 - 180.0
+        return f"{value:.4f}"
 
     def _read_status_unlocked(self):
         if self.controller.axis == 1:
