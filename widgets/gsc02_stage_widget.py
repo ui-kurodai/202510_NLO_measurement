@@ -12,19 +12,10 @@ from threading import Lock
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - in %(filename)s - %(message)s')
 
 _STAGE_PORT_LOCKS = {}
+_NORMAL_SPEED = (5000, 10000, 500)
 _JOG_SPEEDS = {
-    "slow": {
-        "range": 2,
-        "min": (200, 200),
-        "max": (500, 500),
-        "acceleration": (200, 200),
-    },
-    "fast": {
-        "range": 2,
-        "min": (2000, 2000),
-        "max": (5000, 5000),
-        "acceleration": (200, 200),
-    },
+    "slow": (200, 500, 200),
+    "fast": (5000, 10000, 500),
 }
 
 
@@ -247,7 +238,12 @@ class StageCommonWidget(QGroupBox):
     def reset(self):
         if not self._has_controller():
             return
-        self._start_command(self.controller.reset, "Moving to origin...")
+
+        def command():
+            self.controller.set_speed(self.axis, *_NORMAL_SPEED)
+            self.controller.reset()
+
+        self._start_command(command, "Moving to origin...")
 
 
     def move_to_target(self):
@@ -256,6 +252,7 @@ class StageCommonWidget(QGroupBox):
         target = self.target_spin.value()
 
         def command():
+            self.controller.set_speed(self.axis, *_NORMAL_SPEED)
             if self.axis == 1:
                 self.controller.millimeter = target
             elif hasattr(self.controller, "move_to_angle"):
@@ -274,12 +271,7 @@ class StageCommonWidget(QGroupBox):
 
                 def command():
                     speed = _JOG_SPEEDS.get(speed_key, _JOG_SPEEDS["fast"])
-                    self.controller.set_speed(
-                        speed["range"],
-                        speed["min"],
-                        speed["max"],
-                        speed["acceleration"],
-                    )
+                    self.controller.set_speed(self.axis, *speed)
                     self.controller.jog(direction=direction, axis=self.axis)
                     self.controller.driving()
 

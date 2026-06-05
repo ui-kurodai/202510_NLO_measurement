@@ -17,6 +17,11 @@ from measurement_metadata import (
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - in %(filename)s - %(message)s')
 
+STAGE_ORIGIN_SPEED = (5000, 10000, 500)
+STAGE_INITIAL_MOVE_SPEED = (5000, 10000, 500)
+STAGE_SCAN_STEP_SPEED = (2000, 5000, 200)
+
+
 class SHGMeasurementRunner:
     def __init__(self, laser, stage_lin, stage_rot, boxcar, elliptec=None):
         self.laser = laser
@@ -138,22 +143,28 @@ class SHGMeasurementRunner:
             writer.writerow(["position"] + [f"ch{ch}" for ch in channels])
 
         try:
+            self._set_stage_speed(self.stage_lin, *STAGE_ORIGIN_SPEED)
+            self._set_stage_speed(self.stage_rot, *STAGE_ORIGIN_SPEED)
             self.stage_lin.reset()
             self.stage_rot.reset()
             if method == "rotation":
                 # move to the center
                 center = 18.05
+                self._set_stage_speed(self.stage_lin, *STAGE_INITIAL_MOVE_SPEED)
                 self.stage_lin.millimeter = center
-            for pos in scan_values:
+            for index, pos in enumerate(scan_values):
                 if self._abort:
                     logging.warning("[SHG] Measurement aborted.")
                     break
                 logging.info(f"[SHG] Moving to {pos:.3f} ({method})")
 
+                speed = STAGE_INITIAL_MOVE_SPEED if index == 0 else STAGE_SCAN_STEP_SPEED
                 if method == "rotation":
+                    self._set_stage_speed(self.stage_rot, *speed)
                     self.stage_rot.move_to_angle(pos, "ccw")
 
                 elif method == "wedge":
+                    self._set_stage_speed(self.stage_lin, *speed)
                     self.stage_lin.millimeter = pos
                 else:
                     logging.error(f"Unknown method: {method}")
@@ -196,6 +207,12 @@ class SHGMeasurementRunner:
     def abort(self):
         """Stop the measurement early (from GUI or user action)."""
         self._abort = True
+
+    def _set_stage_speed(self, stage, spd_min: int, spd_max: int, acceleration_time: int):
+        if stage is None or not hasattr(stage, "set_speed"):
+            return
+        axis = getattr(stage, "axis", "w")
+        stage.set_speed(axis, spd_min, spd_max, acceleration_time)
 
     def _make_scan_points(self, start: float, end: float, step: float) -> list:
         if start > end:

@@ -192,13 +192,30 @@ class GSC02Controller(GSC02):
         except Exception:
             logging.error("Failed to set logical zero.")
 
-    def set_speed(self, spd_range: int, spd_min: Sequence[int], spd_max: Sequence[int], acceleration_time: Sequence[int]) -> bool:
+    def set_speed(self, axis: Union[int, str], spd_min: int, spd_max: int, acceleration_time: int) -> bool:
         try:
-            ret = super().set_speed(spd_range, spd_min, spd_max, acceleration_time)
+            axis_key = str(axis).upper()
+            spd_min = int(spd_min)
+            spd_max = int(spd_max)
+            acceleration_time = int(acceleration_time)
+            if axis_key not in {"1", "2", "W"}:
+                raise ValueError("Speed axis must be 1, 2, or W.")
+            if not 1 <= spd_min <= 30000:
+                raise ValueError("Minimum speed must be between 1 and 30000 pps.")
+            if not 1 <= spd_max <= 30000:
+                raise ValueError("Maximum speed must be between 1 and 30000 pps.")
+            if not 0 <= acceleration_time <= 1000:
+                raise ValueError("Acceleration time must be between 0 and 1000 ms.")
+            if spd_min > spd_max:
+                raise ValueError("Minimum speed must be less than or equal to maximum speed.")
+
+            params = f"S{spd_min}F{spd_max}R{acceleration_time}"
+            command = f"D:{axis_key}{params}{params if axis_key == 'W' else ''}"
+            ret = self.raw_command(command)
             self.sleep_until_stop()
             return ret
-        except Exception:
-            logging.error("Failed to set speed.")
+        except Exception as e:
+            logging.error(f"Failed to set speed: {e}")
 
     def energize_motor(self, energize: bool, axis: int) -> bool:
         try:

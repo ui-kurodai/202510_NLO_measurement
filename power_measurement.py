@@ -13,6 +13,10 @@ from measurement_metadata import beam_metadata_from_entry, sample_metadata_from_
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - in %(filename)s - %(message)s")
 
+STAGE_ORIGIN_SPEED = (10000, 30000, 500)
+STAGE_INITIAL_MOVE_SPEED = (10000, 30000, 500)
+STAGE_SCAN_STEP_SPEED = (2000, 5000, 200)
+
 
 class PowerMeasurementRunner:
     def __init__(self, stage_rot, powermeter, laser=None):
@@ -415,11 +419,13 @@ class PowerMeasurementRunner:
                 with self._open_csv(csv_path, dry_run=dry_run or csv_path is None) as writer:
                     if writer is not None:
                         writer.writerow(["angle_deg", "power_w", "std_w", "n"])
-                    for pos in scan_points:
+                    for point_index, pos in enumerate(scan_points):
                         if self._abort:
                             break
                         logging.info("[Power] Moving to %.4f deg for %s", pos, scan_label)
                         if not dry_run:
+                            speed = STAGE_INITIAL_MOVE_SPEED if point_index == 0 else STAGE_SCAN_STEP_SPEED
+                            self._set_stage_speed(self.stage_rot, *speed)
                             self.stage_rot.move_to_angle(pos, "ccw")
                             stats = self._average_power_after_settle_tail(
                                 total_wait_s=float(getattr(self.powermeter, "scan_average_total_s", 4.0)),
@@ -480,10 +486,17 @@ class PowerMeasurementRunner:
         if self.stage_rot is None:
             return
         logging.info("[Power] Returning rotation stage to origin before SHG scan.")
+        self._set_stage_speed(self.stage_rot, *STAGE_ORIGIN_SPEED)
         try:
             self.stage_rot.reset()
         except TypeError:
             self.stage_rot.reset("-")
+
+    def _set_stage_speed(self, stage, spd_min: int, spd_max: int, acceleration_time: int) -> None:
+        if stage is None or not hasattr(stage, "set_speed"):
+            return
+        axis = getattr(stage, "axis", "w")
+        stage.set_speed(axis, spd_min, spd_max, acceleration_time)
 
     def _average_power_after_settle_tail(self, total_wait_s: float, tail_s: float) -> dict:
         self._drain_powermeter_stream()
