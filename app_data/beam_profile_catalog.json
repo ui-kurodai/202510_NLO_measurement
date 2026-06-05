@@ -6,6 +6,12 @@
       "beam_r_x": 360.0,
       "beam_r_y": 423.0,
       "fitting_type": "Gaussian"
+    },
+    {
+      "id": "20260603_1524",
+      "beam_r_x": 103.7,
+      "beam_r_y": 86.24,
+      "fitting_type": "Gaussian"
     }
   ]
 }
