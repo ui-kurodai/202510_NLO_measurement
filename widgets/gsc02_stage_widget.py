@@ -12,10 +12,11 @@ from threading import Lock
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - in %(filename)s - %(message)s')
 
 _STAGE_PORT_LOCKS = {}
-_NORMAL_SPEED = (5000, 10000, 500)
+_NORMAL_SPEED = (5000, 30000, 500)
+# jogging only adop the starting speed (the first one)
 _JOG_SPEEDS = {
     "slow": (200, 500, 200),
-    "fast": (5000, 10000, 500),
+    "fast": (6000, 15000, 800)
 }
 
 

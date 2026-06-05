@@ -17,9 +17,9 @@ from measurement_metadata import (
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - in %(filename)s - %(message)s')
 
-STAGE_ORIGIN_SPEED = (5000, 10000, 500)
-STAGE_INITIAL_MOVE_SPEED = (5000, 10000, 500)
-STAGE_SCAN_STEP_SPEED = (2000, 5000, 200)
+STAGE_ORIGIN_SPEED = (5000, 30000, 500)
+STAGE_INITIAL_MOVE_SPEED = (5000, 30000, 500)
+STAGE_SCAN_STEP_SPEED = (5000, 10000, 500)
 
 
 class SHGMeasurementRunner:
