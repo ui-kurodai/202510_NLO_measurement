@@ -361,7 +361,7 @@ class PowerMeasurementWidget(QGroupBox):
         if measurement_task == "shg" and stage_rot is None:
             QMessageBox.warning(self, "Not Ready", "Rotation stage is not connected.")
             return
-        if not dry_run and powermeter is None:
+        if not dry_run and (powermeter is None or not getattr(powermeter, "is_connected", True)):
             QMessageBox.warning(self, "Not Ready", f"{self._selected_powermeter_label()} is not connected.")
             return
         if not dry_run and laser is None:
@@ -443,7 +443,7 @@ class PowerMeasurementWidget(QGroupBox):
             if show_errors:
                 QMessageBox.warning(self, "Not Ready", f"{self._selected_powermeter_label()} widget is not available.")
             return
-        if powermeter is None:
+        if powermeter is None or not getattr(powermeter, "is_connected", True):
             if show_errors:
                 QMessageBox.warning(self, "Not Ready", f"{self._selected_powermeter_label()} is not connected.")
             return
@@ -537,6 +537,12 @@ class PowerMeasurementWidget(QGroupBox):
     def abort_measurement(self):
         if self.runner is not None and self.runner.is_running:
             self.runner.abort()
+        powermeter = None if self.dry_run_checkbox.isChecked() else self._selected_powermeter_controller()
+        if powermeter is not None and hasattr(powermeter, "interrupt_pending_read"):
+            try:
+                powermeter.interrupt_pending_read()
+            except Exception:
+                pass
         self.abort_btn.setEnabled(False)
 
     def finish_measurement(self, result_dict):
@@ -567,6 +573,9 @@ class PowerMeasurementWidget(QGroupBox):
         self._set_run_buttons_enabled(True)
         self.abort_btn.setEnabled(False)
         self._restart_device_polling_after_measurement()
+        if self.runner is not None and getattr(self.runner, "_abort", False):
+            QMessageBox.information(self, "Aborted", "Power measurement aborted.")
+            return
         QMessageBox.critical(self, "Measurement Error", message)
 
     def _prompt_save_or_retake_if_ready(self):

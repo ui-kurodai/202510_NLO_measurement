@@ -37,6 +37,7 @@ class ThorlabsS120CPowerMeterController:
     zero_check_duration_s = 2.0
     scan_average_total_s = 1.0
     scan_average_tail_s = 1.0
+    stream_is_buffered = False
 
     def __init__(self, library_path: str | None = None, sample_interval_s: float = 0.05):
         self.library_path = library_path
@@ -66,13 +67,16 @@ class ThorlabsS120CPowerMeterController:
         self._meter.connect(resource_name=resource_name)
         self.set_power_mode()
         self.set_average_time(0.001)
-        self.set_timeout_ms(1000)
+        self.set_timeout_ms(500)
         self.set_range_auto()
 
     def disconnect(self) -> None:
         self._meter.disconnect()
 
     def shutdown(self) -> None:
+        self.disconnect()
+
+    def interrupt_pending_read(self) -> None:
         self.disconnect()
 
     def _require_connected(self) -> None:

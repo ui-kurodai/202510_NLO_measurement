@@ -288,6 +288,8 @@ class ThorlabsS120CPowerMeterWidget(QGroupBox):
     def start_polling(self):
         if self.controller is None or self.polling_thread is not None:
             return
+        if not getattr(self.controller, "is_connected", False):
+            return
         self.polling_thread = ThorlabsPollingThread(self.controller, interval_s=self.poll_interval_spin.value())
         self.polling_thread.readings_updated.connect(self.update_readings)
         self.polling_thread.start()

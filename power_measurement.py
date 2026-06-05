@@ -504,6 +504,8 @@ class PowerMeasurementRunner:
         tail_start = deadline - max(0.0, tail_s)
         values = []
         while time.monotonic() < deadline:
+            if self._abort:
+                break
             readings = self.powermeter.read_available_data()
             if time.monotonic() >= tail_start:
                 values.extend(
@@ -519,8 +521,10 @@ class PowerMeasurementRunner:
         return {"mean_w": mean, "min_w": min(values), "max_w": max(values), "std_w": variance ** 0.5, "n": len(values)}
 
     def _drain_powermeter_stream(self) -> None:
+        if not bool(getattr(self.powermeter, "stream_is_buffered", True)):
+            return
         try:
-            while self.powermeter.read_available_data():
+            while not self._abort and self.powermeter.read_available_data():
                 pass
         except RuntimeError:
             pass
