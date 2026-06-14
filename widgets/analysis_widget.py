@@ -1673,8 +1673,12 @@ class FittingAnalysisWidget(QWidget):
             ("d_rel_abs", "|d| relative"),
             ("d_component", "d component"),
             ("d_factor", "d factor"),
-            ("Lc_mean_mm", "Lc mean [mm]"),
-            ("Lc_std_mm", "Lc std [mm]"),
+            ("Lc_mean_mm", "Lc(0) [mm]"),
+            ("Lc_std_mm", "Lc(0) std [mm]"),
+            ("Lc_pair_mean_mm", "Lc pair mean [mm]"),
+            ("Lc_pair_std_mm", "Lc pair std [mm]"),
+            ("lc_extrapolation_order", "Lc extrapolation order"),
+            ("lc_order_residual_rms", "Lc fit residual RMS [mm]"),
             ("residual_rms", "Residual RMS"),
             ("minima_count", "Minima count"),
             ("n_count", "Lc pair count"),
@@ -3114,23 +3118,47 @@ class FittingAnalysisWidget(QWidget):
         minima_neg = np.sort(minima_x[minima_x < 0.0])
         dL_pos = np.asarray(aux.get("dL_pos", []), dtype=float)
         dL_neg = np.asarray(aux.get("dL_neg", []), dtype=float)
+        pair_center_deg = np.asarray(aux.get("pair_center_deg", []), dtype=float)
+        pair_lc_mm = np.asarray(aux.get("pair_lc_mm", []), dtype=float)
 
         for i in range(min(len(dL_pos), max(len(minima_pos) - 1, 0))):
             ax.plot([minima_pos[i], minima_pos[i + 1]], [1000.0 * dL_pos[i], 1000.0 * dL_pos[i]], color="C0")
         for i in range(min(len(dL_neg), max(len(minima_neg) - 1, 0))):
             ax.plot([minima_neg[i], minima_neg[i + 1]], [1000.0 * dL_neg[i], 1000.0 * dL_neg[i]], color="C1")
+        finite_pairs = np.isfinite(pair_center_deg) & np.isfinite(pair_lc_mm)
+        if np.any(finite_pairs):
+            ax.scatter(
+                pair_center_deg[finite_pairs],
+                1000.0 * pair_lc_mm[finite_pairs],
+                color="0.2",
+                marker="o",
+                s=18,
+                zorder=3,
+            )
 
         mean_lc = self._safe_float(result.get("Lc_mean_mm"))
         std_lc = self._safe_float(result.get("Lc_std_mm"))
+        pair_mean_lc = self._safe_float(result.get("Lc_pair_mean_mm"))
+        fit_theta_deg = np.asarray(aux.get("fit_theta_deg", []), dtype=float)
+        fit_lc_mm = np.asarray(aux.get("fit_lc_mm", []), dtype=float)
+        finite_fit = np.isfinite(fit_theta_deg) & np.isfinite(fit_lc_mm)
+        if np.any(finite_fit):
+            theta_fit = fit_theta_deg[finite_fit]
+            lc_fit_um = 1000.0 * fit_lc_mm[finite_fit]
+            ax.plot(theta_fit, lc_fit_um, color="C3", linewidth=1.6)
+            ax.plot(-theta_fit, lc_fit_um, color="C3", linewidth=1.6)
         if np.isfinite(mean_lc):
+            ax.scatter([0.0], [mean_lc * 1000.0], color="C3", marker="o", zorder=4)
             ax.axhline(mean_lc * 1000.0, color="0.3", linestyle="--", linewidth=1.0)
-        ax.set_title(f"Lc from adjacent minima pairs ({source})")
+        ax.set_title(f"Empirical Lc(0) extrapolation from minima pairs ({source})")
         if np.isfinite(mean_lc) and np.isfinite(std_lc):
-            text = f"mean = {mean_lc * 1000.0:.3f} um\nstd = {std_lc * 1000.0:.3f} um"
+            text = f"Lc(0) = {mean_lc * 1000.0:.3f} +/- {std_lc * 1000.0:.3f} um"
         elif np.isfinite(mean_lc):
-            text = f"mean = {mean_lc * 1000.0:.3f} um"
+            text = f"Lc(0) = {mean_lc * 1000.0:.3f} um"
         else:
             text = "Lc summary unavailable"
+        if np.isfinite(pair_mean_lc):
+            text += f"\npair mean = {pair_mean_lc * 1000.0:.3f} um"
         ax.text(
             0.02,
             0.98,
@@ -3222,7 +3250,16 @@ class FittingAnalysisWidget(QWidget):
             and not self._strategy_uses_d_rel_abs(live.get("strategy"))
         ):
             result = lc_info["result"]
-            for key in ("Lc_mean_mm", "Lc_std_mm", "minima_count", "n_count"):
+            for key in (
+                "Lc_mean_mm",
+                "Lc_std_mm",
+                "Lc_pair_mean_mm",
+                "Lc_pair_std_mm",
+                "lc_extrapolation_order",
+                "lc_order_residual_rms",
+                "minima_count",
+                "n_count",
+            ):
                 if key in result:
                     fit_result[key] = result[key]
 

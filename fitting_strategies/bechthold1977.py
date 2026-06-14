@@ -15,6 +15,101 @@ from fitting_results import upsert_fitting_result
 from crystaldatabase import CRYSTALS
 from crystaldatabase import *
 
+
+def _fit_lc_zero_from_minima_pairs(theta_pairs_deg, lc_pairs_mm):
+    """
+    Empirically extrapolate pair-derived Lc estimates to zero angle.
+
+    Each adjacent-minimum pair is represented at
+        s_pair = (sin(theta_1)^2 + sin(theta_2)^2) / 2,
+    and the calculated pair value is fitted with
+        Lc_pair(s) = c0 + c1*s + c2*s^2.
+    The intercept c0 is reported as the experimental estimate of Lc(0).
+    """
+    theta_pairs_deg = np.asarray(theta_pairs_deg, dtype=float)
+    lc_pairs_mm = np.asarray(lc_pairs_mm, dtype=float).reshape(-1)
+    if theta_pairs_deg.size == 0 or lc_pairs_mm.size == 0:
+        raise ValueError("No adjacent-minimum pairs available for Lc(0) extrapolation.")
+    theta_pairs_deg = theta_pairs_deg.reshape((-1, 2))
+    if theta_pairs_deg.shape[0] != lc_pairs_mm.size:
+        raise ValueError("Angle-pair and Lc-pair counts do not match.")
+
+    s_pair = np.sin(np.deg2rad(theta_pairs_deg)) ** 2
+    pair_center_s = np.mean(s_pair, axis=1)
+    valid = (
+        np.isfinite(pair_center_s)
+        & np.isfinite(lc_pairs_mm)
+        & (lc_pairs_mm > 0.0)
+    )
+    if np.count_nonzero(valid) < 2:
+        raise ValueError("At least two valid adjacent-minimum pairs are required.")
+
+    theta_pairs_deg = theta_pairs_deg[valid]
+    lc_pairs_mm = lc_pairs_mm[valid]
+    pair_center_s = pair_center_s[valid]
+
+    order = 2 if lc_pairs_mm.size >= 3 else 1
+    design = np.column_stack(
+        [pair_center_s**power for power in range(order + 1)]
+    )
+    coefficients, _, rank, _ = np.linalg.lstsq(
+        design,
+        lc_pairs_mm,
+        rcond=None,
+    )
+    if (
+        rank < order + 1
+        or not np.isfinite(coefficients[0])
+        or coefficients[0] <= 0.0
+    ):
+        raise ValueError("Lc(0) extrapolation is ill-conditioned.")
+
+    fitted_pairs_mm = design @ coefficients
+    residual_mm = fitted_pairs_mm - lc_pairs_mm
+    dof = lc_pairs_mm.size - (order + 1)
+    covariance = np.full((order + 1, order + 1), np.nan, dtype=float)
+    if dof > 0:
+        residual_variance = float(np.dot(residual_mm, residual_mm) / dof)
+        covariance = residual_variance * np.linalg.pinv(design.T @ design)
+
+    lc_zero_mm = float(coefficients[0])
+    if np.isfinite(covariance[0, 0]) and covariance[0, 0] >= 0.0:
+        lc_zero_std_mm = float(np.sqrt(covariance[0, 0]))
+    else:
+        lc_zero_std_mm = float("nan")
+
+    pair_sign = np.sign(np.mean(theta_pairs_deg, axis=1))
+    pair_center_deg = pair_sign * np.rad2deg(
+        np.arcsin(np.sqrt(np.clip(pair_center_s, 0.0, 1.0)))
+    )
+
+    fit_s = np.linspace(0.0, float(np.max(pair_center_s)), 300)
+    fit_lc_mm = np.zeros_like(fit_s)
+    for power, coefficient in enumerate(coefficients):
+        fit_lc_mm += coefficient * fit_s**power
+    fit_theta_deg = np.rad2deg(np.arcsin(np.sqrt(np.clip(fit_s, 0.0, 1.0))))
+
+    return {
+        "Lc_zero_mm": lc_zero_mm,
+        "Lc_zero_std_mm": lc_zero_std_mm,
+        "Lc_pair_mean_mm": float(np.mean(lc_pairs_mm)),
+        "Lc_pair_std_mm": (
+            float(np.std(lc_pairs_mm, ddof=1))
+            if lc_pairs_mm.size >= 2
+            else float("nan")
+        ),
+        "lc_extrapolation_order": int(order),
+        "lc_extrapolation_coefficients": np.asarray(coefficients, dtype=float),
+        "lc_order_residual_rms": float(np.sqrt(np.mean(residual_mm**2))),
+        "pair_theta_bounds_deg": theta_pairs_deg,
+        "pair_center_s": pair_center_s,
+        "pair_center_deg": pair_center_deg,
+        "pair_lc_mm": lc_pairs_mm,
+        "fit_theta_deg": fit_theta_deg,
+        "fit_lc_mm": fit_lc_mm,
+    }
+
+
 class Bechthold1977Strategy(Jerphagnon1970Strategy):
     """
     Maker fringe theory for biaxial crystals 
@@ -240,20 +335,42 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
         if diffs.size == 0:
             Lc_mean = float("nan")
             Lc_std = float("nan")
+            extrapolation = {}
+        elif diffs.size == 1:
+            Lc_mean = float(diffs[0])
+            Lc_std = float("nan")
+            extrapolation = {
+                "Lc_pair_mean_mm": Lc_mean,
+                "Lc_pair_std_mm": float("nan"),
+                "lc_extrapolation_order": 0,
+                "lc_order_residual_rms": float("nan"),
+            }
         else:
-            Lc_mean = float(np.mean(diffs))
-            Lc_std = float(np.std(diffs, ddof=1)) if diffs.size >= 2 else float("nan")
+            theta_pair_parts = []
+            if dL_pos.size:
+                theta_pair_parts.append(np.column_stack((th_pos[:-1], th_pos[1:])))
+            if dL_neg.size:
+                theta_pair_parts.append(np.column_stack((th_neg[:-1], th_neg[1:])))
+            theta_pairs = np.vstack(theta_pair_parts)
+            extrapolation = _fit_lc_zero_from_minima_pairs(theta_pairs, diffs)
+            Lc_mean = float(extrapolation["Lc_zero_mm"])
+            Lc_std = float(extrapolation["Lc_zero_std_mm"])
 
         fit_data = {
             "minima_idx" : valid_minima_idx,
             "x_in_range" : m,
             "dL_pos" : dL_pos,
             "dL_neg" : dL_neg,
-            "parts": parts
+            "parts": parts,
+            **extrapolation,
         }
         result =  {
             "Lc_mean_mm": Lc_mean,
             "Lc_std_mm": Lc_std,
+            "Lc_pair_mean_mm": extrapolation.get("Lc_pair_mean_mm", float("nan")),
+            "Lc_pair_std_mm": extrapolation.get("Lc_pair_std_mm", float("nan")),
+            "lc_extrapolation_order": extrapolation.get("lc_extrapolation_order", 0),
+            "lc_order_residual_rms": extrapolation.get("lc_order_residual_rms", float("nan")),
             "minima_count": int(th_min.size),
             "n_count": int(diffs.size)
             # "theta_used_deg": mask
