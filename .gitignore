@@ -13,3 +13,6 @@ __pycache__/
 
 # codex files
 .codex_tmp_test/
+
+# quick analysis
+quick_analysis/*
