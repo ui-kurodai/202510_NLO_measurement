@@ -24,6 +24,7 @@ import sys
 import math
 import ast
 import importlib
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
@@ -31,15 +32,16 @@ from typing import Any, Dict, Optional, Tuple, List
 import numpy as np
 import pandas as pd
 
-from PyQt6.QtCore import Qt, QLocale, pyqtSignal
+from PyQt6.QtCore import Qt, QLocale, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QGuiApplication
 from PyQt6.QtWidgets import (
+    QApplication,
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QPushButton, QLabel, QLineEdit, QComboBox,
     QFileDialog, QGroupBox, QMessageBox,
     QTableWidget, QTableWidgetItem,
     QDoubleSpinBox, QSlider, QDialog, QDialogButtonBox, QCheckBox,
-    QListWidgetItem, QMenu, QStackedWidget,
+    QListWidget, QListWidgetItem, QMenu, QProgressBar, QStackedWidget,
 )
 
 import logging
@@ -104,6 +106,32 @@ class PlotSettings:
     y_min: Optional[float] = None
     y_max: Optional[float] = None
 
+
+class FitWorker(QThread):
+    succeeded = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, folder: str, strategy_module: str, strategy_class: str):
+        super().__init__()
+        self.folder = folder
+        self.strategy_module = strategy_module
+        self.strategy_class = strategy_class
+
+    def run(self) -> None:
+        try:
+            if SHGDataAnalysis is None:
+                raise RuntimeError("shg_analysis is not importable.")
+            module = importlib.import_module(self.strategy_module)
+            strategy_cls = getattr(module, self.strategy_class)
+            analysis = SHGDataAnalysis(self.folder)
+            results = analysis.run(strategy_cls)
+            if results is None:
+                raise RuntimeError(str(getattr(analysis, "last_error", "Unknown fitting error.")))
+            self.succeeded.emit(results)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 # ------------------------------- Main Tab -------------------------------
 class FittingAnalysisWidget(QWidget):
     folderLoaded = pyqtSignal(str)   # emits folder path when a folder has been loaded
@@ -123,6 +151,12 @@ class FittingAnalysisWidget(QWidget):
         self._transient_strategy_names: List[str] = []
         self._analysis_context: Dict[str, Any] = {}
         self._live_curve_cache: Dict[str, Any] = {}
+        self._nfit_manual_overrides: Dict[str, Dict[str, float]] = {}
+        self._nfit_card_views: Dict[str, Dict[str, Any]] = {}
+        self._nfit_manual_result_id: Optional[str] = None
+        self._fit_worker: Optional[FitWorker] = None
+        self._fit_requested_strategy_name: Optional[str] = None
+        self._busy = False
         self._use_saved_fit_preview = False
         self._manual_controls: Dict[str, Dict[str, QDoubleSpinBox | QSlider]] = {}
         self._manual_syncing = False
@@ -160,12 +194,23 @@ class FittingAnalysisWidget(QWidget):
         nav_bar.addWidget(self.btn_nav_standard)
         nav_bar.addWidget(self.btn_nav_nfit)
         nav_bar.addStretch(1)
+        self.lbl_busy = QLabel()
+        self.lbl_busy.setStyleSheet("color: #555; font-weight: 600;")
+        self.lbl_busy.setVisible(False)
+        self.busy_progress = QProgressBar()
+        self.busy_progress.setRange(0, 0)
+        self.busy_progress.setTextVisible(False)
+        self.busy_progress.setFixedWidth(90)
+        self.busy_progress.setVisible(False)
+        nav_bar.addWidget(self.lbl_busy)
+        nav_bar.addWidget(self.busy_progress)
         nav_bar.addWidget(self.btn_update_json)
         nav_bar.addWidget(self.btn_fit)
         nav_bar.addWidget(self.btn_save)
         main.addLayout(nav_bar)
 
-        main.addWidget(self._build_strategy_group())
+        self.strategy_group = self._build_strategy_group()
+        main.addWidget(self.strategy_group)
 
         self.page_stack = QStackedWidget()
         self.home_page = self._build_home_page()
@@ -237,7 +282,7 @@ class FittingAnalysisWidget(QWidget):
 
         for attr in [
             "lbl_nfit_intro",
-            "txt_nfit_group_paths",
+            "lst_nfit_group_paths",
             "btn_nfit_select_folders",
             "btn_nfit_refresh",
             "lbl_nfit_hint",
@@ -548,13 +593,8 @@ class FittingAnalysisWidget(QWidget):
         )
         self.lbl_nfit_intro.setWordWrap(True)
         self.lbl_nfit_intro.setStyleSheet("color: gray;")
-        self.txt_nfit_group_paths = QPlainTextEdit()
-        self.txt_nfit_group_paths.setPlaceholderText(
-            "One folder path per line.\n"
-            "Relative paths are resolved from the current folder and its parent."
-        )
-        self.txt_nfit_group_paths.setTabChangesFocus(True)
-        self.txt_nfit_group_paths.setFixedHeight(96)
+        self.lst_nfit_group_paths = QListWidget()
+        self.lst_nfit_group_paths.setMinimumHeight(120)
 
         nfit_btn_row = QHBoxLayout()
         self.btn_nfit_select_folders = QPushButton("Select Folders…")
@@ -570,7 +610,7 @@ class FittingAnalysisWidget(QWidget):
         self.lbl_nfit_hint.setStyleSheet("color: gray;")
 
         config_layout.addWidget(self.lbl_nfit_intro)
-        config_layout.addWidget(self.txt_nfit_group_paths)
+        config_layout.addWidget(self.lst_nfit_group_paths)
         config_layout.addLayout(nfit_btn_row)
         config_layout.addWidget(self.lbl_nfit_hint)
         layout.addWidget(config_group)
@@ -705,6 +745,7 @@ class FittingAnalysisWidget(QWidget):
     def _set_analysis_page(self, page_key: str) -> None:
         if page_key not in self._page_indexes:
             return
+        page_changed = page_key != self._current_page_key
         self._current_page_key = page_key
         self.page_stack.setCurrentIndex(self._page_indexes[page_key])
         for key, button in self._page_buttons.items():
@@ -712,11 +753,46 @@ class FittingAnalysisWidget(QWidget):
             button.setChecked(key == page_key)
             button.blockSignals(False)
         self._sync_page_chrome()
+        if page_changed:
+            self._populate_strategy_list()
         if page_key != "home" and self._analysis_context:
             self._render_analysis_plots()
 
     def _sync_page_chrome(self) -> None:
         self.results_group.setVisible(self._current_page_key != "home")
+        self.strategy_group.setVisible(self._current_page_key != "home")
+
+    def _set_busy(self, busy: bool, message: str = "") -> None:
+        self._busy = bool(busy)
+        self.lbl_busy.setText(message)
+        self.lbl_busy.setVisible(busy)
+        self.busy_progress.setVisible(busy)
+        for widget in (
+            self.btn_nav_home,
+            self.btn_nav_standard,
+            self.btn_nav_nfit,
+            self.btn_update_json,
+            self.btn_fit,
+            self.btn_save,
+            self.strategy_group,
+            self.page_stack,
+        ):
+            widget.setEnabled(not busy)
+        if not busy:
+            has_data = self._current_dir is not None
+            self.btn_fit.setEnabled(has_data)
+            self.btn_save.setEnabled(has_data)
+            self.btn_update_json.setEnabled(has_data)
+        QApplication.processEvents()
+
+    def _nfit_refresh_clicked(self) -> None:
+        if self._busy:
+            return
+        self._set_busy(True, "Loading folders and updating preview...")
+        try:
+            self._refresh_analysis_views(reset_manual=False)
+        finally:
+            self._set_busy(False)
 
     def _update_folder_status_labels(self) -> None:
         folder_text = str(self._current_dir) if self._current_dir else "No folder loaded."
@@ -756,7 +832,8 @@ class FittingAnalysisWidget(QWidget):
         self.chk_fit_show_envelope.stateChanged.connect(lambda *_args: self._render_analysis_plots())
         self.sb_manual_centering.valueChanged.connect(lambda *_args: self._manual_centering_changed())
         self.btn_nfit_select_folders.clicked.connect(self._nfit_select_folders_clicked)
-        self.btn_nfit_refresh.clicked.connect(lambda: self._refresh_analysis_views(reset_manual=False))
+        self.btn_nfit_refresh.clicked.connect(self._nfit_refresh_clicked)
+        self.lst_nfit_group_paths.itemChanged.connect(self._nfit_folder_check_changed)
 
         for key in self._manual_controls:
             controls = self._manual_controls[key]
@@ -798,7 +875,11 @@ class FittingAnalysisWidget(QWidget):
                     module_ast = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
                     qual = f"fitting_strategies.{name}"
                     for node in module_ast.body:
-                        if isinstance(node, ast.ClassDef) and node.name.endswith("Strategy"):
+                        if (
+                            isinstance(node, ast.ClassDef)
+                            and node.name.endswith("Strategy")
+                            and self._strategy_allowed_on_current_page(node.name)
+                        ):
                             strategy = StrategyInfo(name, qual, node.name)
                             self._strategies.append(strategy)
                 except Exception as e:
@@ -823,6 +904,12 @@ class FittingAnalysisWidget(QWidget):
 
         self._refresh_saved_strategy_list(self._meta, preferred_strategy_name=current_selected_name)
         self._refresh_analysis_views(reset_manual=True)
+
+    def _strategy_allowed_on_current_page(self, class_name: str) -> bool:
+        is_global_nfit = class_name.endswith("GlobalNFitStrategy")
+        if self._current_page_key == "nfit":
+            return is_global_nfit
+        return not is_global_nfit
 
     def _find_strategy_info(self, strategy_name: str | None) -> Optional[StrategyInfo]:
         normalized = str(strategy_name or "").strip()
@@ -872,6 +959,12 @@ class FittingAnalysisWidget(QWidget):
             return self._picker_strategy_name()
         return None
 
+    def _selected_result_id(self) -> Optional[str]:
+        item = self._current_strategy_item()
+        if item is None:
+            return None
+        return str(item.data(Qt.ItemDataRole.UserRole + 2) or "").strip() or None
+
     def _is_strategy_saved(self, strategy_name: str) -> bool:
         normalized = str(strategy_name or "").strip()
         if not normalized:
@@ -883,11 +976,14 @@ class FittingAnalysisWidget(QWidget):
 
     def _csv_fit_matches_selected_strategy(self) -> bool:
         selected = str(self._selected_strategy_name() or "").strip()
+        selected_result_id = str(self._selected_result_id() or "").strip()
         active = str((self._meta or {}).get("fitting_active_strategy") or "").strip()
+        active_result_id = str((self._meta or {}).get("fitting_active_result_id") or "").strip()
         return bool(
             selected
             and active
             and selected == active
+            and (not selected_result_id or selected_result_id == active_result_id)
             and isinstance(self._df, pd.DataFrame)
             and "fit" in self._df.columns
             and self._is_strategy_saved(selected)
@@ -920,14 +1016,16 @@ class FittingAnalysisWidget(QWidget):
         *,
         preferred_strategy_name: Optional[str] = None,
     ) -> None:
-        saved_entries = normalize_fitting_entries(meta)
-        saved_map: Dict[str, Dict[str, Any]] = {}
+        saved_entries = [
+            entry
+            for entry in normalize_fitting_entries(meta)
+            if self._strategy_allowed_on_current_page(str(entry.get("strategy") or ""))
+        ]
         saved_names: List[str] = []
         for entry in saved_entries:
             strategy_name = str(entry.get("strategy") or "").strip()
-            if not strategy_name or strategy_name in saved_map:
+            if not strategy_name:
                 continue
-            saved_map[strategy_name] = dict(entry)
             saved_names.append(strategy_name)
 
         self._transient_strategy_names = [
@@ -936,10 +1034,11 @@ class FittingAnalysisWidget(QWidget):
         ]
         visible_transient_names = [
             name for name in self._transient_strategy_names
-            if name not in saved_names
+            if name not in saved_names and self._strategy_allowed_on_current_page(name)
         ]
 
         target_name = str(preferred_strategy_name or "").strip()
+        target_result_id = str((meta or {}).get("fitting_active_result_id") or "").strip()
         if not target_name:
             target_name = str((meta or {}).get("fitting_active_strategy") or "").strip()
         if not target_name and saved_names:
@@ -950,20 +1049,26 @@ class FittingAnalysisWidget(QWidget):
         self.lst_saved_strategies.blockSignals(True)
         self.lst_saved_strategies.clear()
 
-        for strategy_name in saved_names:
-            entry = saved_map[strategy_name]
+        for entry in saved_entries:
+            strategy_name = str(entry.get("strategy") or "").strip()
+            result_id = str(entry.get("result_id") or "").strip()
+            result_label = str(entry.get("result_label") or "").strip()
+            display_name = self._display_name_for_strategy(strategy_name, saved_entry=entry, saved=True)
+            if result_label:
+                display_name = f"{display_name} | {result_label}"
             item = QListWidgetItem(
-                self._display_name_for_strategy(strategy_name, saved_entry=entry, saved=True)
+                display_name
             )
             item.setData(Qt.ItemDataRole.UserRole, strategy_name)
             item.setData(Qt.ItemDataRole.UserRole + 1, True)
+            item.setData(Qt.ItemDataRole.UserRole + 2, result_id)
             tooltip_lines = [f"strategy: {strategy_name}"]
             strategy_module = str(entry.get("strategy_module") or "").strip()
             if strategy_module:
                 tooltip_lines.append(f"module: {strategy_module}")
             item.setToolTip("\n".join(tooltip_lines))
             self.lst_saved_strategies.addItem(item)
-            if strategy_name == target_name:
+            if strategy_name == target_name and (not target_result_id or result_id == target_result_id):
                 item.setSelected(True)
                 self.lst_saved_strategies.setCurrentItem(item)
 
@@ -971,6 +1076,7 @@ class FittingAnalysisWidget(QWidget):
             item = QListWidgetItem(self._display_name_for_strategy(strategy_name, saved=False))
             item.setData(Qt.ItemDataRole.UserRole, strategy_name)
             item.setData(Qt.ItemDataRole.UserRole + 1, False)
+            item.setData(Qt.ItemDataRole.UserRole + 2, "")
             item.setForeground(QColor("gray"))
             item.setToolTip(f"strategy: {strategy_name}\nNot saved to JSON yet.")
             self.lst_saved_strategies.addItem(item)
@@ -985,7 +1091,7 @@ class FittingAnalysisWidget(QWidget):
 
         self.lst_saved_strategies.blockSignals(False)
 
-        saved_count = len(saved_names)
+        saved_count = len(saved_entries)
         available_count = len(self._strategies)
         if available_count == 0:
             self.lbl_strategy_hint.setText("No strategy classes found.")
@@ -1040,6 +1146,7 @@ class FittingAnalysisWidget(QWidget):
             return
 
         saved_names: List[str] = []
+        saved_result_ids: List[str] = []
         transient_names: List[str] = []
         display_lines: List[str] = []
         for item in selected_items:
@@ -1050,6 +1157,9 @@ class FittingAnalysisWidget(QWidget):
             display_lines.append(f" - {item.text()}")
             if is_saved:
                 saved_names.append(strategy_name)
+                result_id = str(item.data(Qt.ItemDataRole.UserRole + 2) or "").strip()
+                if result_id:
+                    saved_result_ids.append(result_id)
             else:
                 transient_names.append(strategy_name)
 
@@ -1084,7 +1194,7 @@ class FittingAnalysisWidget(QWidget):
                 QMessageBox.critical(self, "Read failed", str(e))
                 return
 
-            meta = remove_fitting_results(meta, saved_names)
+            meta = remove_fitting_results(meta, saved_names, saved_result_ids or None)
 
             try:
                 with open(self.json_path, "w", encoding="utf-8") as f:
@@ -1107,12 +1217,35 @@ class FittingAnalysisWidget(QWidget):
 
     def _strategy_selection_changed(self, *_args):
         self._use_saved_fit_preview = False
+        self._nfit_manual_overrides.clear()
+        self._nfit_card_views.clear()
+        self._nfit_manual_result_id = None
         selected_name = self._selected_strategy_name(allow_picker_fallback=False)
         if selected_name:
             self._set_picker_strategy(selected_name)
+        selected_result_id = self._selected_result_id()
+        if selected_result_id:
+            global_result = self._global_result_by_id(selected_result_id)
+            if global_result:
+                self._set_nfit_group_paths(
+                    [str(path) for path in global_result.get("group_source_dirs", [])],
+                    [str(path) for path in global_result.get("excluded_source_dirs", [])],
+                )
         if self._meta:
             self._populate_table_from_json(self._meta)
         self._refresh_analysis_views(reset_manual=True)
+
+    def _global_result_by_id(self, result_id: str | None) -> Dict[str, Any]:
+        normalized = str(result_id or "").strip()
+        if not normalized:
+            return {}
+        for entry in self._meta.get("n_fit_global_results", []) or []:
+            if (
+                isinstance(entry, dict)
+                and str(entry.get("result_id") or "").strip() == normalized
+            ):
+                return dict(entry)
+        return {}
 
     def _fit_payload_for_strategy(
         self,
@@ -1120,7 +1253,11 @@ class FittingAnalysisWidget(QWidget):
         strategy: Optional[StrategyInfo] = None,
     ) -> Dict[str, Any]:
         strategy_name = strategy.class_name if strategy is not None else self._selected_strategy_name()
-        return extract_fit_payload(meta if meta is not None else self._meta, strategy_name)
+        return extract_fit_payload(
+            meta if meta is not None else self._meta,
+            strategy_name,
+            self._selected_result_id(),
+        )
 
     def _meta_with_selected_fit(
         self,
@@ -1128,7 +1265,11 @@ class FittingAnalysisWidget(QWidget):
         strategy: Optional[StrategyInfo] = None,
     ) -> Dict[str, Any]:
         strategy_name = strategy.class_name if strategy is not None else self._selected_strategy_name()
-        return merge_fit_payload(meta if meta is not None else self._meta, strategy_name)
+        return merge_fit_payload(
+            meta if meta is not None else self._meta,
+            strategy_name,
+            self._selected_result_id(),
+        )
 
     def _apply_saved_strategy_selection(self, meta: Dict[str, Any]):
         target_name = str(meta.get("fitting_active_strategy") or "").strip()
@@ -1299,19 +1440,54 @@ class FittingAnalysisWidget(QWidget):
             self.sb_beam_ry.setValue(float(entry["beam_r_y"]))
 
     def _parse_nfit_group_paths(self) -> List[str]:
-        lines = []
-        for raw_line in self.txt_nfit_group_paths.toPlainText().splitlines():
-            line = raw_line.strip()
-            if line:
-                lines.append(line)
-        return lines
+        return [
+            str(self.lst_nfit_group_paths.item(index).data(Qt.ItemDataRole.UserRole) or "").strip()
+            for index in range(self.lst_nfit_group_paths.count())
+            if str(self.lst_nfit_group_paths.item(index).data(Qt.ItemDataRole.UserRole) or "").strip()
+        ]
 
-    def _set_nfit_group_paths(self, paths: List[str]) -> None:
-        self.txt_nfit_group_paths.blockSignals(True)
+    def _parse_nfit_excluded_paths(self) -> List[str]:
+        return [
+            str(self.lst_nfit_group_paths.item(index).data(Qt.ItemDataRole.UserRole) or "").strip()
+            for index in range(self.lst_nfit_group_paths.count())
+            if self.lst_nfit_group_paths.item(index).checkState() != Qt.CheckState.Checked
+        ]
+
+    def _nfit_folder_check_changed(self, *_args) -> None:
+        total_count = self.lst_nfit_group_paths.count()
+        excluded_count = len(self._parse_nfit_excluded_paths())
+        included_count = total_count - excluded_count
+        self.lbl_nfit_hint.setText(
+            f"Selected folders: {total_count} | Included in fit: {included_count} | "
+            f"Result-only: {excluded_count}\n"
+            "Preview is unchanged. Use Refresh Preview to reload the grouped data."
+        )
+
+    def _set_nfit_group_paths(
+        self,
+        paths: List[str],
+        excluded_paths: Optional[List[str]] = None,
+    ) -> None:
+        excluded = {str(Path(path).resolve()) for path in (excluded_paths or []) if str(path).strip()}
+        self.lst_nfit_group_paths.blockSignals(True)
         try:
-            self.txt_nfit_group_paths.setPlainText("\n".join(str(path) for path in paths if str(path).strip()))
+            self.lst_nfit_group_paths.clear()
+            for raw_path in paths:
+                if not str(raw_path).strip():
+                    continue
+                path = Path(raw_path).resolve()
+                item = QListWidgetItem(path.name or str(path))
+                item.setToolTip(str(path))
+                item.setData(Qt.ItemDataRole.UserRole, str(path))
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.CheckState.Unchecked
+                    if str(path) in excluded
+                    else Qt.CheckState.Checked
+                )
+                self.lst_nfit_group_paths.addItem(item)
         finally:
-            self.txt_nfit_group_paths.blockSignals(False)
+            self.lst_nfit_group_paths.blockSignals(False)
 
     def _select_multiple_directories(self, start_dir: Optional[Path] = None) -> List[str]:
         initial_dir = str(start_dir or self._current_dir or Path.cwd())
@@ -1331,12 +1507,18 @@ class FittingAnalysisWidget(QWidget):
         if not selected:
             return
         selected_paths = [str(Path(path).resolve()) for path in selected]
-        ok, msg = self._load_folder(Path(selected_paths[0]))
+        ok, msg = False, "Folder loading failed."
+        self._set_busy(True, "Loading selected folders...")
+        try:
+            ok, msg = self._load_folder(Path(selected_paths[0]))
+            if ok:
+                self._set_nfit_group_paths(selected_paths)
+                self._refresh_analysis_views(reset_manual=False)
+        finally:
+            self._set_busy(False)
         if not ok:
             QMessageBox.warning(self, "Load failed", msg)
             return
-        self._set_nfit_group_paths(selected_paths if len(selected_paths) > 1 else [])
-        self._refresh_analysis_views(reset_manual=False)
 
     def _append_selected_filter_preset(self):
         entry = self._selected_filter_entry()
@@ -1377,11 +1559,18 @@ class FittingAnalysisWidget(QWidget):
 
     # ------------------------------- File I/O -------------------------------
     def _select_folder(self):
+        if self._busy:
+            return
         start_dir = str(self._current_dir) if self._current_dir else "results"
         folder = QFileDialog.getExistingDirectory(self, "Select result folder", start_dir)
         if not folder:
             return
-        ok, msg = self._load_folder(Path(folder))
+        ok, msg = False, "Folder loading failed."
+        self._set_busy(True, "Loading folder and preparing plots...")
+        try:
+            ok, msg = self._load_folder(Path(folder))
+        finally:
+            self._set_busy(False)
         if not ok:
             QMessageBox.warning(self, "Load failed", msg)
         else:
@@ -1480,7 +1669,11 @@ class FittingAnalysisWidget(QWidget):
         self._set_selected_filters_from_dict(filters if isinstance(filters, dict) else {})
         raw_group_paths = meta.get("n_fit_group_paths")
         if isinstance(raw_group_paths, list):
-            self._set_nfit_group_paths([str(path) for path in raw_group_paths])
+            raw_excluded_paths = meta.get("n_fit_excluded_paths")
+            self._set_nfit_group_paths(
+                [str(path) for path in raw_group_paths],
+                [str(path) for path in raw_excluded_paths] if isinstance(raw_excluded_paths, list) else [],
+            )
         else:
             self._set_nfit_group_paths([])
         self._sync_reference_presets_from_meta(meta)
@@ -1568,8 +1761,14 @@ class FittingAnalysisWidget(QWidget):
         n_fit_group_paths = self._parse_nfit_group_paths()
         if n_fit_group_paths:
             payload["n_fit_group_paths"] = n_fit_group_paths
+            excluded_paths = self._parse_nfit_excluded_paths()
+            if excluded_paths:
+                payload["n_fit_excluded_paths"] = excluded_paths
+            else:
+                payload.pop("n_fit_excluded_paths", None)
         else:
             payload.pop("n_fit_group_paths", None)
+            payload.pop("n_fit_excluded_paths", None)
         payload = self.extrema_widget.merge_into_metadata(payload)
         return payload
 
@@ -1607,6 +1806,8 @@ class FittingAnalysisWidget(QWidget):
 
     # -------------------------------- Run fit --------------------------------
     def _run_fit_clicked(self):
+        if self._busy:
+            return
         if not self._current_dir:
             QMessageBox.information(self, "No data", "Load a result folder first.")
             return
@@ -1627,35 +1828,43 @@ class FittingAnalysisWidget(QWidget):
         if s is None:
             QMessageBox.critical(self, "No strategy", "No fitting strategy is available/selected.")
             return
-        try:
-            mod = importlib.import_module(s.qualname)
-            StrategyCls = getattr(mod, s.class_name)
-        except Exception as e:
-            QMessageBox.critical(self, "Import error", f"Failed to import {s.qualname}.{s.class_name}: {e}")
-            return
+        self._fit_requested_strategy_name = requested_strategy_name
+        self._fit_worker = FitWorker(str(self._current_dir), s.qualname, s.class_name)
+        self._fit_worker.succeeded.connect(self._fit_worker_succeeded)
+        self._fit_worker.failed.connect(self._fit_worker_failed)
+        self._fit_worker.finished.connect(self._fit_worker_finished)
+        self._set_busy(True, f"Running {s.display_name}...")
+        self._fit_worker.start()
 
-        # Run fit
-        try:
-            analysis = SHGDataAnalysis(str(self._current_dir))
-            results = analysis.run(StrategyCls)
-            if results is None:
-                QMessageBox.critical(self, "Fitting error", f"{analysis.last_error}")
-                return
-        except Exception as e:
-            QMessageBox.critical(self, "Fit failed", str(e))
+    def _fit_worker_succeeded(self, _results: object) -> None:
+        self.lbl_busy.setText("Loading fitted results and updating plots...")
+        QApplication.processEvents()
+        if not self._current_dir:
             return
-
-        # Reload files from disk and refresh UI
         ok, msg = self._load_folder(self._current_dir)
         if not ok:
             QMessageBox.warning(self, "Reload failed", msg)
             return
+        requested_strategy_name = self._fit_requested_strategy_name
         if requested_strategy_name:
             self._set_picker_strategy(requested_strategy_name)
-            self._refresh_saved_strategy_list(self._meta, preferred_strategy_name=requested_strategy_name)
+            self._refresh_saved_strategy_list(
+                self._meta,
+                preferred_strategy_name=requested_strategy_name,
+            )
             if self._meta:
                 self._populate_table_from_json(self._meta)
-        self._refresh_analysis_views(reset_manual=True)
+
+    def _fit_worker_failed(self, message: str) -> None:
+        QMessageBox.critical(self, "Fit failed", message)
+
+    def _fit_worker_finished(self) -> None:
+        worker = self._fit_worker
+        self._fit_worker = None
+        self._fit_requested_strategy_name = None
+        self._set_busy(False)
+        if worker is not None:
+            worker.deleteLater()
 
     # ------------------------------ Table/plots ------------------------------
     def _populate_table_from_json(self, meta: Dict):
@@ -1755,8 +1964,14 @@ class FittingAnalysisWidget(QWidget):
             n_fit_group_paths = self._parse_nfit_group_paths()
             if n_fit_group_paths:
                 analysis.meta["n_fit_group_paths"] = n_fit_group_paths
+                excluded_paths = self._parse_nfit_excluded_paths()
+                if excluded_paths:
+                    analysis.meta["n_fit_excluded_paths"] = excluded_paths
+                else:
+                    analysis.meta.pop("n_fit_excluded_paths", None)
             else:
                 analysis.meta.pop("n_fit_group_paths", None)
+                analysis.meta.pop("n_fit_excluded_paths", None)
             strategy = strategy_cls(analysis)
         except Exception as e:
             context["error"] = f"Failed to initialize strategy: {e}"
@@ -1943,7 +2158,7 @@ class FittingAnalysisWidget(QWidget):
         if not np.isfinite(reference) or reference <= 0.0:
             return sigfigs
         exponent = math.floor(math.log10(reference))
-        return max(0, min(12, int(sigfigs - 1 - exponent)))
+        return max(0, min(18, int(sigfigs - 1 - exponent)))
 
     def _step_for_sigfigs(self, reference: float, sigfigs: int = 3) -> float:
         reference = abs(float(reference))
@@ -2732,7 +2947,10 @@ class FittingAnalysisWidget(QWidget):
         return dn_override
 
     def _nfit_group_result_by_source(self) -> Dict[str, Dict[str, Any]]:
-        raw = self._meta.get("n_fit_group_results")
+        selected_global_result = self._global_result_by_id(self._selected_result_id())
+        raw = selected_global_result.get("group_results") if selected_global_result else None
+        if not isinstance(raw, list):
+            raw = self._meta.get("n_fit_group_results")
         if not isinstance(raw, list):
             return {}
         mapping: Dict[str, Dict[str, Any]] = {}
@@ -2771,11 +2989,17 @@ class FittingAnalysisWidget(QWidget):
         fit_payload = context.get("saved_fit", {}) if isinstance(context.get("saved_fit"), dict) else {}
         dn_override = self._dn_override_from_saved_fit(fit_payload)
         group_results = self._nfit_group_result_by_source()
+        selected_result_id = self._selected_result_id()
+        if self._nfit_manual_result_id != selected_result_id:
+            self._nfit_manual_overrides.clear()
+            self._nfit_manual_result_id = selected_result_id
+        self._nfit_card_views.clear()
         self._clear_nfit_measurements()
 
         has_saved_global_fit = bool(dn_override)
         summary_lines = [
             f"Measurements in group: {len(measurements)}",
+            f"Included in global fit: {sum(bool(item.get('included_in_fit', True)) for item in measurements)}",
         ]
         if has_saved_global_fit:
             summary_lines.append(
@@ -2799,9 +3023,17 @@ class FittingAnalysisWidget(QWidget):
             )
             group_box = QGroupBox(title)
             box_layout = QVBoxLayout(group_box)
+            card_header = QHBoxLayout()
+            card_header.addStretch(1)
+            edit_button = QPushButton("Edit")
+            edit_button.setCheckable(True)
+            edit_button.setEnabled(has_saved_global_fit)
+            card_header.addWidget(edit_button)
+            box_layout.addLayout(card_header)
 
             info_lines = [
                 f"cut={meta.get('crystal_orientation')}, axis={meta.get('rot/trans_axis')}, material={meta.get('material')}",
+                "global fit: included" if measurement.get("included_in_fit", True) else "global fit: excluded (result applied)",
             ]
             result_entry = group_results.get(str(measurement.get("source_dir") or ""))
             fitted_L = None
@@ -2824,46 +3056,456 @@ class FittingAnalysisWidget(QWidget):
 
             canvas = MplCanvas(group_box, width=6.2, height=2.8)
             canvas.setFixedHeight(260)
-            ax = canvas.ax
-            ax.plot(x, y, linestyle="none", marker="o", markersize=2.5, label="Data")
-
-            if has_saved_global_fit:
-                L_value = fitted_L if np.isfinite(self._safe_float(fitted_L)) else float(measurement["L0_mm"])
-                try:
-                    model = np.asarray(
-                        measurement["strategy"]._maker_fringes(
-                            override={
-                                "meta": measurement["meta"],
-                                "data": measurement["data"],
-                                "theta_deg": x,
-                                "L": float(L_value),
-                                "dn_override": dn_override,
-                            }
-                        ),
-                        dtype=float,
-                    )
-                    finite = np.isfinite(model) & np.isfinite(y)
-                    if np.any(finite):
-                        denom = float(np.dot(model[finite], model[finite]))
-                        if denom > 0.0:
-                            peak = float(np.dot(model[finite], y[finite]) / denom)
-                            fit_curve = peak * model
-                            ax.plot(x, fit_curve, linewidth=1.4, label="Global n-fit")
-                except Exception as exc:
-                    info_label.setText(info_label.text() + f"\nfit overlay error: {exc}")
-
-            ax.set_xlabel("Incidence angle (deg.)")
-            ax.set_ylabel("Signal (V)")
-            ax.grid(True, which="both", alpha=0.25)
-            handles, labels = ax.get_legend_handles_labels()
-            if handles:
-                ax.legend(loc="best", fontsize=9)
-            canvas.figure.tight_layout()
-            canvas.draw()
             box_layout.addWidget(canvas)
+
+            source_dir = str(measurement.get("source_dir") or "")
+            initial_L = fitted_L if np.isfinite(self._safe_float(fitted_L)) else float(measurement["L0_mm"])
+            initial_peak = self._safe_float(
+                result_entry.get("k_scale_small_angle") if isinstance(result_entry, dict) else None
+            )
+            if not np.isfinite(initial_peak):
+                initial_peak = max(float(np.nanmax(y)), 0.0) if y.size else 1.0
+            initial_centering = self._safe_float(
+                result_entry.get("centering_pos") if isinstance(result_entry, dict) else None
+            )
+            if not np.isfinite(initial_centering):
+                centering_info = measurement.get("centering_info")
+                initial_centering = self._safe_float(
+                    centering_info.get("c_best") if isinstance(centering_info, dict) else None,
+                    0.0,
+                )
+            override = self._nfit_manual_overrides.setdefault(
+                source_dir,
+                {
+                    "L_mm": float(initial_L),
+                    "peak": float(initial_peak),
+                    "centering_pos": float(initial_centering),
+                },
+            )
+
+            editor = QWidget(group_box)
+            editor_layout = QVBoxLayout(editor)
+            editor_layout.setContentsMargins(0, 0, 0, 0)
+            editor_controls: Dict[str, Dict[str, Any]] = {}
+            self._add_nfit_editor_row(
+                editor_layout,
+                editor_controls,
+                "L_mm",
+                "L [mm]",
+                float(override["L_mm"]),
+                max(abs(float(override["L_mm"])) * 0.02, 0.01),
+            )
+            self._add_nfit_editor_row(
+                editor_layout,
+                editor_controls,
+                "peak",
+                "Peak",
+                float(override["peak"]),
+                abs(float(override["peak"])) * 0.5
+                if float(override["peak"]) != 0.0
+                else 1e-12,
+                nonnegative=True,
+            )
+            self._add_nfit_editor_row(
+                editor_layout,
+                editor_controls,
+                "centering_pos",
+                "Centering",
+                float(override["centering_pos"]),
+                2.0,
+            )
+            editor_buttons = QHBoxLayout()
+            reset_button = QPushButton("Reset")
+            save_button = QPushButton("Save Changes")
+            editor_buttons.addWidget(reset_button)
+            editor_buttons.addWidget(save_button)
+            editor_buttons.addStretch(1)
+            editor_layout.addLayout(editor_buttons)
+            linked_label = QLabel()
+            linked_label.setStyleSheet("color: gray;")
+            editor_layout.addWidget(linked_label)
+            editor.setVisible(False)
+            box_layout.addWidget(editor)
+
+            view = {
+                "measurement": measurement,
+                "result_entry": result_entry if isinstance(result_entry, dict) else {},
+                "canvas": canvas,
+                "info_label": info_label,
+                "controls": editor_controls,
+                "dn_override": dn_override,
+                "initial": {
+                    "L_mm": float(initial_L),
+                    "peak": float(initial_peak),
+                    "centering_pos": float(initial_centering),
+                },
+                "thickness_group_key": str(
+                    (result_entry or {}).get("thickness_group_key") or ""
+                ) if isinstance(result_entry, dict) else "",
+            }
+            self._nfit_card_views[source_dir] = view
+            linked_count = self._nfit_linked_source_dirs(source_dir)
+            linked_label.setText(
+                f"L is linked to {len(linked_count)} folder(s) in this thickness group."
+                if len(linked_count) > 1
+                else "L applies only to this folder."
+            )
+            edit_button.toggled.connect(editor.setVisible)
+            reset_button.clicked.connect(
+                lambda _checked=False, source=source_dir: self._reset_nfit_manual_card(source)
+            )
+            save_button.clicked.connect(
+                lambda _checked=False, source=source_dir: self._save_nfit_manual_changes(source)
+            )
+            for key, controls in editor_controls.items():
+                controls["slider"].valueChanged.connect(
+                    lambda value, source=source_dir, name=key: self._nfit_editor_slider_changed(
+                        source, name, value
+                    )
+                )
+                controls["value"].valueChanged.connect(
+                    lambda value, source=source_dir, name=key: self._nfit_editor_value_changed(
+                        source, name, value
+                    )
+                )
+            self._draw_nfit_card(source_dir)
             self.nfit_measurements_layout.addWidget(group_box)
 
         self.nfit_measurements_layout.addStretch(1)
+
+    def _add_nfit_editor_row(
+        self,
+        layout: QVBoxLayout,
+        controls: Dict[str, Dict[str, Any]],
+        key: str,
+        label: str,
+        value: float,
+        span: float,
+        *,
+        nonnegative: bool = False,
+    ) -> None:
+        minimum = max(0.0, value - span) if nonnegative else value - span
+        maximum = max(value + span, minimum + 1e-9)
+        row = QHBoxLayout()
+        row.addWidget(QLabel(f"{label}:"))
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, self._SLIDER_STEPS)
+        value_box = QDoubleSpinBox()
+        value_box.setLocale(QLocale.c())
+        if key == "peak":
+            value_box.setDecimals(self._decimals_for_sigfigs(value))
+            value_box.setSingleStep(self._step_for_sigfigs(value))
+        else:
+            value_box.setDecimals(6)
+        if nonnegative:
+            value_box.setRange(0.0, 1e12)
+        else:
+            value_box.setRange(-1e12, 1e12)
+        value_box.setValue(value)
+        value_box.setKeyboardTracking(False)
+        value_box.setFixedWidth(110)
+        slider.setValue(
+            int(round((value - minimum) / (maximum - minimum) * self._SLIDER_STEPS))
+        )
+        row.addWidget(slider, 1)
+        row.addWidget(value_box)
+        layout.addLayout(row)
+        controls[key] = {
+            "slider": slider,
+            "value": value_box,
+            "minimum": minimum,
+            "maximum": maximum,
+            "syncing": False,
+        }
+
+    def _nfit_linked_source_dirs(self, source_dir: str) -> List[str]:
+        view = self._nfit_card_views.get(source_dir) or {}
+        group_key = str(view.get("thickness_group_key") or "")
+        if not group_key:
+            return [source_dir]
+        return [
+            candidate
+            for candidate, candidate_view in self._nfit_card_views.items()
+            if str(candidate_view.get("thickness_group_key") or "") == group_key
+        ]
+
+    def _nfit_editor_slider_changed(self, source_dir: str, key: str, slider_value: int) -> None:
+        view = self._nfit_card_views.get(source_dir)
+        if not view:
+            return
+        controls = view["controls"][key]
+        if controls["syncing"]:
+            return
+        fraction = float(slider_value) / float(self._SLIDER_STEPS)
+        value = controls["minimum"] + fraction * (controls["maximum"] - controls["minimum"])
+        controls["syncing"] = True
+        controls["value"].setValue(value)
+        controls["syncing"] = False
+        self._set_nfit_override_value(source_dir, key, value)
+
+    def _nfit_editor_value_changed(self, source_dir: str, key: str, value: float) -> None:
+        view = self._nfit_card_views.get(source_dir)
+        if not view:
+            return
+        controls = view["controls"][key]
+        if controls["syncing"]:
+            return
+        value = float(value)
+        if key == "L_mm":
+            span = 0.03
+            minimum = value - span
+            maximum = value + span
+        elif key == "peak":
+            span = abs(value) * 0.2 if value != 0.0 else 1e-12
+            minimum = max(0.0, value - span)
+            maximum = value + span
+            controls["value"].setDecimals(self._decimals_for_sigfigs(value))
+            controls["value"].setSingleStep(self._step_for_sigfigs(value))
+        else:
+            span = max(abs(value) * 0.2, 1e-6)
+            minimum = value - span
+            maximum = value + span
+        controls["minimum"] = minimum
+        controls["maximum"] = maximum
+        fraction = (value - minimum) / (maximum - minimum)
+        controls["syncing"] = True
+        controls["slider"].setValue(
+            int(round(min(max(fraction, 0.0), 1.0) * self._SLIDER_STEPS))
+        )
+        controls["syncing"] = False
+        self._set_nfit_override_value(source_dir, key, value)
+
+    def _set_nfit_override_value(self, source_dir: str, key: str, value: float) -> None:
+        targets = self._nfit_linked_source_dirs(source_dir) if key == "L_mm" else [source_dir]
+        for target in targets:
+            self._nfit_manual_overrides.setdefault(target, {})[key] = float(value)
+            target_view = self._nfit_card_views.get(target)
+            if target_view and key in target_view["controls"]:
+                controls = target_view["controls"][key]
+                controls["syncing"] = True
+                controls["value"].setValue(float(value))
+                fraction = (float(value) - controls["minimum"]) / (
+                    controls["maximum"] - controls["minimum"]
+                )
+                controls["slider"].setValue(
+                    int(round(min(max(fraction, 0.0), 1.0) * self._SLIDER_STEPS))
+                )
+                controls["syncing"] = False
+            self._draw_nfit_card(target)
+
+    def _reset_nfit_manual_card(self, source_dir: str) -> None:
+        view = self._nfit_card_views.get(source_dir)
+        if view:
+            self._set_nfit_override_value(source_dir, "L_mm", view["initial"]["L_mm"])
+            self._set_nfit_override_value(source_dir, "peak", view["initial"]["peak"])
+            self._set_nfit_override_value(
+                source_dir, "centering_pos", view["initial"]["centering_pos"]
+            )
+
+    def _draw_nfit_card(self, source_dir: str) -> None:
+        view = self._nfit_card_views.get(source_dir)
+        override = self._nfit_manual_overrides.get(source_dir)
+        if not view or not override:
+            return
+        measurement = view["measurement"]
+        raw_data = measurement["analysis"].data
+        raw_x = np.asarray(raw_data["position"], dtype=float)
+        x = raw_x - float(override["centering_pos"])
+        prepared = measurement["data"]
+        y = np.asarray(
+            prepared.get("offset_corrected", prepared["intensity_corrected"]),
+            dtype=float,
+        )
+        canvas = view["canvas"]
+        canvas.clear()
+        ax = canvas.ax
+        ax.plot(x, y, linestyle="none", marker="o", markersize=2.5, label="Data")
+        try:
+            model = np.asarray(
+                measurement["strategy"]._maker_fringes(
+                    override={
+                        "meta": measurement["meta"],
+                        "data": prepared,
+                        "theta_deg": x,
+                        "L": float(override["L_mm"]),
+                        "dn_override": view["dn_override"],
+                    }
+                ),
+                dtype=float,
+            )
+            ax.plot(
+                x,
+                float(override["peak"]) * model,
+                linewidth=1.4,
+                label="Global n-fit",
+            )
+        except Exception as exc:
+            view["info_label"].setText(view["info_label"].text() + f"\nfit overlay error: {exc}")
+        ax.set_xlabel("Incidence angle (deg.)")
+        ax.set_ylabel("Signal (V)")
+        ax.grid(True, which="both", alpha=0.25)
+        ax.legend(loc="best", fontsize=9)
+        canvas.figure.tight_layout()
+        canvas.draw()
+
+    def _save_nfit_manual_changes(self, _source_dir: str) -> None:
+        result_id = self._selected_result_id()
+        selected = self._get_selected_strategy()
+        global_result = self._global_result_by_id(result_id)
+        if not result_id or selected is None or not global_result:
+            QMessageBox.warning(
+                self,
+                "No saved global fit",
+                "Run or select a saved global n-fit before saving manual changes.",
+            )
+            return
+
+        group_results = [
+            dict(entry)
+            for entry in global_result.get("group_results", [])
+            if isinstance(entry, dict)
+        ]
+        result_by_source = {
+            str(entry.get("source_dir") or ""): entry
+            for entry in group_results
+        }
+        for source_dir, override in self._nfit_manual_overrides.items():
+            entry = result_by_source.get(source_dir)
+            if entry is None:
+                continue
+            entry["L_mm"] = float(override["L_mm"])
+            entry["dL_mm"] = float(override["L_mm"]) - float(entry.get("L0_mm") or 0.0)
+            entry["k_scale_small_angle"] = float(override["peak"])
+            entry["centering_pos"] = float(override["centering_pos"])
+            entry["manual_adjusted"] = True
+
+        thickness_groups = [
+            dict(entry)
+            for entry in global_result.get("thickness_groups", [])
+            if isinstance(entry, dict)
+        ]
+        for thickness_group in thickness_groups:
+            key = str(thickness_group.get("key") or "")
+            linked_entries = [
+                entry
+                for entry in group_results
+                if str(entry.get("thickness_group_key") or "") == key
+            ]
+            if not linked_entries:
+                continue
+            L_mm = float(linked_entries[0]["L_mm"])
+            thickness_group["L_mm"] = L_mm
+            thickness_group["dL_mm"] = L_mm - float(thickness_group.get("L0_mm") or 0.0)
+
+        global_result["group_results"] = group_results
+        global_result["thickness_groups"] = thickness_groups
+        global_result["manual_adjusted_at"] = datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        )
+
+        failures: List[str] = []
+        for source_dir in global_result.get("group_source_dirs", []):
+            source_path = Path(str(source_dir))
+            local_result = result_by_source.get(str(source_path.resolve()))
+            view = self._nfit_card_views.get(str(source_path.resolve()))
+            if local_result is None or view is None:
+                failures.append(f"{source_path.name}: measurement is not loaded")
+                continue
+            json_files = list(source_path.glob("*.json"))
+            csv_files = list(source_path.glob("*.csv"))
+            if len(json_files) != 1 or len(csv_files) != 1:
+                failures.append(f"{source_path.name}: expected one JSON and one CSV")
+                continue
+            try:
+                meta = json.loads(json_files[0].read_text(encoding="utf-8"))
+                history = [
+                    dict(entry)
+                    for entry in meta.get("n_fit_global_results", [])
+                    if isinstance(entry, dict)
+                ]
+                for index, entry in enumerate(history):
+                    if str(entry.get("result_id") or "") == result_id:
+                        history[index] = dict(global_result)
+                        break
+                else:
+                    history.append(dict(global_result))
+                meta["n_fit_global_results"] = history
+                meta["n_fit_active_result_id"] = result_id
+                meta["n_fit_global_result"] = dict(global_result)
+                meta["n_fit_group_results"] = [dict(entry) for entry in group_results]
+                meta["n_fit_thickness_group_results"] = [
+                    dict(entry) for entry in thickness_groups
+                ]
+                meta["n_fit_local_result"] = dict(local_result)
+
+                fit_payload = extract_fit_payload(meta, selected.class_name, result_id)
+                fit_payload.update(
+                    {
+                        "L_mm": float(local_result["L_mm"]),
+                        "k_scale": float(local_result["k_scale_small_angle"]),
+                        "Pm0": float(local_result["k_scale_small_angle"]),
+                        "centering_pos": float(local_result["centering_pos"]),
+                    }
+                )
+                meta = upsert_fitting_result(
+                    meta,
+                    selected.class_name,
+                    fit_payload,
+                    strategy_module=selected.qualname,
+                    strategy_display_name=selected.display_name,
+                    result_id=result_id,
+                    result_label=str(global_result.get("result_label") or ""),
+                )
+                json_files[0].write_text(
+                    json.dumps(meta, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
+                measurement = view["measurement"]
+                override = self._nfit_manual_overrides[str(source_path.resolve())]
+                csv_df = pd.read_csv(csv_files[0])
+                raw_x = np.asarray(csv_df["position"], dtype=float)
+                centered_x = raw_x - float(override["centering_pos"])
+                model = np.asarray(
+                    measurement["strategy"]._maker_fringes(
+                        override={
+                            "meta": measurement["meta"],
+                            "data": measurement["data"],
+                            "theta_deg": centered_x,
+                            "L": float(override["L_mm"]),
+                            "dn_override": view["dn_override"],
+                        }
+                    ),
+                    dtype=float,
+                )
+                offset = float((measurement.get("offset_info") or {}).get("offset", 0.0))
+                csv_df["position_centered"] = centered_x
+                csv_df["fit"] = float(override["peak"]) * model + offset
+                csv_df.to_csv(csv_files[0], index=False)
+            except Exception as exc:
+                failures.append(f"{source_path.name}: {exc}")
+
+        if failures:
+            QMessageBox.warning(
+                self,
+                "Partially saved",
+                "Some folders could not be updated:\n" + "\n".join(failures),
+            )
+            return
+
+        ok, message = self._load_folder(self._current_dir)
+        if not ok:
+            QMessageBox.warning(self, "Reload failed", message)
+            return
+        self._refresh_saved_strategy_list(
+            self._meta,
+            preferred_strategy_name=selected.class_name,
+        )
+        QMessageBox.information(
+            self,
+            "Saved",
+            "Manual L, Peak, and Centering values were saved for the global fit group.",
+        )
 
     def _clear_nfit_measurements(self, message: Optional[str] = None):
         while self.nfit_measurements_layout.count():

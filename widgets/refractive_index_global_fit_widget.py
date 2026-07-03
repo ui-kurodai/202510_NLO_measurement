@@ -4,10 +4,11 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QPlainTextEdit,
+    QListWidget,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -38,17 +39,14 @@ class RefractiveIndexGlobalFitWidget(QWidget):
         self.lbl_current_folder.setStyleSheet("color: gray;")
         self.lbl_nfit_intro = QLabel(
             "Select one measurement folder for a single-folder fit, or select multiple folders "
-            "to include them in one global n-fit. Run Fit stores the shared global result in every selected JSON."
+            "for one global n-fit. Uncheck a folder to exclude it from fitting while still applying "
+            "the fitted refractive-index result to that folder."
         )
         self.lbl_nfit_intro.setWordWrap(True)
         self.lbl_nfit_intro.setStyleSheet("color: gray;")
-        self.txt_nfit_group_paths = QPlainTextEdit()
-        self.txt_nfit_group_paths.setPlaceholderText(
-            "Selected group folders are shown here.\n"
-            "One folder path per line."
-        )
-        self.txt_nfit_group_paths.setTabChangesFocus(True)
-        self.txt_nfit_group_paths.setFixedHeight(96)
+        self.lst_nfit_group_paths = QListWidget()
+        self.lst_nfit_group_paths.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.lst_nfit_group_paths.setMinimumHeight(120)
 
         button_row = QHBoxLayout()
         self.btn_nfit_refresh = QPushButton("Refresh Preview")
@@ -61,7 +59,7 @@ class RefractiveIndexGlobalFitWidget(QWidget):
         folder_layout.addWidget(self.btn_nfit_select_folders)
         folder_layout.addWidget(self.lbl_current_folder)
         folder_layout.addWidget(self.lbl_nfit_intro)
-        folder_layout.addWidget(self.txt_nfit_group_paths)
+        folder_layout.addWidget(self.lst_nfit_group_paths)
         folder_layout.addLayout(button_row)
         folder_layout.addWidget(self.lbl_nfit_hint)
 
