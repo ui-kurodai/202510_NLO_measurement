@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from fitting_strategies.base import FittingConfigurationError
+from fitting_strategies.bechthold1977 import GlobalNFitMixin
 from fitting_strategies.jerphagnon1970 import Jerphagnon1970Strategy
 from fitting_results import upsert_fitting_result
 
@@ -1098,3 +1099,17 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
             json.dump(self.analysis.meta, f, ensure_ascii=False, indent=2)
 
         return results
+
+
+class Braun1997GlobalNFitStrategy(GlobalNFitMixin, Braun1997Strategy):
+    """Global refractive-index fit using the Braun 1997 model."""
+
+    def _make_measurement_strategy(self, analysis):
+        return Braun1997Strategy(analysis)
+
+    def _validate_measurement_strategy(self, strategy, meta):
+        geometry_key = strategy._geometry_key(meta)
+        if strategy._default_d_component(meta) is None:
+            raise FittingConfigurationError(
+                f"This geometry is not supported for Braun global n fit: {geometry_key}"
+            )

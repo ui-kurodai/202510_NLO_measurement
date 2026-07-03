@@ -187,7 +187,7 @@ class BaseFittingStrategy:
         step = np.abs(x[0] - x[1])
         if not order:
             # order is about 1 mm or 1 deg
-            order = max(int(1.0/step), 1.0)
+            order = max(int(1.0 / step), 1)
         idx_min = argrelextrema(y, np.less, order=order)[0]
 
         # Global maximum - min

@@ -24,6 +24,11 @@ class ComparisonResult:
     reference_method: str
     target_method: str
     peak_label: str
+    reference_result_id: str = ""
+    target_result_id: str = ""
+    reference_result_label: str = ""
+    target_result_label: str = ""
+    calculation_mode: str = "peak_d_factor"
     peak_ref: float | None = None
     peak_target: float | None = None
     d_factor_ref: float | None = None
@@ -184,15 +189,22 @@ def compare_measurement_pair(
         reference_variants = [{"strategy": "", "label": "(no saved fit)", "payload": {}}]
 
     results: list[ComparisonResult] = []
-    for target_variant in target_variants:
+    for variant_index, target_variant in enumerate(target_variants):
         reference_variant, selection_warning = _select_reference_variant(target_variant, reference_variants, reference_meta)
+        target_strategy = str(target_variant.get("strategy") or "")
+        target_result_id = str(target_variant.get("result_id") or "")
+        target_identity = target_result_id or f"{target_strategy or 'legacy'}:{variant_index}"
         result = ComparisonResult(
-            key=f"{key}::{target_variant['strategy'] or 'legacy'}",
+            key=f"{key}::{target_identity}",
             relative_path=target_json_path.name,
             reference_json_path=reference_json_path,
             target_json_path=target_json_path,
             reference_strategy=str((reference_variant or {}).get("strategy") or ""),
-            target_strategy=str(target_variant.get("strategy") or ""),
+            target_strategy=target_strategy,
+            reference_result_id=str((reference_variant or {}).get("result_id") or ""),
+            target_result_id=target_result_id,
+            reference_result_label=str((reference_variant or {}).get("label") or ""),
+            target_result_label=str(target_variant.get("label") or ""),
             reference_sample=_measurement_label(reference_meta),
             target_sample=_measurement_label(target_meta),
             reference_method=str(reference_meta.get("method") or ""),
@@ -202,8 +214,29 @@ def compare_measurement_pair(
         if selection_warning:
             result.warnings.append(selection_warning)
 
-        peak_ref = _extract_peak_from_payload((reference_variant or {}).get("payload", {}))
-        peak_target = _extract_peak_from_payload(target_variant.get("payload", {}))
+        reference_payload = (reference_variant or {}).get("payload", {})
+        target_payload = target_variant.get("payload", {})
+        peak_ref = _extract_peak_from_payload(reference_payload)
+        peak_target = _extract_peak_from_payload(target_payload)
+        reference_is_braun = (
+            _is_braun_strategy(result.reference_strategy)
+            or _extract_positive_float(reference_payload.get("d_rel_abs")) is not None
+        )
+        target_is_braun = (
+            _is_braun_strategy(result.target_strategy)
+            or _extract_positive_float(target_payload.get("d_rel_abs")) is not None
+        )
+        uses_braun_pseudo_d = reference_is_braun or target_is_braun
+        pseudo_d_ref = (
+            _extract_braun_pseudo_d(reference_payload)
+            if reference_is_braun
+            else None
+        )
+        pseudo_d_target = (
+            _extract_braun_pseudo_d(target_payload)
+            if target_is_braun
+            else None
+        )
         d_factor_ref = _extract_positive_float((reference_variant or {}).get("payload", {}).get("d_factor"))
         d_factor_target = _extract_positive_float(target_variant.get("payload", {}).get("d_factor"))
         boxcar_ref, label_ref = _extract_boxcar_input_scale(reference_meta)
@@ -211,8 +244,14 @@ def compare_measurement_pair(
         filters_ref, filters_ref_warning = _extract_filters(reference_meta)
         filters_target, filters_target_warning = _extract_filters(target_meta)
 
-        result.peak_ref = peak_ref
-        result.peak_target = peak_target
+        if uses_braun_pseudo_d:
+            result.calculation_mode = "braun_pseudo_d"
+            result.peak_label = "Pseudo |d|"
+            result.peak_ref = pseudo_d_ref
+            result.peak_target = pseudo_d_target
+        else:
+            result.peak_ref = peak_ref
+            result.peak_target = peak_target
         result.d_factor_ref = d_factor_ref
         result.d_factor_target = d_factor_target
         result.boxcar_label_ref = label_ref
@@ -226,14 +265,20 @@ def compare_measurement_pair(
             result.warnings.append(filters_target_warning)
 
         missing_items: list[str] = []
-        if peak_ref is None:
-            missing_items.append("reference peak")
-        if peak_target is None:
-            missing_items.append("target peak")
-        if d_factor_ref is None:
-            missing_items.append("reference d_factor")
-        if d_factor_target is None:
-            missing_items.append("target d_factor")
+        if uses_braun_pseudo_d:
+            if pseudo_d_ref is None:
+                missing_items.append("reference Braun pseudo d")
+            if pseudo_d_target is None:
+                missing_items.append("target Braun pseudo d")
+        else:
+            if peak_ref is None:
+                missing_items.append("reference peak")
+            if peak_target is None:
+                missing_items.append("target peak")
+            if d_factor_ref is None:
+                missing_items.append("reference d_factor")
+            if d_factor_target is None:
+                missing_items.append("target d_factor")
         if boxcar_ref is None:
             missing_items.append("reference boxcar sensitivity")
         if boxcar_target is None:
@@ -251,18 +296,28 @@ def compare_measurement_pair(
         transmission_ref = _transmission_product(filters_ref)
         transmission_target = _transmission_product(filters_target)
 
-        result.corrected_intensity_ref = peak_ref * boxcar_ref / transmission_ref
-        result.corrected_intensity_target = peak_target * boxcar_target / transmission_target
-        result.intensity_ratio = result.corrected_intensity_target / result.corrected_intensity_ref
+        if uses_braun_pseudo_d:
+            result.d_scale_ref = pseudo_d_ref * math.sqrt(boxcar_ref / transmission_ref)
+            result.d_scale_target = pseudo_d_target * math.sqrt(boxcar_target / transmission_target)
+            result.corrected_intensity_ref = result.d_scale_ref**2
+            result.corrected_intensity_target = result.d_scale_target**2
+        else:
+            result.corrected_intensity_ref = peak_ref * boxcar_ref / transmission_ref
+            result.corrected_intensity_target = peak_target * boxcar_target / transmission_target
+            result.d_scale_ref = math.sqrt(result.corrected_intensity_ref / d_factor_ref)
+            result.d_scale_target = math.sqrt(result.corrected_intensity_target / d_factor_target)
 
-        result.d_scale_ref = math.sqrt(result.corrected_intensity_ref / d_factor_ref)
-        result.d_scale_target = math.sqrt(result.corrected_intensity_target / d_factor_target)
+        result.intensity_ratio = result.corrected_intensity_target / result.corrected_intensity_ref
         result.d_ratio = result.d_scale_target / result.d_scale_ref
         result.calculated_d = reference_d_value * result.d_ratio
 
         if result.reference_method.lower() != result.target_method.lower():
             result.warnings.append(
                 f"Method differs: ref={result.reference_method or '?'} / target={result.target_method or '?'}"
+            )
+        if uses_braun_pseudo_d:
+            result.warnings.extend(
+                _braun_comparison_warnings(reference_meta, target_meta)
             )
         results.append(result)
 
@@ -288,6 +343,7 @@ def write_comparison_results(reference_root: Path, results: list[ComparisonResul
             comparison_entries = _normalize_comparison_entries(payload.get("comparison"))
             fitting_entries = normalize_fitting_entries(payload)
             active_strategy = str(payload.get("fitting_active_strategy") or "").strip()
+            active_result_id = str(payload.get("fitting_active_result_id") or "").strip()
 
             for result in grouped_results:
                 if result.error or result.calculated_d is None or result.intensity_ratio is None or result.d_ratio is None:
@@ -296,15 +352,29 @@ def write_comparison_results(reference_root: Path, results: list[ComparisonResul
 
                 comparison_entry = {
                     "strategy": result.target_strategy,
+                    "result_id": result.target_result_id,
+                    "result_label": result.target_result_label,
                     "reference_strategy": result.reference_strategy,
+                    "reference_result_id": result.reference_result_id,
                     "reference_measurement": reference_root.name,
+                    "calculation_mode": result.calculation_mode,
                     "I_target/I_ref": round(float(result.intensity_ratio), 6),
                     "d_target/d_ref": round(float(result.d_ratio), 6),
                     "calculated_d": round(float(result.calculated_d), 6),
                 }
+                if result.calculation_mode == "braun_pseudo_d":
+                    comparison_entry["pseudo_d_ref_corrected"] = round(float(result.d_scale_ref), 6)
+                    comparison_entry["pseudo_d_target_corrected"] = round(float(result.d_scale_target), 6)
                 comparison_entries = _upsert_comparison_entry(comparison_entries, comparison_entry)
 
-                if not fitting_entries or (active_strategy and result.target_strategy == active_strategy):
+                is_active_result = (
+                    result.target_strategy == active_strategy
+                    and (
+                        not active_result_id
+                        or result.target_result_id == active_result_id
+                    )
+                )
+                if not fitting_entries or is_active_result:
                     payload["reference_measurement"] = reference_root.name
                     payload["I_target/I_ref"] = round(float(result.intensity_ratio), 6)
                     payload["d_target/d_ref"] = round(float(result.d_ratio), 6)
@@ -402,6 +472,56 @@ def _extract_peak_from_payload(payload: dict[str, Any]) -> float | None:
         if value is not None:
             return value
     return None
+
+
+def _is_braun_strategy(strategy_name: str) -> bool:
+    return "braun1997" in str(strategy_name or "").strip().lower()
+
+
+def _extract_braun_pseudo_d(payload: dict[str, Any]) -> float | None:
+    d_rel_abs = _extract_positive_float(payload.get("d_rel_abs"))
+    if d_rel_abs is not None:
+        return d_rel_abs
+
+    linear_scale = _extract_peak_from_payload(payload)
+    if linear_scale is None:
+        return None
+    return math.sqrt(linear_scale)
+
+
+def _braun_comparison_warnings(
+    reference_meta: dict[str, Any],
+    target_meta: dict[str, Any],
+) -> list[str]:
+    warnings = [
+        "Braun pseudo d is relative to the Braun model and shared acquisition scale; "
+        "it is not directly comparable to an uncalibrated d scale from another theory."
+    ]
+
+    for key, label in (
+        ("wavelength_nm", "wavelength"),
+        ("ref_ch", "reference channel"),
+        ("sig_ch", "signal channel"),
+    ):
+        reference_value = reference_meta.get(key)
+        target_value = target_meta.get(key)
+        if reference_value in (None, "") or target_value in (None, ""):
+            continue
+        try:
+            values_match = math.isclose(
+                float(reference_value),
+                float(target_value),
+                rel_tol=1e-9,
+                abs_tol=1e-12,
+            )
+        except (TypeError, ValueError):
+            values_match = str(reference_value).strip() == str(target_value).strip()
+        if not values_match:
+            warnings.append(
+                f"Braun comparison has different {label}: "
+                f"ref={reference_value} / target={target_value}."
+            )
+    return warnings
 
 
 def _extract_positive_float(value: Any) -> float | None:
@@ -514,7 +634,12 @@ def _extract_fit_variants(meta: dict[str, Any]) -> list[dict[str, Any]]:
         return [
             {
                 "strategy": str(entry.get("strategy") or "").strip(),
-                "label": str(entry.get("strategy") or "").strip() or "(unnamed)",
+                "result_id": str(entry.get("result_id") or "").strip(),
+                "label": (
+                    str(entry.get("result_label") or "").strip()
+                    or str(entry.get("strategy") or "").strip()
+                    or "(unnamed)"
+                ),
                 "payload": dict(entry),
             }
             for entry in entries
@@ -533,6 +658,12 @@ def _select_reference_variant(
     reference_meta: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None]:
     target_strategy = str(target_variant.get("strategy") or "").strip()
+    target_result_id = str(target_variant.get("result_id") or "").strip()
+    if target_result_id:
+        for variant in reference_variants:
+            if str(variant.get("result_id") or "").strip() == target_result_id:
+                return variant, None
+
     if target_strategy:
         for variant in reference_variants:
             if str(variant.get("strategy") or "").strip() == target_strategy:
@@ -587,9 +718,17 @@ def _normalize_comparison_entries(raw: Any) -> list[dict[str, Any]]:
 
 def _upsert_comparison_entry(entries: list[dict[str, Any]], entry: dict[str, Any]) -> list[dict[str, Any]]:
     strategy = str(entry.get("strategy") or "").strip()
+    result_id = str(entry.get("result_id") or "").strip()
     updated = list(entries)
     for index, existing in enumerate(updated):
-        if str(existing.get("strategy") or "").strip() == strategy:
+        existing_strategy = str(existing.get("strategy") or "").strip()
+        existing_result_id = str(existing.get("result_id") or "").strip()
+        same_result = (
+            existing_result_id == result_id
+            if result_id or existing_result_id
+            else existing_strategy == strategy
+        )
+        if existing_strategy == strategy and same_result:
             updated[index] = entry
             return updated
     updated.append(entry)

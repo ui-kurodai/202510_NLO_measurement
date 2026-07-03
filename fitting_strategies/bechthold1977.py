@@ -1,4 +1,5 @@
 import json
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -379,9 +380,9 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
         return result, fit_data
 
 
-class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
+class GlobalNFitMixin:
     """
-    Global refractive-index fitting for Bechthold rotation scans.
+    Shared global refractive-index fitting for rotation-scan models.
 
     The fit uses adjacent fringe minima so that each pair satisfies:
         |Psi(theta[i+1]) - Psi(theta[i])| ~= pi
@@ -408,6 +409,12 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
     DN_PRIOR_SIGMA = 0.01
     L_PRIOR_SIGMA_MM = 0.01
     ANGLE_WEIGHT_SCALE_DEG = 20.0
+
+    def _make_measurement_strategy(self, analysis):
+        raise NotImplementedError
+
+    def _validate_measurement_strategy(self, strategy, meta):
+        return None
 
     def _resolve_group_measurement_dirs(self, meta):
         current_dir = None
@@ -461,6 +468,14 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
             resolved.append(chosen)
 
         return resolved
+
+    def _excluded_group_dirs(self, meta):
+        excluded = set()
+        for item in meta.get("n_fit_excluded_paths") or []:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            excluded.add(str(Path(item).expanduser().resolve()))
+        return excluded
 
     def _load_saved_extrema_indices(self, meta, data, kind="minima"):
         raw = meta.get(kind)
@@ -529,8 +544,8 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
             return np.empty((0, 2), dtype=float)
         return np.vstack(pairs).astype(float)
 
-    def _prepare_measurement_bundle(self, analysis, source_dir):
-        strategy = Bechthold1977Strategy(analysis)
+    def _prepare_measurement_bundle(self, analysis, source_dir, *, require_fit_data=True):
+        strategy = self._make_measurement_strategy(analysis)
         prepared, centering_info = strategy._position_centering(analysis.data)
         prepared, offset_info = strategy._subtract_offset(prepared)
 
@@ -543,14 +558,30 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
         theta_deg = np.asarray(prepared.get("position_centered", prepared["position"]), dtype=float)
         theta_min_deg = theta_deg[np.asarray(minima_idx, dtype=int)]
         phase_pairs_deg = self._adjacent_phase_pairs_deg(theta_deg, minima_idx)
-        if phase_pairs_deg.shape[0] == 0:
+        if require_fit_data and phase_pairs_deg.shape[0] == 0:
             raise ValueError(
                 f"No adjacent minima pairs available for n fitting in {source_dir or 'current measurement'}."
             )
 
+        self._validate_measurement_strategy(strategy, analysis.meta)
         geometry_key = strategy._geometry_key(analysis.meta)
-        if geometry_key not in strategy.GEOMETRY_FUNCTIONS:
-            raise FittingConfigurationError(f"This geometry is not supported for Bechthold global n fit: {geometry_key}")
+        thickness_info = analysis.meta.get("thickness_info")
+        if not isinstance(thickness_info, dict):
+            folder_name = Path(source_dir).name if source_dir is not None else "current measurement"
+            raise ValueError(
+                f"Missing thickness_info in '{folder_name}'. "
+                "Open that folder once and save its metadata, or remove it from the application group."
+            )
+        thickness_value = thickness_info.get("t_center_mm")
+        if thickness_value is None:
+            thickness_value = thickness_info.get("t_at_thin_end_mm")
+        try:
+            L0_mm = float(thickness_value)
+        except (TypeError, ValueError):
+            folder_name = Path(source_dir).name if source_dir is not None else "current measurement"
+            raise ValueError(
+                f"Missing t_center_mm in thickness_info for '{folder_name}'."
+            ) from None
 
         return {
             "analysis": analysis,
@@ -562,22 +593,31 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
             "minima_idx": np.asarray(minima_idx, dtype=int),
             "theta_min_deg": np.asarray(theta_min_deg, dtype=float),
             "phase_pairs_deg": phase_pairs_deg,
-            "L0_mm": float(analysis.meta["thickness_info"]["t_center_mm"]),
+            "L0_mm": L0_mm,
             "source_dir": None if source_dir is None else str(source_dir),
             "geometry_key": geometry_key,
+            "included_in_fit": bool(require_fit_data),
         }
 
     def _load_measurement_group(self):
         from shg_analysis import SHGDataAnalysis
 
         group_dirs = self._resolve_group_measurement_dirs(self.analysis.meta)
+        excluded_dirs = self._excluded_group_dirs(self.analysis.meta)
         measurements = []
         for index, source_dir in enumerate(group_dirs):
             if index == 0:
                 analysis = self.analysis
             else:
                 analysis = SHGDataAnalysis(source_dir)
-            measurements.append(self._prepare_measurement_bundle(analysis, source_dir))
+            included_in_fit = str(Path(source_dir).resolve()) not in excluded_dirs if source_dir else True
+            measurements.append(
+                self._prepare_measurement_bundle(
+                    analysis,
+                    source_dir,
+                    require_fit_data=included_in_fit,
+                )
+            )
         return measurements
 
     def _dn_dict_from_params(self, params):
@@ -801,7 +841,37 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
                 "phase_pair_count": int(local_result["phase_pair_count"]),
             }
         )
+        if str(getattr(self, "INTENSITY_SCALE_PARAMETER", "")).strip() == "d_rel_abs":
+            payload["d_rel_abs"] = float(
+                np.sqrt(max(float(local_result["k_scale_small_angle"]), 0.0))
+            )
         return payload
+
+    def _global_result_identity(self, fit_source_dirs):
+        normalized = sorted(str(Path(path).resolve()) for path in fit_source_dirs)
+        digest = hashlib.sha256(
+            (self.__class__.__name__ + "\n" + "\n".join(normalized)).encode("utf-8")
+        ).hexdigest()[:16]
+        names = [Path(path).name or str(path) for path in normalized]
+        label = f"{len(names)} folder(s): " + ", ".join(names)
+        return f"{self.__class__.__name__}:{digest}", label
+
+    def _upsert_global_result_history(self, meta, global_fit_result):
+        history = [
+            dict(entry)
+            for entry in meta.get("n_fit_global_results", [])
+            if isinstance(entry, dict)
+        ]
+        result_id = str(global_fit_result["result_id"])
+        for index, entry in enumerate(history):
+            if str(entry.get("result_id") or "") == result_id:
+                history[index] = dict(global_fit_result)
+                break
+        else:
+            history.append(dict(global_fit_result))
+        meta["n_fit_global_results"] = history
+        meta["n_fit_active_result_id"] = result_id
+        return meta
 
     def _write_global_fit_metadata_to_group(
         self,
@@ -846,17 +916,23 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
                 local_fit_payload,
                 strategy_module=self.__class__.__module__,
                 strategy_display_name=self.__class__.__name__,
+                result_id=str(global_fit_result["result_id"]),
+                result_label=str(global_fit_result["result_label"]),
             )
+            meta = self._upsert_global_result_history(meta, global_fit_result)
             meta["n_fit_global_result"] = dict(global_fit_result)
             meta["n_fit_local_result"] = dict(local_result)
             meta["n_fit_group_results"] = [dict(entry) for entry in group_fit_results]
             meta["n_fit_thickness_group_results"] = [
                 dict(entry) for entry in global_fit_result.get("thickness_groups", [])
             ]
-            if len(group_source_dirs) > 1:
+            if group_source_dirs:
                 meta["n_fit_group_paths"] = group_source_dirs
+            excluded_dirs = list(global_fit_result.get("excluded_source_dirs", []))
+            if excluded_dirs:
+                meta["n_fit_excluded_paths"] = excluded_dirs
             else:
-                meta.pop("n_fit_group_paths", None)
+                meta.pop("n_fit_excluded_paths", None)
 
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -866,10 +942,16 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
     def fit_all(self):
         measurements = self._load_measurement_group()
         current = measurements[0]
-        thickness_groups, measurement_to_thickness_group = self._build_thickness_groups(measurements)
+        fit_measurements = [
+            measurement for measurement in measurements
+            if measurement.get("included_in_fit", True)
+        ]
+        if not fit_measurements:
+            raise ValueError("Select at least one folder to include in the global n fit.")
+        thickness_groups, measurement_to_thickness_group = self._build_thickness_groups(fit_measurements)
 
-        n_minima_residuals = sum(len(measurement["theta_min_deg"]) for measurement in measurements)
-        n_data_residuals = sum(len(measurement["phase_pairs_deg"]) for measurement in measurements)
+        n_minima_residuals = sum(len(measurement["theta_min_deg"]) for measurement in fit_measurements)
+        n_data_residuals = sum(len(measurement["phase_pairs_deg"]) for measurement in fit_measurements)
         n_total_residuals = n_minima_residuals + n_data_residuals + len(self.DN_PARAMETER_KEYS) + len(thickness_groups)
 
         def residual(params):
@@ -877,7 +959,7 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
             try:
                 dn_override = self._dn_dict_from_params(params[: len(self.DN_PARAMETER_KEYS)])
                 parts = []
-                for index, measurement in enumerate(measurements):
+                for index, measurement in enumerate(fit_measurements):
                     group_index = int(measurement_to_thickness_group[index])
                     dL_mm = float(params[len(self.DN_PARAMETER_KEYS) + group_index])
                     L_mm = float(thickness_groups[group_index]["L0_mm"]) + dL_mm
@@ -925,7 +1007,7 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
             )
 
         group_fit_results = []
-        for index, measurement in enumerate(measurements):
+        for index, measurement in enumerate(fit_measurements):
             thickness_group_index = int(measurement_to_thickness_group[index])
             thickness_group_result = thickness_group_results[thickness_group_index]
             initial_L_mm = float(thickness_group_result["L_mm"])
@@ -951,10 +1033,49 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
                     "L_refit_success": bool(np.isfinite(k_scale_small_angle)),
                     "minima_count": int(np.asarray(measurement["minima_idx"], dtype=int).size),
                     "phase_pair_count": int(len(measurement["phase_pairs_deg"])),
+                    "included_in_fit": True,
                 }
             )
 
-        current_L_mm = float(thickness_group_results[int(measurement_to_thickness_group[0])]["L_mm"])
+        included_sources = {
+            self._measurement_source_dir(measurement)
+            for measurement in fit_measurements
+        }
+        for measurement in measurements:
+            source_dir = self._measurement_source_dir(measurement)
+            if source_dir in included_sources:
+                continue
+            L_mm = float(measurement["L0_mm"])
+            k_scale_small_angle = self._fit_scale_at_L(measurement, L_mm, dn_override)
+            group_fit_results.append(
+                {
+                    "source_dir": measurement["source_dir"],
+                    "thickness_group_key": "",
+                    "thickness_group_index": -1,
+                    "sample": str(measurement["meta"].get("sample") or measurement["meta"].get("sample_id") or ""),
+                    "material": str(measurement["meta"].get("material") or ""),
+                    "crystal_orientation": measurement["meta"].get("crystal_orientation"),
+                    "rot_trans_axis": measurement["meta"].get("rot/trans_axis"),
+                    "input_polarization": measurement["meta"].get("input_polarization"),
+                    "detected_polarization": measurement["meta"].get("detected_polarization"),
+                    "L0_mm": L_mm,
+                    "L_initial_mm": L_mm,
+                    "L_mm": L_mm,
+                    "dL_mm": 0.0,
+                    "k_scale_small_angle": float(k_scale_small_angle),
+                    "L_refit_success": False,
+                    "minima_count": int(np.asarray(measurement["minima_idx"], dtype=int).size),
+                    "phase_pair_count": int(len(measurement["phase_pairs_deg"])),
+                    "included_in_fit": False,
+                }
+            )
+
+        local_by_source = {
+            str(entry.get("source_dir") or ""): entry
+            for entry in group_fit_results
+        }
+        current_local_result = local_by_source[self._measurement_source_dir(current)]
+        current_L_mm = float(current_local_result["L_mm"])
 
         current_theta = np.asarray(current["data"].get("position_centered", current["data"]["position"]), dtype=float)
         model, fit_aux = current["strategy"]._maker_fringes(
@@ -1008,12 +1129,14 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
             "residual_rms": residual_rms,
             "minima_count": int(current["minima_idx"].size),
             "n_count": int(n_data_residuals),
-            "group_size": int(len(measurements)),
+            "group_size": int(len(fit_measurements)),
             "thickness_group_count": int(len(thickness_group_results)),
             "phase_pair_count": int(n_data_residuals),
             "n_fit_cost": float(result.cost),
             "n_fit_success": bool(result.success),
         }
+        if str(getattr(self, "INTENSITY_SCALE_PARAMETER", "")).strip() == "d_rel_abs":
+            fit_result["d_rel_abs"] = float(np.sqrt(max(k_scale, 0.0)))
         fit_result.update(dn_override)
         for result_key, n_key in self.N_RESULT_KEYS:
             fit_result[result_key] = float(n_values[n_key])
@@ -1021,14 +1144,27 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
             fit_result["d_factor"] = self._coerce_scalar(fit_aux["d_factor"])
 
         group_source_dirs = [self._measurement_source_dir(measurement) for measurement in measurements]
+        fit_source_dirs = [self._measurement_source_dir(measurement) for measurement in fit_measurements]
+        excluded_source_dirs = [
+            self._measurement_source_dir(measurement)
+            for measurement in measurements
+            if not measurement.get("included_in_fit", True)
+        ]
+        result_id, result_label = self._global_result_identity(fit_source_dirs)
         global_fit_result = {
             "strategy": self.__class__.__name__,
             "strategy_module": self.__class__.__module__,
-            "group_id": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "result_id": result_id,
+            "result_label": result_label,
+            "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "group_source_dirs": group_source_dirs,
-            "group_size": int(len(measurements)),
+            "fit_source_dirs": fit_source_dirs,
+            "excluded_source_dirs": excluded_source_dirs,
+            "group_size": int(len(fit_measurements)),
+            "application_group_size": int(len(measurements)),
             "thickness_group_count": int(len(thickness_group_results)),
             "thickness_groups": [dict(entry) for entry in thickness_group_results],
+            "group_results": [dict(entry) for entry in group_fit_results],
             "n_count": int(n_data_residuals),
             "phase_pair_count": int(n_data_residuals),
             "n_fit_cost": float(result.cost),
@@ -1044,7 +1180,15 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
             fit_result,
             strategy_module=self.__class__.__module__,
             strategy_display_name=self.__class__.__name__,
+            result_id=result_id,
+            result_label=result_label,
         )
+        self.analysis.meta = self._upsert_global_result_history(
+            self.analysis.meta,
+            global_fit_result,
+        )
+        self.analysis.meta["n_fit_global_result"] = dict(global_fit_result)
+        self.analysis.meta["n_fit_local_result"] = dict(current_local_result)
         self.analysis.meta["n_fit_group_results"] = group_fit_results
         self.analysis.meta["n_fit_thickness_group_results"] = thickness_group_results
 
@@ -1062,6 +1206,20 @@ class Bechthold1977GlobalNFitStrategy(Bechthold1977Strategy):
         )
 
         return fit_result
+
+
+class Bechthold1977GlobalNFitStrategy(GlobalNFitMixin, Bechthold1977Strategy):
+    """Global refractive-index fit using the Bechthold 1977 model."""
+
+    def _make_measurement_strategy(self, analysis):
+        return Bechthold1977Strategy(analysis)
+
+    def _validate_measurement_strategy(self, strategy, meta):
+        geometry_key = strategy._geometry_key(meta)
+        if geometry_key not in strategy.GEOMETRY_FUNCTIONS:
+            raise FittingConfigurationError(
+                f"This geometry is not supported for Bechthold global n fit: {geometry_key}"
+            )
 
 
 class Bechthold1977WedgeStrategy(Bechthold1977Strategy, BaseWedgeStrategy):

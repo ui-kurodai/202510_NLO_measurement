@@ -270,16 +270,18 @@ class ComparisonWidget(QWidget):
         self.fixed_table.verticalHeader().setSectionsMovable(True)
         self.fixed_table.verticalHeader().sectionMoved.connect(self._sync_row_move_from_fixed)
 
-        self.table = DraggableTableWidget(0, 11)
+        self.table = DraggableTableWidget(0, 13)
         self.table.setHorizontalHeaderLabels(
             [
                 "Reference",
                 "Target sample",
                 "Filter diff",
-                "Peak ref",
-                "Peak target",
+                "Fit scale ref",
+                "Fit scale target",
                 "d_factor ref",
                 "d_factor target",
+                "Corrected d scale ref",
+                "Corrected d scale target",
                 "I_target/I_ref",
                 "d_target/d_ref",
                 "calculated_d",
@@ -535,6 +537,8 @@ class ComparisonWidget(QWidget):
                 self._fmt(result.peak_target),
                 self._fmt(result.d_factor_ref),
                 self._fmt(result.d_factor_target),
+                self._fmt(result.d_scale_ref),
+                self._fmt(result.d_scale_target),
                 self._fmt(result.intensity_ratio),
                 self._fmt(result.d_ratio),
                 self._fmt(result.calculated_d),
@@ -623,7 +627,11 @@ class ComparisonWidget(QWidget):
         return f"{value:.6g}"
 
     def _strategy_text(self, result: ComparisonResult) -> str:
-        return result.target_strategy or "(legacy)"
+        strategy = result.target_strategy or "(legacy)"
+        label = result.target_result_label.strip()
+        if label and label != strategy:
+            return f"{strategy} | {label}"
+        return strategy
 
     def _select_target_directories_native(self, start_dir: str) -> list[Path]:
         try:
@@ -683,7 +691,9 @@ class ComparisonWidget(QWidget):
 
     def _status_text(self, result: ComparisonResult, enabled: bool) -> str:
         prefix = "" if enabled else "[hidden] "
-        return prefix + result.status_text
+        mode = "Braun pseudo d" if result.calculation_mode == "braun_pseudo_d" else ""
+        status = result.status_text
+        return prefix + " | ".join(part for part in (mode, status) if part)
 
     def _reconcile_manual_row_order(self, results: list[ComparisonResult]) -> None:
         seen_keys = {result.key for result in results}
