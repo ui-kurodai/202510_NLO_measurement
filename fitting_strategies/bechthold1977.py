@@ -10,7 +10,7 @@ from scipy.signal import argrelextrema
 from fitting_strategies.base import BaseWedgeStrategy
 from fitting_strategies.base import FittingConfigurationError
 from fitting_strategies.jerphagnon1970 import Jerphagnon1970Strategy
-from fitting_results import upsert_fitting_result
+from fitting_results import extract_fit_payload, upsert_fitting_result
 
 # self made database
 from crystaldatabase import CRYSTALS
@@ -149,6 +149,34 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
             int(round(meta["input_polarization"])),
             int(round(meta["detected_polarization"])),
         )
+
+    def _delta_n_axis_roles(self, meta):
+        cut_axis = self.normalize_axis(meta["crystal_orientation"])
+        rot_axis = self.normalize_axis(meta["rot/trans_axis"])
+        third_axis = self._third_axis(cut_axis, rot_axis)
+        axis_label = self.BIAXIAL_N
+
+        key = self._geometry_key(meta)
+        exp_config = self.GEOMETRY_FUNCTIONS.get(key)
+        if exp_config in ("7", "9"):
+            return {
+                "w_axes": (axis_label[rot_axis],),
+                "two_w_axes": (axis_label[third_axis],),
+                "weight": 2.0,
+            }
+        if exp_config in ("11", "12"):
+            return {
+                "w_axes": (axis_label[rot_axis],),
+                "two_w_axes": (axis_label[rot_axis],),
+                "weight": 4.0,
+            }
+        if exp_config in ("13", "15"):
+            return {
+                "w_axes": (axis_label[third_axis], axis_label[rot_axis]),
+                "two_w_axes": (axis_label[rot_axis],),
+                "weight": 1.0,
+            }
+        return super()._delta_n_axis_roles(meta)
 
     def _maker_fringes(self, override: dict = {}, envelope=False, return_aux=False):
         
@@ -627,6 +655,396 @@ class GlobalNFitMixin:
             for index, key in enumerate(self.DN_PARAMETER_KEYS)
         }
 
+    def _measurement_delta_n_roles(self, measurement):
+        strategy = measurement.get("strategy")
+        meta = measurement.get("meta") or {}
+        if strategy is not None and hasattr(strategy, "_delta_n_axis_roles"):
+            roles = strategy._delta_n_axis_roles(meta)
+        else:
+            roles = {
+                "w_axes": ("a", "b", "c"),
+                "two_w_axes": ("a", "b", "c"),
+                "weight": 1.0,
+            }
+
+        def clean_axes(values):
+            axes = []
+            for axis in values or ():
+                axis = str(axis)
+                if axis in ("a", "b", "c") and axis not in axes:
+                    axes.append(axis)
+            return tuple(axes)
+
+        w_axes = clean_axes(roles.get("w_axes"))
+        two_w_axes = clean_axes(roles.get("two_w_axes"))
+        if not w_axes:
+            w_axes = ("a", "b", "c")
+        if not two_w_axes:
+            two_w_axes = ("a", "b", "c")
+        try:
+            weight = float(roles.get("weight", 1.0))
+        except Exception:
+            weight = 1.0
+        if not np.isfinite(weight) or weight <= 0.0:
+            weight = 1.0
+        return {
+            "w_axes": w_axes,
+            "two_w_axes": two_w_axes,
+            "weight": weight,
+        }
+
+    def _delta_n_seed_for_measurement(self, measurement):
+        strategy = measurement.get("strategy")
+        meta = measurement.get("meta") or {}
+        strategy_name = strategy.__class__.__name__ if strategy is not None else None
+        fit_payload = extract_fit_payload(meta, strategy_name)
+        value = self._coerce_scalar(fit_payload.get("delta_n"))
+        return float(value) if np.isfinite(value) else 0.0
+
+    def _stage1_dn_override(self, common_offset, delta_n_seed, roles):
+        common_offset = float(common_offset)
+        delta_n_seed = float(delta_n_seed)
+        dn_override = {key: 0.0 for key in self.DN_PARAMETER_KEYS}
+        for axis in roles["w_axes"]:
+            dn_override[f"dn_w_{axis}"] = common_offset
+        for axis in roles["two_w_axes"]:
+            dn_override[f"dn_2w_{axis}"] = common_offset + delta_n_seed
+        return dn_override
+
+    def _weighted_dn_seed_from_measurements(self, fit_measurements, common_offsets, delta_n_seeds):
+        sums = {key: 0.0 for key in self.DN_PARAMETER_KEYS}
+        weights = {key: 0.0 for key in self.DN_PARAMETER_KEYS}
+        common_offsets = np.asarray(common_offsets, dtype=float)
+        delta_n_seeds = np.asarray(delta_n_seeds, dtype=float)
+
+        for index, measurement in enumerate(fit_measurements):
+            roles = self._measurement_delta_n_roles(measurement)
+            weight = float(roles["weight"])
+            common_offset = float(common_offsets[index])
+            two_w_offset = common_offset + float(delta_n_seeds[index])
+            for axis in roles["w_axes"]:
+                key = f"dn_w_{axis}"
+                sums[key] += weight * common_offset
+                weights[key] += weight
+            for axis in roles["two_w_axes"]:
+                key = f"dn_2w_{axis}"
+                sums[key] += weight * two_w_offset
+                weights[key] += weight
+
+        fallback_w = float(np.mean(common_offsets)) if common_offsets.size else 0.0
+        fallback_2w = float(np.mean(common_offsets + delta_n_seeds)) if common_offsets.size else 0.0
+        dn_seed = {}
+        for key in self.DN_PARAMETER_KEYS:
+            if weights[key] > 0.0:
+                dn_seed[key] = float(sums[key] / weights[key])
+            elif key.startswith("dn_w_"):
+                dn_seed[key] = fallback_w
+            else:
+                dn_seed[key] = fallback_2w
+        return dn_seed
+
+    def _fit_stage1_difference_offsets(
+        self,
+        fit_measurements,
+        thickness_groups,
+        measurement_to_thickness_group,
+    ):
+        n_measurements = len(fit_measurements)
+        n_groups = len(thickness_groups)
+        delta_n_seeds = np.asarray(
+            [self._delta_n_seed_for_measurement(measurement) for measurement in fit_measurements],
+            dtype=float,
+        )
+        n_minima_residuals = sum(len(measurement["theta_min_deg"]) for measurement in fit_measurements)
+        n_data_residuals = sum(len(measurement["phase_pairs_deg"]) for measurement in fit_measurements)
+        n_total = n_minima_residuals + n_data_residuals + n_measurements + n_groups
+
+        def residual(params):
+            params = np.asarray(params, dtype=float)
+            try:
+                common_offsets = params[:n_measurements]
+                dL_params = params[n_measurements:]
+                parts = []
+                for index, measurement in enumerate(fit_measurements):
+                    group_index = int(measurement_to_thickness_group[index])
+                    L_mm = float(thickness_groups[group_index]["L0_mm"]) + float(dL_params[group_index])
+                    roles = self._measurement_delta_n_roles(measurement)
+                    dn_override = self._stage1_dn_override(common_offsets[index], delta_n_seeds[index], roles)
+                    parts.append(self._minima_phase_residuals(measurement, L_mm, dn_override))
+                    parts.append(self._phase_pair_residuals(measurement, L_mm, dn_override))
+                parts.append(common_offsets / self.DN_PRIOR_SIGMA)
+                parts.append(dL_params / self.L_PRIOR_SIGMA_MM)
+                out = np.concatenate(parts).astype(float, copy=False)
+                if out.size != n_total:
+                    raise ValueError("Unexpected stage 1 residual vector size.")
+                return np.nan_to_num(out, nan=1e6, posinf=1e6, neginf=-1e6)
+            except Exception:
+                return np.full(n_total, 1e6, dtype=float)
+
+        x0 = np.zeros(n_measurements + n_groups, dtype=float)
+        for group_index, group in enumerate(thickness_groups):
+            saved_offsets = []
+            for index, measurement in enumerate(fit_measurements):
+                if int(measurement_to_thickness_group[index]) != group_index:
+                    continue
+                strategy_name = measurement["strategy"].__class__.__name__
+                fit_payload = extract_fit_payload(measurement["meta"], strategy_name)
+                saved_L = self._coerce_scalar(fit_payload.get("L_mm"))
+                if np.isfinite(saved_L):
+                    saved_offsets.append(float(saved_L) - float(group["L0_mm"]))
+            if saved_offsets:
+                x0[n_measurements + group_index] = float(np.clip(np.mean(saved_offsets), -self.L_PRIOR_SIGMA_MM, self.L_PRIOR_SIGMA_MM))
+
+        lower = np.concatenate(
+            (
+                np.full(n_measurements, -self.DN_PRIOR_SIGMA, dtype=float),
+                np.full(n_groups, -self.L_PRIOR_SIGMA_MM, dtype=float),
+            )
+        )
+        upper = np.concatenate(
+            (
+                np.full(n_measurements, self.DN_PRIOR_SIGMA, dtype=float),
+                np.full(n_groups, self.L_PRIOR_SIGMA_MM, dtype=float),
+            )
+        )
+        result = least_squares(residual, x0=x0, bounds=(lower, upper))
+        common_offsets = np.asarray(result.x[:n_measurements], dtype=float)
+        dL_params = np.asarray(result.x[n_measurements:], dtype=float)
+        dn_seed = self._weighted_dn_seed_from_measurements(
+            fit_measurements,
+            common_offsets,
+            delta_n_seeds,
+        )
+        x0_full = np.concatenate(
+            (
+                np.asarray([dn_seed[key] for key in self.DN_PARAMETER_KEYS], dtype=float),
+                dL_params,
+            )
+        )
+        return {
+            "result": result,
+            "delta_n_seeds": delta_n_seeds,
+            "common_offsets": common_offsets,
+            "dL_params": dL_params,
+            "dn_seed": dn_seed,
+            "x0_full": x0_full,
+        }
+
+    def _landscape_candidates_for_measurement(self, measurement, max_candidates=5):
+        strategy = measurement["strategy"]
+        meta = measurement["meta"]
+        data = measurement["data"]
+        pos = np.asarray(data.get("position_centered", data["position"]), dtype=float)
+        intensity = np.asarray(data.get("offset_corrected", data["intensity_corrected"]), dtype=float)
+        finite = np.isfinite(pos) & np.isfinite(intensity)
+        if np.count_nonzero(finite) < 3:
+            return []
+
+        strategy_name = strategy.__class__.__name__
+        fit_payload = extract_fit_payload(meta, strategy_name)
+        L_center = self._coerce_scalar(fit_payload.get("L_mm"))
+        if not np.isfinite(L_center):
+            L_center = float(measurement["L0_mm"])
+        delta_center = self._coerce_scalar(fit_payload.get("delta_n"))
+        if not np.isfinite(delta_center):
+            delta_center = 0.0
+
+        L_grid = np.linspace(float(L_center) - self.L_PRIOR_SIGMA_MM, float(L_center) + self.L_PRIOR_SIGMA_MM, 41)
+        delta_grid = np.linspace(float(delta_center) - 0.001, float(delta_center) + 0.001, 41)
+        cost = np.full((delta_grid.size, L_grid.size), np.nan, dtype=float)
+        x_fit = pos[finite]
+        y_fit = intensity[finite]
+
+        for i, delta_n in enumerate(delta_grid):
+            dn_override = strategy._delta_n_override(meta, float(delta_n))
+            for j, L_mm in enumerate(L_grid):
+                try:
+                    model = np.asarray(
+                        strategy._maker_fringes(
+                            override={
+                                "meta": meta,
+                                "data": data,
+                                "theta_deg": x_fit,
+                                "L": float(L_mm),
+                                "dn_override": dn_override,
+                            }
+                        ),
+                        dtype=float,
+                    )
+                    valid = np.isfinite(model) & np.isfinite(y_fit)
+                    if np.count_nonzero(valid) < 3:
+                        continue
+                    denom = float(np.dot(model[valid], model[valid]))
+                    if denom <= 0.0:
+                        continue
+                    scale = float(np.dot(model[valid], y_fit[valid]) / denom)
+                    residual = scale * model[valid] - y_fit[valid]
+                    cost[i, j] = float(np.dot(residual, residual))
+                except Exception:
+                    continue
+
+        finite_cost = np.isfinite(cost)
+        if not np.any(finite_cost):
+            return []
+
+        candidates = []
+        for i in range(1, cost.shape[0] - 1):
+            for j in range(1, cost.shape[1] - 1):
+                value = cost[i, j]
+                if not np.isfinite(value):
+                    continue
+                window = cost[i - 1 : i + 2, j - 1 : j + 2]
+                finite_window = window[np.isfinite(window)]
+                if finite_window.size and value <= float(np.min(finite_window)):
+                    candidates.append((float(value), float(L_grid[j]), float(delta_grid[i])))
+        if not candidates:
+            coords = np.argwhere(finite_cost)
+            order = np.argsort(cost[finite_cost])[:max_candidates]
+            candidates = [
+                (float(cost[tuple(coords[index])]), float(L_grid[coords[index][1]]), float(delta_grid[coords[index][0]]))
+                for index in order
+            ]
+        candidate_records = []
+        if candidates:
+            coords_norm = np.asarray(
+                [
+                    (
+                        (float(L_mm) - float(L_grid[0])) / max(float(L_grid[-1] - L_grid[0]), 1e-12),
+                        (float(delta_n) - float(delta_grid[0])) / max(float(delta_grid[-1] - delta_grid[0]), 1e-12),
+                    )
+                    for _cost_value, L_mm, delta_n in candidates
+                ],
+                dtype=float,
+            )
+            cost_values = np.asarray([item[0] for item in candidates], dtype=float)
+            min_cost = float(np.nanmin(cost_values)) if cost_values.size else 0.0
+            spread = float(np.nanpercentile(cost_values, 90) - min_cost) if cost_values.size >= 3 else float(np.nanmax(cost_values) - min_cost)
+            spread = max(spread, 1e-12)
+            for index, (cost_value, L_mm, delta_n) in enumerate(candidates):
+                if len(candidates) <= 1:
+                    nearest_distance = float("inf")
+                    neighbor_count = 0
+                else:
+                    distances = np.sqrt(np.sum((coords_norm - coords_norm[index]) ** 2, axis=1))
+                    distances[index] = np.inf
+                    nearest_distance = float(np.min(distances))
+                    neighbor_count = int(np.count_nonzero(distances < 0.12))
+                candidate_records.append(
+                    {
+                        "cost": float(cost_value),
+                        "L_mm": float(L_mm),
+                        "dL_mm": float(L_mm) - float(measurement["L0_mm"]),
+                        "delta_n": float(delta_n),
+                        "neighbor_count": neighbor_count,
+                        "nearest_neighbor_distance": nearest_distance,
+                        "relative_cost": float((float(cost_value) - min_cost) / spread),
+                    }
+                )
+        candidate_records = sorted(
+            candidate_records,
+            key=lambda item: (
+                int(item["neighbor_count"]),
+                -float(item["nearest_neighbor_distance"]) if np.isfinite(item["nearest_neighbor_distance"]) else -1e9,
+                float(item["relative_cost"]),
+                float(item["cost"]),
+            ),
+        )[:max_candidates]
+        return candidate_records
+
+    def _stage2_multistart_candidates(
+        self,
+        x0_zero,
+        x0_stage1,
+        lower,
+        upper,
+        fit_measurements,
+        thickness_groups,
+        measurement_to_thickness_group,
+        stage1,
+    ):
+        x0_zero = np.asarray(x0_zero, dtype=float)
+        x0_stage1 = np.asarray(x0_stage1, dtype=float)
+        lower = np.asarray(lower, dtype=float)
+        upper = np.asarray(upper, dtype=float)
+        candidates = []
+        seen = set()
+
+        def add(name, vector):
+            vector = np.clip(np.asarray(vector, dtype=float), lower, upper)
+            key = tuple(np.round(vector, 12))
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append((name, vector))
+
+        add("zero", x0_zero)
+        add("stage1", x0_stage1)
+
+        landscape_by_measurement = [
+            self._landscape_candidates_for_measurement(measurement)
+            for measurement in fit_measurements
+        ]
+        best_candidate_pairs = [
+            (measurement_index, items[0])
+            for measurement_index, items in enumerate(landscape_by_measurement)
+            if items
+        ]
+        common_offset = float(np.mean(stage1["common_offsets"])) if len(stage1["common_offsets"]) else 0.0
+
+        def apply_measurement_delta_seed(vector, measurement_index, delta_n):
+            roles = self._measurement_delta_n_roles(fit_measurements[measurement_index])
+            if len(stage1["common_offsets"]) > measurement_index:
+                measurement_offset = float(stage1["common_offsets"][measurement_index])
+            else:
+                measurement_offset = common_offset
+            for axis in roles["w_axes"]:
+                vector[self.DN_PARAMETER_KEYS.index(f"dn_w_{axis}")] = measurement_offset
+            for axis in roles["two_w_axes"]:
+                vector[self.DN_PARAMETER_KEYS.index(f"dn_2w_{axis}")] = measurement_offset + float(delta_n)
+
+        if best_candidate_pairs:
+            vector = np.array(x0_stage1, dtype=float, copy=True)
+            sums = {key: 0.0 for key in self.DN_PARAMETER_KEYS}
+            weights = {key: 0.0 for key in self.DN_PARAMETER_KEYS}
+            for measurement_index, item in best_candidate_pairs:
+                roles = self._measurement_delta_n_roles(fit_measurements[measurement_index])
+                weight = float(roles["weight"])
+                if len(stage1["common_offsets"]) > measurement_index:
+                    measurement_offset = float(stage1["common_offsets"][measurement_index])
+                else:
+                    measurement_offset = common_offset
+                two_w_offset = measurement_offset + float(item["delta_n"])
+                for axis in roles["w_axes"]:
+                    key = f"dn_w_{axis}"
+                    sums[key] += weight * measurement_offset
+                    weights[key] += weight
+                for axis in roles["two_w_axes"]:
+                    key = f"dn_2w_{axis}"
+                    sums[key] += weight * two_w_offset
+                    weights[key] += weight
+            for index, key in enumerate(self.DN_PARAMETER_KEYS):
+                if weights[key] > 0.0:
+                    vector[index] = float(sums[key] / weights[key])
+            for group_index, group in enumerate(thickness_groups):
+                group_dL = [
+                    item["L_mm"] - float(group["L0_mm"])
+                    for measurement_index, item in best_candidate_pairs
+                    if int(measurement_to_thickness_group[measurement_index]) == group_index
+                ]
+                if group_dL:
+                    vector[len(self.DN_PARAMETER_KEYS) + group_index] = float(np.mean(group_dL))
+            add("landscape:best-mean", vector)
+
+        for measurement_index, items in enumerate(landscape_by_measurement):
+            group_index = int(measurement_to_thickness_group[measurement_index])
+            for candidate_index, item in enumerate(items[:5]):
+                vector = np.array(x0_stage1, dtype=float, copy=True)
+                apply_measurement_delta_seed(vector, measurement_index, item["delta_n"])
+                vector[len(self.DN_PARAMETER_KEYS) + group_index] = float(item["dL_mm"])
+                add(f"landscape:m{measurement_index}:c{candidate_index}", vector)
+
+        return candidates
+
     def _phase_pair_residuals(self, measurement, L_mm, dn_override):
         theta_pairs_deg = np.asarray(measurement["phase_pairs_deg"], dtype=float)
         theta_eval = theta_pairs_deg.reshape(-1)
@@ -825,7 +1243,18 @@ class GlobalNFitMixin:
         for key, value in global_fit_result.items():
             if key.startswith("dn_") or key.startswith("n_"):
                 payload[key] = value
-        for key in ("group_size", "thickness_group_count", "n_fit_cost", "n_fit_success"):
+        for key in (
+            "group_size",
+            "thickness_group_count",
+            "n_fit_cost",
+            "n_fit_success",
+            "n_fit_stage1_cost",
+            "n_fit_stage1_success",
+            "n_fit_stage1_mean_delta_n_seed",
+            "n_fit_stage1_mean_common_offset",
+            "n_fit_stage2_start",
+            "n_fit_stage2_start_count",
+        ):
             if key in global_fit_result:
                 payload[key] = global_fit_result[key]
 
@@ -953,6 +1382,11 @@ class GlobalNFitMixin:
         n_minima_residuals = sum(len(measurement["theta_min_deg"]) for measurement in fit_measurements)
         n_data_residuals = sum(len(measurement["phase_pairs_deg"]) for measurement in fit_measurements)
         n_total_residuals = n_minima_residuals + n_data_residuals + len(self.DN_PARAMETER_KEYS) + len(thickness_groups)
+        stage1 = self._fit_stage1_difference_offsets(
+            fit_measurements,
+            thickness_groups,
+            measurement_to_thickness_group,
+        )
 
         def residual(params):
             params = np.asarray(params, dtype=float)
@@ -976,17 +1410,38 @@ class GlobalNFitMixin:
             except Exception:
                 return np.full(n_total_residuals, 1e6, dtype=float)
 
-        x0 = np.zeros(len(self.DN_PARAMETER_KEYS) + len(thickness_groups), dtype=float)
         bounds_dn = np.full(len(self.DN_PARAMETER_KEYS), self.DN_PRIOR_SIGMA, dtype=float)
         bounds_L = np.full(len(thickness_groups), self.L_PRIOR_SIGMA_MM, dtype=float)
         lower = np.concatenate((-bounds_dn, -bounds_L))
         upper = np.concatenate((bounds_dn, bounds_L))
 
-        result = least_squares(
-            residual,
-            x0=x0,
-            bounds=(lower, upper),
+        x0_zero = np.zeros(len(self.DN_PARAMETER_KEYS) + len(thickness_groups), dtype=float)
+        x0_stage1 = np.asarray(stage1["x0_full"], dtype=float)
+        x0_stage1 = np.clip(x0_stage1, lower, upper)
+        starts = self._stage2_multistart_candidates(
+            x0_zero,
+            x0_stage1,
+            lower,
+            upper,
+            fit_measurements,
+            thickness_groups,
+            measurement_to_thickness_group,
+            stage1,
         )
+
+        fit_attempts = []
+        for start_name, x0 in starts:
+            fit_attempts.append(
+                (
+                    start_name,
+                    least_squares(
+                        residual,
+                        x0=x0,
+                        bounds=(lower, upper),
+                    ),
+                )
+            )
+        start_name, result = min(fit_attempts, key=lambda item: float(item[1].cost))
 
         dn_override = self._dn_dict_from_params(result.x[: len(self.DN_PARAMETER_KEYS)])
         thickness_group_results = []
@@ -1134,6 +1589,12 @@ class GlobalNFitMixin:
             "phase_pair_count": int(n_data_residuals),
             "n_fit_cost": float(result.cost),
             "n_fit_success": bool(result.success),
+            "n_fit_stage1_cost": float(stage1["result"].cost),
+            "n_fit_stage1_success": bool(stage1["result"].success),
+            "n_fit_stage1_mean_delta_n_seed": float(np.mean(stage1["delta_n_seeds"])) if len(stage1["delta_n_seeds"]) else 0.0,
+            "n_fit_stage1_mean_common_offset": float(np.mean(stage1["common_offsets"])) if len(stage1["common_offsets"]) else 0.0,
+            "n_fit_stage2_start": str(start_name),
+            "n_fit_stage2_start_count": int(len(starts)),
         }
         if str(getattr(self, "INTENSITY_SCALE_PARAMETER", "")).strip() == "d_rel_abs":
             fit_result["d_rel_abs"] = float(np.sqrt(max(k_scale, 0.0)))
@@ -1169,6 +1630,12 @@ class GlobalNFitMixin:
             "phase_pair_count": int(n_data_residuals),
             "n_fit_cost": float(result.cost),
             "n_fit_success": bool(result.success),
+            "n_fit_stage1_cost": float(stage1["result"].cost),
+            "n_fit_stage1_success": bool(stage1["result"].success),
+            "n_fit_stage1_mean_delta_n_seed": float(np.mean(stage1["delta_n_seeds"])) if len(stage1["delta_n_seeds"]) else 0.0,
+            "n_fit_stage1_mean_common_offset": float(np.mean(stage1["common_offsets"])) if len(stage1["common_offsets"]) else 0.0,
+            "n_fit_stage2_start": str(start_name),
+            "n_fit_stage2_start_count": int(len(starts)),
         }
         for key, value in fit_result.items():
             if key.startswith("dn_") or key.startswith("n_"):

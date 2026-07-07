@@ -166,7 +166,7 @@ class FittingAnalysisWidget(QWidget):
         self._filter_catalog_map: Dict[str, Dict[str, Any]] = {}
         self._plot_settings: Dict[str, PlotSettings] = {
             key: self._default_plot_settings(key)
-            for key in ("fit", "resid", "centering", "extrema", "lc")
+            for key in ("fit", "resid", "centering", "extrema", "lc", "n_landscape")
         }
 
         # Build UI
@@ -267,6 +267,11 @@ class FittingAnalysisWidget(QWidget):
             "cmb_lc_source",
             "lbl_lc_hint",
             "canvas_lc",
+            "canvas_n_landscape",
+            "lbl_n_landscape_solutions",
+            "sb_n_landscape_l_points",
+            "sb_n_landscape_delta_points",
+            "plot_setting_buttons",
             "btn_plot_settings",
             "btn_save_current_plot",
             "btn_copy_current_plot",
@@ -816,6 +821,8 @@ class FittingAnalysisWidget(QWidget):
         self.beam_profile_combo.currentIndexChanged.connect(self._apply_selected_beam_profile)
         self.filter_preset_combo.activated.connect(self._filter_preset_activated)
         self.btn_plot_settings.clicked.connect(self._edit_current_plot_settings)
+        for plot_key, button in getattr(self, "plot_setting_buttons", {}).items():
+            button.clicked.connect(lambda _checked=False, key=plot_key: self._edit_current_plot_settings(key))
         self.btn_save_current_plot.clicked.connect(self._save_current_plot_clicked)
         self.btn_copy_current_plot.clicked.connect(self._copy_current_plot_clicked)
         self.btn_reset_manual.clicked.connect(self._reset_manual_controls_clicked)
@@ -826,6 +833,8 @@ class FittingAnalysisWidget(QWidget):
         self.cmb_strategy.currentIndexChanged.connect(self._picker_strategy_changed)
         self.btn_add_strategy.clicked.connect(self._add_strategy_from_picker)
         self.cmb_lc_source.currentIndexChanged.connect(lambda *_args: self._render_analysis_plots())
+        self.sb_n_landscape_l_points.valueChanged.connect(lambda *_args: self._render_analysis_plots())
+        self.sb_n_landscape_delta_points.valueChanged.connect(lambda *_args: self._render_analysis_plots())
         self.plot_tabs.currentChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_data.stateChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_fitting.stateChanged.connect(lambda *_args: self._render_analysis_plots())
@@ -1896,6 +1905,12 @@ class FittingAnalysisWidget(QWidget):
             ("phase_pair_count", "Phase pair count"),
             ("n_fit_cost", "n-fit cost"),
             ("n_fit_success", "n-fit success"),
+            ("n_fit_stage1_cost", "n-fit stage 1 cost"),
+            ("n_fit_stage1_success", "n-fit stage 1 success"),
+            ("n_fit_stage1_mean_delta_n_seed", "n-fit stage 1 mean \u0394n seed"),
+            ("n_fit_stage1_mean_common_offset", "n-fit stage 1 mean offset"),
+            ("n_fit_stage2_start", "n-fit stage 2 start"),
+            ("n_fit_stage2_start_count", "n-fit stage 2 starts"),
             ("dn_w_a", "dn w a"),
             ("dn_w_b", "dn w b"),
             ("dn_w_c", "dn w c"),
@@ -2261,6 +2276,7 @@ class FittingAnalysisWidget(QWidget):
             "centering": 260,
             "extrema": 280,
             "lc": 260,
+            "n_landscape": 320,
         }.get(plot_key, 280)
 
     def _canvas_supports_top_axis(self, plot_key: str) -> bool:
@@ -2338,12 +2354,15 @@ class FittingAnalysisWidget(QWidget):
             kwargs["linestyle"] = "none"
         return kwargs
 
-    def _edit_current_plot_settings(self):
-        plot_key = self._current_plot_key()
+    def _edit_current_plot_settings(self, plot_key: Optional[str] = None):
+        plot_key = plot_key or self._current_plot_key()
         settings = self._plot_settings[plot_key]
 
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Plot Settings: {self.plot_tabs.tabText(self.plot_tabs.currentIndex())}")
+        page = self._plot_pages.get(plot_key)
+        tab_index = self.plot_tabs.indexOf(page) if page is not None else self.plot_tabs.currentIndex()
+        tab_label = self.plot_tabs.tabText(tab_index) if tab_index >= 0 else plot_key
+        dialog.setWindowTitle(f"Plot Settings: {tab_label}")
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
 
@@ -2491,6 +2510,7 @@ class FittingAnalysisWidget(QWidget):
             "centering": "centering_cost.png",
             "extrema": "extrema.png",
             "lc": "lc_pairs.png",
+            "n_landscape": "L_delta_n_cost.png",
         }[plot_key]
         path, _selected = QFileDialog.getSaveFileName(
             self,
@@ -2597,6 +2617,12 @@ class FittingAnalysisWidget(QWidget):
             peak_span = max(5.0 * peak_std, max(y_max, auto_peak) * 0.1)
         else:
             peak_span = max(abs(auto_peak) * 0.5, y_max * 0.5, 0.5)
+        delta_n = self._safe_float(saved_fit.get("delta_n"), 0.0)
+        delta_n_std = self._safe_float(saved_fit.get("delta_n_std"))
+        if np.isfinite(delta_n_std) and delta_n_std > 0:
+            delta_n_span = max(5.0 * delta_n_std, 0.0001)
+        else:
+            delta_n_span = 0.001
         centering_value = self._safe_float(saved_fit.get("centering_pos"))
         if not np.isfinite(centering_value):
             centering_info = context.get("centering_info")
@@ -2607,6 +2633,7 @@ class FittingAnalysisWidget(QWidget):
 
         self._set_manual_control("L", auto_L - l_span, auto_L + l_span, auto_L)
         self._set_manual_control("peak", 0.0, max(auto_peak + peak_span, peak_span), max(auto_peak, 0.0))
+        self._set_manual_control("delta_n", delta_n - delta_n_span, delta_n + delta_n_span, delta_n)
         self.sb_manual_centering.setValue(float(centering_value))
 
     def _set_manual_control(self, key: str, minimum: float, maximum: float, value: float):
@@ -2792,9 +2819,12 @@ class FittingAnalysisWidget(QWidget):
         x, y, _prepared = self._current_display_xy()
         L_value = self._manual_value("L")
         peak_value = self._manual_value("peak")
-        dn_override = self._dn_override_from_saved_fit(
-            context.get("saved_fit", {}) if isinstance(context.get("saved_fit"), dict) else {}
-        )
+        delta_n = self._manual_value("delta_n")
+        dn_override = self._dn_override_from_delta_n(strategy, delta_n)
+        if not dn_override:
+            dn_override = self._dn_override_from_saved_fit(
+                context.get("saved_fit", {}) if isinstance(context.get("saved_fit"), dict) else {}
+            )
 
         try:
             cache_key = self._live_curve_cache_key(strategy, L_value, x, dn_override or None)
@@ -2833,6 +2863,8 @@ class FittingAnalysisWidget(QWidget):
             "residual": residual,
             "L_value": L_value,
             "peak_value": peak_value,
+            "delta_n": delta_n,
+            "dn_override": dn_override,
             "intensity_scale": intensity_scale,
             "centering_value": self._manual_centering_value(),
             "fit_curve_raw": fit_curve + float(context.get("offset", 0.0)),
@@ -2863,6 +2895,9 @@ class FittingAnalysisWidget(QWidget):
         if not np.isfinite(L_value):
             L_value = self._manual_value("L")
         peak_value = self._manual_value("peak")
+        delta_n = self._safe_float((context.get("saved_fit") or {}).get("delta_n"))
+        if not np.isfinite(delta_n):
+            delta_n = self._manual_value("delta_n")
 
         return {
             "x": x,
@@ -2873,6 +2908,8 @@ class FittingAnalysisWidget(QWidget):
             "residual": fit_curve - y,
             "L_value": L_value,
             "peak_value": peak_value,
+            "delta_n": delta_n,
+            "dn_override": self._dn_override_from_delta_n(context.get("strategy"), delta_n),
             "intensity_scale": peak_value,
             "centering_value": self._manual_centering_value(),
             "fit_curve_raw": fit_raw,
@@ -2890,6 +2927,12 @@ class FittingAnalysisWidget(QWidget):
         dn_override = self._dn_override_from_saved_fit(
             context.get("saved_fit", {}) if isinstance(context.get("saved_fit"), dict) else {}
         )
+        delta_n = self._manual_value("delta_n") if "delta_n" in self._manual_controls else self._safe_float(
+            (context.get("saved_fit") or {}).get("delta_n"), 0.0
+        )
+        delta_override = self._dn_override_from_delta_n(strategy, delta_n)
+        if delta_override:
+            dn_override = delta_override
         intensity_scale = self._intensity_scale_from_control(peak_value, strategy)
         theory = intensity_scale * np.asarray(
             strategy._maker_fringes(
@@ -2919,6 +2962,13 @@ class FittingAnalysisWidget(QWidget):
             return {"error": "The selected strategy does not provide Lc diagnostics."}
 
         source = self.cmb_lc_source.currentData() or "data"
+        theory = self._compute_theoretical_lc(
+            strategy,
+            L_value,
+            self._manual_value("delta_n") if "delta_n" in self._manual_controls else self._safe_float(
+                (context.get("saved_fit") or {}).get("delta_n"), 0.0
+            ),
+        )
         try:
             lc_data = self._make_fit_theory_dataframe(L_value, peak_value) if source == "fit" else self._current_prepared_data()
             minima_override = None
@@ -2931,12 +2981,126 @@ class FittingAnalysisWidget(QWidget):
                 L_value,
                 minima_idx_override=minima_override,
             )
-            return {"result": result, "aux": aux, "source": source, "data": lc_data}
+            result = {**result, **theory}
+            return {"result": result, "aux": aux, "source": source, "data": lc_data, "theory": theory}
         except Exception as e:
             message = str(e)
             if "No valid adjacent-minima pairs to compute Lc." in message or "No valid adjacent-minima pairs after filtering." in message:
-                return {"skipped": True, "message": message, "source": source}
-            return {"error": message, "source": source}
+                return {"skipped": True, "message": message, "source": source, "theory": theory}
+            return {"error": message, "source": source, "theory": theory}
+
+    def _compute_theoretical_lc(self, strategy: Any, L_value: float, delta_n: float) -> Dict[str, float]:
+        try:
+            dn_override = self._dn_override_from_delta_n(strategy, delta_n)
+            _model, aux = self._unwrap_model_and_aux(
+                strategy._maker_fringes(
+                    override={
+                        "L": float(L_value),
+                        "theta_deg": np.array([0.0], dtype=float),
+                        **({"dn_override": dn_override} if dn_override else {}),
+                    },
+                    return_aux=True,
+                )
+            )
+            delta_k = self._safe_float(np.asarray(aux.get("delta_k"), dtype=float).reshape(-1)[0])
+            if not np.isfinite(delta_k):
+                return {}
+            lc = float(np.pi / abs(delta_k)) if not np.isclose(delta_k, 0.0) else float("nan")
+            return {
+                "Lc_theory_mm": lc,
+                "delta_k_theory_inv_mm": float(delta_k),
+            }
+        except Exception:
+            return {}
+
+    def _compute_n_landscape(self) -> Dict[str, Any]:
+        context = self._analysis_context
+        if context.get("error"):
+            return {"error": context["error"]}
+        strategy = context.get("strategy")
+        if strategy is None or not hasattr(strategy, "_delta_n_override"):
+            return {"error": "The selected strategy does not provide delta_n overrides."}
+
+        x, y, _prepared = self._current_display_xy()
+        finite = np.isfinite(x) & np.isfinite(y)
+        if np.count_nonzero(finite) < 3:
+            return {"error": "Not enough finite data points for L-\u0394n cost mapping."}
+        cost_data_label = "all finite points"
+        x_fit = x[finite]
+        y_fit = y[finite]
+
+        L_center = self._manual_value("L")
+        delta_center = self._manual_value("delta_n")
+        nominal_L = self._nominal_thickness_mm()
+        if np.isfinite(nominal_L):
+            L_min, L_max = nominal_L - 0.01, nominal_L + 0.01
+        else:
+            L_min, L_max = L_center - 0.01, L_center + 0.01
+        delta_min, delta_max = -0.001, 0.001
+
+        l_points = int(self.sb_n_landscape_l_points.value()) if hasattr(self, "sb_n_landscape_l_points") else 49
+        delta_points = int(self.sb_n_landscape_delta_points.value()) if hasattr(self, "sb_n_landscape_delta_points") else 61
+        L_grid = np.linspace(L_min, L_max, max(l_points, 2))
+        delta_grid = np.linspace(delta_min, delta_max, max(delta_points, 2))
+        cost = np.full((delta_grid.size, L_grid.size), np.nan, dtype=float)
+        for i, delta_n in enumerate(delta_grid):
+            dn_override = self._dn_override_from_delta_n(strategy, float(delta_n))
+            for j, L_mm in enumerate(L_grid):
+                try:
+                    model = np.asarray(
+                        strategy._maker_fringes(
+                            override={
+                                "L": float(L_mm),
+                                "theta_deg": x_fit,
+                                **({"dn_override": dn_override} if dn_override else {}),
+                            }
+                        ),
+                        dtype=float,
+                    )
+                    valid = np.isfinite(model) & np.isfinite(y_fit)
+                    if np.count_nonzero(valid) < 3:
+                        continue
+                    denom = float(np.dot(model[valid], model[valid]))
+                    if denom <= 0.0:
+                        continue
+                    scale = float(np.dot(model[valid], y_fit[valid]) / denom)
+                    residual = scale * model[valid] - y_fit[valid]
+                    cost[i, j] = float(np.dot(residual, residual))
+                except Exception:
+                    continue
+
+        finite_cost = np.isfinite(cost)
+        if not np.any(finite_cost):
+            return {"error": "No finite L-\u0394n cost values could be computed."}
+
+        candidates = []
+        for i in range(1, cost.shape[0] - 1):
+            for j in range(1, cost.shape[1] - 1):
+                value = cost[i, j]
+                if not np.isfinite(value):
+                    continue
+                window = cost[i - 1 : i + 2, j - 1 : j + 2]
+                finite_window = window[np.isfinite(window)]
+                if finite_window.size and value <= float(np.min(finite_window)):
+                    candidates.append((float(value), float(L_grid[j]), float(delta_grid[i])))
+        if not candidates:
+            flat_indices = np.argsort(cost[finite_cost])[:5]
+            coords = np.argwhere(finite_cost)
+            candidates = [
+                (float(cost[tuple(coords[index])]), float(L_grid[coords[index][1]]), float(delta_grid[coords[index][0]]))
+                for index in flat_indices
+            ]
+        candidates = sorted(candidates, key=lambda item: item[0])[:5]
+        return {
+            "L_grid": L_grid,
+            "delta_grid": delta_grid,
+            "cost": cost,
+            "candidates": candidates,
+            "current_L": L_center,
+            "current_delta_n": delta_center,
+            "nominal_L": nominal_L,
+            "cost_data_label": cost_data_label,
+        }
 
     def _dn_override_from_saved_fit(self, fit_payload: Dict[str, Any]) -> Dict[str, float]:
         dn_override: Dict[str, float] = {}
@@ -2945,6 +3109,21 @@ class FittingAnalysisWidget(QWidget):
             if np.isfinite(value):
                 dn_override[key] = float(value)
         return dn_override
+
+    def _dn_override_from_delta_n(self, strategy: Any, delta_n: float) -> Dict[str, float]:
+        if strategy is None or not hasattr(strategy, "_delta_n_override"):
+            return {}
+        try:
+            delta_n = float(delta_n)
+            if not np.isfinite(delta_n):
+                return {}
+            return {
+                str(key): float(value)
+                for key, value in strategy._delta_n_override(self._meta, delta_n).items()
+                if np.isfinite(float(value))
+            }
+        except Exception:
+            return {}
 
     def _nfit_group_result_by_source(self) -> Dict[str, Dict[str, Any]]:
         selected_global_result = self._global_result_by_id(self._selected_result_id())
@@ -3538,8 +3717,9 @@ class FittingAnalysisWidget(QWidget):
         if self._analysis_context.get("error"):
             message = str(self._analysis_context["error"])
             self._render_fit_data_only_plot(message)
-            for canvas in [self.canvas_resid, self.canvas_centering, self.canvas_lc]:
+            for canvas in [self.canvas_resid, self.canvas_centering, self.canvas_lc, self.canvas_n_landscape]:
                 self._show_plot_message(canvas, message)
+            self.lbl_n_landscape_solutions.setText("")
             self.extrema_widget.show_message(message)
             self._clear_nfit_measurements(message)
             self.btn_apply_manual.setEnabled(False)
@@ -3550,8 +3730,9 @@ class FittingAnalysisWidget(QWidget):
         if "error" in live:
             message = str(live["error"])
             self._render_fit_data_only_plot(message)
-            for canvas in [self.canvas_resid, self.canvas_centering, self.canvas_lc]:
+            for canvas in [self.canvas_resid, self.canvas_centering, self.canvas_lc, self.canvas_n_landscape]:
                 self._show_plot_message(canvas, message)
+            self.lbl_n_landscape_solutions.setText("")
             self.extrema_widget.show_message(message)
             self._clear_nfit_measurements(message)
             self.btn_apply_manual.setEnabled(False)
@@ -3573,6 +3754,11 @@ class FittingAnalysisWidget(QWidget):
             if current_plot == "lc"
             else {"error": "Open the Lc tab to compute Lc diagnostics."}
         )
+        n_landscape = (
+            self._compute_n_landscape()
+            if current_plot == "n_landscape"
+            else {"error": "Open the L-\u0394n Cost tab to compute the map."}
+        )
 
         self._render_fit_plot(live)
         self._render_residual_plot(live)
@@ -3580,15 +3766,17 @@ class FittingAnalysisWidget(QWidget):
         self._render_extrema_plot(live, extrema)
         if current_plot == "lc":
             self._render_lc_plot(lc_info)
+        if current_plot == "n_landscape":
+            self._render_n_landscape_plot(n_landscape)
         if self._current_page_key == "nfit":
             self._render_nfit_page()
         self.btn_apply_manual.setEnabled("error" not in live)
 
         notes = self._analysis_context.get("notes") or []
         self.lbl_manual_hint.setText(
-            "The live overlay uses the current L, Peak, and Centering values. Overwrite updates saved fit values."
+            "The live overlay uses the current L, Peak, \u0394n, and Centering values. Overwrite updates saved fit values."
             if not notes else
-            "The live overlay uses the current L, Peak, and Centering values. " + " | ".join(str(note) for note in notes)
+            "The live overlay uses the current L, Peak, \u0394n, and Centering values. " + " | ".join(str(note) for note in notes)
         )
 
     def _render_fit_data_only_plot(self, error_message: str):
@@ -3662,6 +3850,12 @@ class FittingAnalysisWidget(QWidget):
             va="top",
             ha="left",
         )
+        if ax.texts:
+            ax.texts[-1].set_text(
+                f"L = {live['L_value']:.4f} mm (\u0394L= {delta_um:+.1f} um)\n"
+                f"Peak = {self._format_sigfigs(live['peak_value'], 3)}\n"
+                f"\u0394n = {float(live.get('delta_n', 0.0)):+.6f}"
+            )
         if not settings.show_fit_annotation and ax.texts:
             ax.texts[-1].remove()
         self._configure_plot_axes(
@@ -3741,10 +3935,47 @@ class FittingAnalysisWidget(QWidget):
         self.canvas_lc.clear()
         ax = self.canvas_lc.ax
         if lc_info.get("skipped"):
+            theory = lc_info.get("theory") if isinstance(lc_info.get("theory"), dict) else {}
+            theory_lc = self._safe_float(theory.get("Lc_theory_mm"))
+            if np.isfinite(theory_lc):
+                ax.axhline(theory_lc * 1000.0, color="C2", linestyle="-.", linewidth=1.4, label="Theory Lc")
+                ax.set_ylabel("Lc (um)")
+                ax.set_title("Theoretical Lc from fitted \u0394n")
+                ax.text(
+                    0.02,
+                    0.98,
+                    f"theory = {theory_lc * 1000.0:.3f} um",
+                    transform=ax.transAxes,
+                    va="top",
+                    ha="left",
+                )
+                ax.legend(loc="best")
+                self.canvas_lc.figure.tight_layout()
+                self.canvas_lc.draw()
+                return
             message = str(lc_info.get("message") or "Lc diagnostics were skipped.")
             self._show_plot_message(self.canvas_lc, f"Lc plot skipped: {message}")
             return
         if "error" in lc_info:
+            theory = lc_info.get("theory") if isinstance(lc_info.get("theory"), dict) else {}
+            theory_lc = self._safe_float(theory.get("Lc_theory_mm"))
+            if np.isfinite(theory_lc):
+                ax.axhline(theory_lc * 1000.0, color="C2", linestyle="-.", linewidth=1.4, label="Theory Lc")
+                ax.set_ylabel("Lc (um)")
+                ax.set_title("Theoretical Lc from fitted \u0394n")
+                ax.text(
+                    0.02,
+                    0.98,
+                    f"theory = {theory_lc * 1000.0:.3f} um\nempirical unavailable: {lc_info['error']}",
+                    transform=ax.transAxes,
+                    va="top",
+                    ha="left",
+                    wrap=True,
+                )
+                ax.legend(loc="best")
+                self.canvas_lc.figure.tight_layout()
+                self.canvas_lc.draw()
+                return
             self._show_plot_message(self.canvas_lc, f"Lc plot unavailable: {lc_info['error']}")
             return
 
@@ -3781,6 +4012,8 @@ class FittingAnalysisWidget(QWidget):
         mean_lc = self._safe_float(result.get("Lc_mean_mm"))
         std_lc = self._safe_float(result.get("Lc_std_mm"))
         pair_mean_lc = self._safe_float(result.get("Lc_pair_mean_mm"))
+        theory_lc = self._safe_float(result.get("Lc_theory_mm"))
+        theory_delta_k = self._safe_float(result.get("delta_k_theory_inv_mm"))
         fit_theta_deg = np.asarray(aux.get("fit_theta_deg", []), dtype=float)
         fit_lc_mm = np.asarray(aux.get("fit_lc_mm", []), dtype=float)
         finite_fit = np.isfinite(fit_theta_deg) & np.isfinite(fit_lc_mm)
@@ -3792,6 +4025,8 @@ class FittingAnalysisWidget(QWidget):
         if np.isfinite(mean_lc):
             ax.scatter([0.0], [mean_lc * 1000.0], color="C3", marker="o", zorder=4)
             ax.axhline(mean_lc * 1000.0, color="0.3", linestyle="--", linewidth=1.0)
+        if np.isfinite(theory_lc):
+            ax.axhline(theory_lc * 1000.0, color="C2", linestyle="-.", linewidth=1.4, label="Theory Lc")
         ax.set_title(f"Empirical Lc(0) extrapolation from minima pairs ({source})")
         if np.isfinite(mean_lc) and np.isfinite(std_lc):
             text = f"Lc(0) = {mean_lc * 1000.0:.3f} +/- {std_lc * 1000.0:.3f} um"
@@ -3801,6 +4036,10 @@ class FittingAnalysisWidget(QWidget):
             text = "Lc summary unavailable"
         if np.isfinite(pair_mean_lc):
             text += f"\npair mean = {pair_mean_lc * 1000.0:.3f} um"
+        if np.isfinite(theory_lc):
+            text += f"\ntheory = {theory_lc * 1000.0:.3f} um"
+            if np.isfinite(theory_delta_k):
+                text += f" (delta_k={theory_delta_k:.4g} 1/mm)"
         ax.text(
             0.02,
             0.98,
@@ -3810,8 +4049,64 @@ class FittingAnalysisWidget(QWidget):
             ha="left",
         )
         self._configure_plot_axes(self.canvas_lc, "lc", "Lc (um)")
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best")
         self.canvas_lc.figure.tight_layout()
         self.canvas_lc.draw()
+
+    def _render_n_landscape_plot(self, info: Dict[str, Any]):
+        if "error" in info:
+            self._show_plot_message(self.canvas_n_landscape, f"L-\u0394n cost unavailable: {info['error']}")
+            self.lbl_n_landscape_solutions.setText("")
+            return
+
+        self.canvas_n_landscape.clear()
+        ax = self.canvas_n_landscape.ax
+        L_grid = np.asarray(info["L_grid"], dtype=float)
+        delta_grid = np.asarray(info["delta_grid"], dtype=float)
+        cost = np.asarray(info["cost"], dtype=float)
+        finite = np.isfinite(cost)
+        plot_cost = np.full_like(cost, np.nan, dtype=float)
+        if np.any(finite):
+            min_cost = float(np.nanmin(cost))
+            plot_cost[finite] = np.log10(np.maximum(cost[finite] - min_cost, 0.0) + 1.0)
+
+        mesh = ax.pcolormesh(L_grid, delta_grid, plot_cost, shading="auto", cmap="viridis")
+        self.canvas_n_landscape.figure.colorbar(mesh, ax=ax, label="log10(SSR - min + 1)")
+        ax.scatter(
+            [float(info["current_L"])],
+            [float(info["current_delta_n"])],
+            color="white",
+            edgecolor="black",
+            s=42,
+            zorder=3,
+        )
+        candidates = list(info.get("candidates") or [])
+        if candidates:
+            best = candidates[0]
+            ax.scatter([best[1]], [best[2]], color="C3", marker="x", s=64, zorder=4, label="best grid")
+        nominal_L = self._safe_float(info.get("nominal_L"))
+        if np.isfinite(nominal_L):
+            ax.axvline(nominal_L, color="white", linestyle=":", linewidth=1.5, label="measured L")
+        ax.set_xlabel("L (mm)")
+        ax.set_ylabel("\u0394n")
+        if info.get("cost_data_label"):
+            ax.set_title(f"Profiled SSR ({info['cost_data_label']})")
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best")
+        self.canvas_n_landscape.figure.tight_layout()
+        self.canvas_n_landscape.draw()
+
+        if candidates:
+            lines = [
+                f"{index + 1}. L={L_mm:.6f} mm, \u0394n={delta_n:+.6f}, SSR={value:.4g}"
+                for index, (value, L_mm, delta_n) in enumerate(candidates)
+            ]
+            self.lbl_n_landscape_solutions.setText("Candidate local minima:\n" + "\n".join(lines))
+        else:
+            self.lbl_n_landscape_solutions.setText("No local minima found on this grid.")
 
     def _show_plot_message(self, canvas: MplCanvas, message: str):
         canvas.clear()
@@ -3846,13 +4141,15 @@ class FittingAnalysisWidget(QWidget):
             QMessageBox.critical(self, "Manual fit failed", str(live["error"]))
             return
 
-        if self._strategy_uses_d_rel_abs(live.get("strategy")):
-            lc_info = {"error": "Lc diagnostics skipped for Braun1997 manual save."}
-        else:
-            lc_info = self._compute_lc_diagnostics(
-                L_value=float(live["L_value"]),
-                peak_value=float(live["peak_value"]),
-            )
+        lc_info = self._compute_lc_diagnostics(
+            L_value=float(live["L_value"]),
+            peak_value=float(live["peak_value"]),
+        )
+        theory_lc = self._compute_theoretical_lc(
+            live.get("strategy"),
+            float(live["L_value"]),
+            float(live.get("delta_n", 0.0)),
+        )
 
         try:
             with open(self.json_path, "r", encoding="utf-8") as f:
@@ -3865,6 +4162,7 @@ class FittingAnalysisWidget(QWidget):
             linear_coeff = max(float(live["peak_value"]), 0.0)
             fit_result = {
                 "L_mm": float(live["L_value"]),
+                "delta_n": float(live.get("delta_n", 0.0)),
                 "d_rel_abs": float(np.sqrt(linear_coeff)),
                 "d_component": str((self._analysis_context.get("saved_fit") or {}).get("d_component") or meta.get("d_component", "")),
             }
@@ -3872,6 +4170,8 @@ class FittingAnalysisWidget(QWidget):
             fit_result = {
                 "L_mm": float(live["L_value"]),
                 "L_mm_std": 0.0,
+                "delta_n": float(live.get("delta_n", 0.0)),
+                "delta_n_std": 0.0,
                 "centering_pos": self._manual_centering_value(),
                 "k_scale": float(live["peak_value"]),
                 "k_scale_std": 0.0,
@@ -3882,6 +4182,9 @@ class FittingAnalysisWidget(QWidget):
         existing_fit = self._fit_payload_for_strategy(meta, selected)
         if existing_fit and not self._strategy_uses_d_rel_abs(live.get("strategy")):
             fit_result = {**existing_fit, **fit_result}
+        if isinstance(live.get("dn_override"), dict):
+            fit_result.update(live["dn_override"])
+        fit_result.update(theory_lc)
         d_factor = self._safe_float(live.get("d_factor"))
         if np.isfinite(d_factor) and not self._strategy_uses_d_rel_abs(live.get("strategy")):
             fit_result["d_factor"] = float(d_factor)
@@ -3940,12 +4243,13 @@ class FittingAnalysisWidget(QWidget):
         self.extrema_widget.mark_saved()
         self._refresh_saved_strategy_list(meta)
         self._populate_table_from_json(meta)
-        QMessageBox.information(self, "Saved", "Current L, Peak, and Centering values were written to JSON/CSV.")
+        QMessageBox.information(self, "Saved", "Current L, Peak, \u0394n, and Centering values were written to JSON/CSV.")
 
     def _clear_plots(self):
-        for canvas in [self.canvas_fit, self.canvas_resid, self.canvas_centering, self.canvas_lc]:
+        for canvas in [self.canvas_fit, self.canvas_resid, self.canvas_centering, self.canvas_lc, self.canvas_n_landscape]:
             canvas.clear()
             canvas.draw()
+        self.lbl_n_landscape_solutions.setText("")
         self.extrema_widget.clear_plot()
 
     # --------------------------------- Save ---------------------------------
@@ -3961,6 +4265,7 @@ class FittingAnalysisWidget(QWidget):
                 "centering_cost.png": self.canvas_centering.figure,
                 "extrema.png": self.extrema_widget.canvas.figure,
                 "lc_pairs.png": self.canvas_lc.figure,
+                "L_delta_n_cost.png": self.canvas_n_landscape.figure,
             }
             for filename, figure in figures.items():
                 figure.savefig(output_dir / filename, dpi=200, bbox_inches="tight")

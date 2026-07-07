@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.optimize import least_squares
 
 from fitting_strategies.base import FittingConfigurationError
 from fitting_strategies.bechthold1977 import GlobalNFitMixin
@@ -106,6 +107,35 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
 
     def _default_d_component(self, meta):
         return self.GEOMETRY_D_COMPONENTS.get(self._geometry_key(meta))
+
+    def _delta_n_axis_roles(self, meta):
+        cut_axis = self.normalize_axis(meta["crystal_orientation"])
+        rot_axis = self.normalize_axis(meta["rot/trans_axis"])
+        third_axis = self._third_axis(cut_axis, rot_axis)
+        axis_label = self.BIAXIAL_N
+        d_component = str(self._default_d_component(meta) or meta.get("d_component") or "")
+        if d_component.startswith("d") and not d_component.startswith("d_") and len(d_component) >= 3:
+            d_component = "d_" + d_component[1:]
+
+        if d_component in ("d_31", "d_32"):
+            return {
+                "w_axes": (axis_label[rot_axis],),
+                "two_w_axes": (axis_label[third_axis],),
+                "weight": 2.0,
+            }
+        if d_component == "d_33":
+            return {
+                "w_axes": (axis_label[rot_axis],),
+                "two_w_axes": (axis_label[rot_axis],),
+                "weight": 4.0,
+            }
+        if d_component in ("d_15", "d_24"):
+            return {
+                "w_axes": (axis_label[third_axis], axis_label[rot_axis]),
+                "two_w_axes": (axis_label[rot_axis],),
+                "weight": 1.0,
+            }
+        return super()._delta_n_axis_roles(meta)
 
     def _model_meta(self, meta, override):
         model_meta = dict(meta)
@@ -1054,26 +1084,77 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
 
         theta_deg = np.asarray(data.get("position_centered", data["position"]), dtype=float)
         y = np.asarray(data.get("intensity_corrected", data.get("ch2")), dtype=float)
+        finite_y = np.isfinite(theta_deg) & np.isfinite(y)
+        if not np.any(finite_y):
+            raise ValueError("No finite points available for Braun1997 fitting.")
+
+        theta_fit = theta_deg[finite_y]
+        y_fit = y[finite_y]
+        L0_mm = float(meta["thickness_info"]["t_center_mm"])
+
+        def residual(params):
+            L_mm = float(params[0])
+            delta_n = float(params[1])
+            d_squared = float(params[2])
+            dn_override = self._delta_n_override(meta, delta_n)
+            model = np.asarray(
+                self._maker_fringes(
+                    override={
+                        "meta": meta,
+                        "data": data,
+                        "theta_deg": theta_fit,
+                        "L": L_mm,
+                        "dn_override": dn_override,
+                        "normalize": False,
+                    }
+                ),
+                dtype=float,
+            )
+            return d_squared * model - y_fit
+
+        unit_model0 = np.asarray(
+            self._maker_fringes(
+                override={
+                    "meta": meta,
+                    "data": data,
+                    "theta_deg": theta_fit,
+                    "L": L0_mm,
+                    "normalize": False,
+                }
+            ),
+            dtype=float,
+        )
+        denom = float(np.dot(unit_model0, unit_model0))
+        d_squared0 = float(np.dot(unit_model0, y_fit) / denom) if denom > 0.0 else 1.0
+        if not np.isfinite(d_squared0) or d_squared0 < 0.0:
+            d_squared0 = 1.0
+        result = least_squares(
+            residual,
+            x0=np.array([L0_mm, 0.0, d_squared0], dtype=float),
+            bounds=(
+                np.array([L0_mm - 0.01, -0.001, 0.0], dtype=float),
+                np.array([L0_mm + 0.01, 0.001, np.inf], dtype=float),
+            ),
+            max_nfev=20000,
+        )
+
+        fitted_L_mm = float(result.x[0])
+        delta_n = float(result.x[1])
+        d_squared = float(result.x[2])
+        dn_override = self._delta_n_override(meta, delta_n)
         unit_model, _fit_aux = self._maker_fringes(
             override={
                 "meta": meta,
                 "data": data,
                 "theta_deg": theta_deg,
-                "L": meta["thickness_info"]["t_center_mm"],
+                "L": fitted_L_mm,
+                "dn_override": dn_override,
                 "normalize": False,
             },
             return_aux=True,
         )
         unit_model = np.asarray(unit_model, dtype=float)
 
-        finite = np.isfinite(unit_model) & np.isfinite(y)
-        if not np.any(finite):
-            raise ValueError("No finite points available for Braun1997 fitting.")
-        denom = float(np.dot(unit_model[finite], unit_model[finite]))
-        if denom <= 0.0:
-            raise ValueError("Braun1997 unit-d model has zero norm; cannot fit d_rel_abs.")
-
-        d_squared = float(np.dot(unit_model[finite], y[finite]) / denom)
         d_rel_abs = float(np.sqrt(max(d_squared, 0.0)))
         fit_curve = d_rel_abs**2 * unit_model
 
@@ -1083,7 +1164,19 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
         results = {
             "d_component": str(meta.get("d_component", "")),
             "d_rel_abs": d_rel_abs,
+            "L_mm": fitted_L_mm,
+            "L_mm_std": float("nan"),
+            "delta_n": delta_n,
+            "delta_n_std": float("nan"),
+            "delta_n_fit_cost": float(result.cost),
+            "delta_n_fit_success": bool(result.success),
         }
+        results.update(dn_override)
+        if isinstance(_fit_aux, dict) and _fit_aux.get("delta_k") is not None:
+            delta_k = self._coerce_scalar(_fit_aux["delta_k"])
+            if np.isfinite(delta_k):
+                results["delta_k_theory_inv_mm"] = float(delta_k)
+                results["Lc_theory_mm"] = float(np.pi / abs(delta_k)) if not np.isclose(delta_k, 0.0) else float("nan")
 
         self.analysis.meta = upsert_fitting_result(
             self.analysis.meta,

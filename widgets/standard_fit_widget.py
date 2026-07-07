@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -65,7 +66,16 @@ class StandardFitWidget(QWidget):
         super().__init__(parent)
         self._slider_steps = slider_steps
         self._manual_controls: Dict[str, Dict[str, QDoubleSpinBox | QSlider]] = {}
+        self.plot_setting_buttons: Dict[str, QPushButton] = {}
         self._build_ui()
+
+    def _add_plot_settings_button(self, layout: QVBoxLayout, plot_key: str) -> None:
+        row = QHBoxLayout()
+        row.addStretch(1)
+        button = QPushButton("Plot Settings")
+        row.addWidget(button)
+        layout.addLayout(row)
+        self.plot_setting_buttons[plot_key] = button
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -228,6 +238,8 @@ class StandardFitWidget(QWidget):
         fit_series_row.addWidget(self.chk_fit_show_fitting)
         fit_series_row.addWidget(self.chk_fit_show_envelope)
         fit_series_row.addStretch(1)
+        self.plot_setting_buttons["fit"] = QPushButton("Plot Settings")
+        fit_series_row.addWidget(self.plot_setting_buttons["fit"])
         fit_layout.addLayout(fit_series_row)
         self.canvas_fit = MplCanvas(fit_tab, width=6.0, height=3.6)
         fit_layout.addWidget(self.canvas_fit)
@@ -236,18 +248,21 @@ class StandardFitWidget(QWidget):
 
         resid_tab = QWidget()
         resid_layout = QVBoxLayout(resid_tab)
+        self._add_plot_settings_button(resid_layout, "resid")
         self.canvas_resid = MplCanvas(resid_tab, width=6.0, height=2.8)
         resid_layout.addWidget(self.canvas_resid)
         self.plot_tabs.addTab(resid_tab, "Residuals")
 
         center_tab = QWidget()
         center_layout = QVBoxLayout(center_tab)
+        self._add_plot_settings_button(center_layout, "centering")
         self.canvas_centering = MplCanvas(center_tab, width=6.0, height=2.8)
         center_layout.addWidget(self.canvas_centering)
         self.plot_tabs.addTab(center_tab, "Centering Cost")
 
         extrema_tab = QWidget()
         extrema_layout = QVBoxLayout(extrema_tab)
+        self._add_plot_settings_button(extrema_layout, "extrema")
         self.extrema_widget = ManualExtremaDetectionWidget(extrema_tab)
         extrema_layout.addWidget(self.extrema_widget)
         self.plot_tabs.addTab(extrema_tab, "Extrema")
@@ -264,13 +279,43 @@ class StandardFitWidget(QWidget):
         lc_toolbar.addWidget(self.cmb_lc_source)
         lc_toolbar.addStretch(1)
         lc_toolbar.addWidget(self.lbl_lc_hint)
+        self.plot_setting_buttons["lc"] = QPushButton("Plot Settings")
+        lc_toolbar.addWidget(self.plot_setting_buttons["lc"])
         lc_layout.addLayout(lc_toolbar)
         self.canvas_lc = MplCanvas(lc_tab, width=6.0, height=2.8)
         lc_layout.addWidget(self.canvas_lc)
         self.plot_tabs.addTab(lc_tab, "Lc")
 
+        n_landscape_tab = QWidget()
+        n_landscape_layout = QVBoxLayout(n_landscape_tab)
+        n_landscape_toolbar = QHBoxLayout()
+        self.sb_n_landscape_l_points = QSpinBox()
+        self.sb_n_landscape_l_points.setRange(5, 401)
+        self.sb_n_landscape_l_points.setSingleStep(2)
+        self.sb_n_landscape_l_points.setValue(49)
+        self.sb_n_landscape_delta_points = QSpinBox()
+        self.sb_n_landscape_delta_points.setRange(5, 401)
+        self.sb_n_landscape_delta_points.setSingleStep(2)
+        self.sb_n_landscape_delta_points.setValue(61)
+        n_landscape_toolbar.addWidget(QLabel("L points:"))
+        n_landscape_toolbar.addWidget(self.sb_n_landscape_l_points)
+        n_landscape_toolbar.addWidget(QLabel("\u0394n points:"))
+        n_landscape_toolbar.addWidget(self.sb_n_landscape_delta_points)
+        n_landscape_toolbar.addStretch(1)
+        self.plot_setting_buttons["n_landscape"] = QPushButton("Plot Settings")
+        n_landscape_toolbar.addWidget(self.plot_setting_buttons["n_landscape"])
+        n_landscape_layout.addLayout(n_landscape_toolbar)
+        self.canvas_n_landscape = MplCanvas(n_landscape_tab, width=6.0, height=3.0)
+        self.lbl_n_landscape_solutions = QLabel("")
+        self.lbl_n_landscape_solutions.setWordWrap(True)
+        self.lbl_n_landscape_solutions.setStyleSheet("color: gray;")
+        n_landscape_layout.addWidget(self.canvas_n_landscape)
+        n_landscape_layout.addWidget(self.lbl_n_landscape_solutions)
+        self.plot_tabs.addTab(n_landscape_tab, "L-\u0394n Cost")
+
         plot_toolbar = QHBoxLayout()
         self.btn_plot_settings = QPushButton("Plot Settings")
+        self.btn_plot_settings.setVisible(False)
         self.btn_save_current_plot = QPushButton("Save Current Plot")
         self.btn_copy_current_plot = QPushButton("Copy Image")
         plot_toolbar.addStretch(1)
@@ -291,6 +336,7 @@ class StandardFitWidget(QWidget):
             "centering": center_tab,
             "extrema": extrema_tab,
             "lc": lc_tab,
+            "n_landscape": n_landscape_tab,
         }
         self._plot_canvases = {
             "fit": self.canvas_fit,
@@ -298,6 +344,7 @@ class StandardFitWidget(QWidget):
             "centering": self.canvas_centering,
             "extrema": self.extrema_widget.canvas,
             "lc": self.canvas_lc,
+            "n_landscape": self.canvas_n_landscape,
         }
 
     def set_metadata_edit_enabled(self, enabled: bool) -> None:
@@ -341,6 +388,15 @@ class StandardFitWidget(QWidget):
             decimals=6,
             step=0.001,
         )
+        self._create_manual_control_row(
+            form=form,
+            key="delta_n",
+            label="\u0394n:",
+            minimum=-0.001,
+            maximum=0.001,
+            decimals=7,
+            step=0.000001,
+        )
         self.sb_manual_centering = QDoubleSpinBox()
         self.sb_manual_centering.setLocale(QLocale.c())
         self.sb_manual_centering.setRange(-1e6, 1e6)
@@ -359,7 +415,7 @@ class StandardFitWidget(QWidget):
         layout.addLayout(buttons)
 
         self.lbl_manual_hint = QLabel(
-            "The live overlay uses the current L, Peak, and Centering values. Overwrite updates saved fit values."
+            "The live overlay uses the current L, Peak, \u0394n, and Centering values. Overwrite updates saved fit values."
         )
         self.lbl_manual_hint.setWordWrap(True)
         self.lbl_manual_hint.setStyleSheet("color: gray;")

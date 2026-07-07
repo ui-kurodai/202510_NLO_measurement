@@ -85,6 +85,35 @@ class BaseFittingStrategy:
             return resolved_data
         return resolved_meta, resolved_data
 
+    def _delta_n_axis_roles(self, meta):
+        """
+        Return axis roles for the simplified delta_n fit.
+
+        Subclasses can narrow this to the geometry component that dominates the
+        phase mismatch. The default keeps the previous all-axis behavior.
+        """
+        return {
+            "w_axes": ("a", "b", "c"),
+            "two_w_axes": ("a", "b", "c"),
+            "weight": 1.0,
+        }
+
+    def _delta_n_axes(self, meta):
+        roles = self._delta_n_axis_roles(meta)
+        return tuple(roles.get("two_w_axes") or ("a", "b", "c"))
+
+    def _delta_n_override(self, meta, delta_n):
+        """
+        Keep n(w) fixed and offset selected Sellmeier n(2w) axes by delta_n.
+        """
+        delta_n = float(delta_n)
+        axes = self._delta_n_axes(meta)
+        dn_override = {}
+        for axis in ("a", "b", "c"):
+            dn_override[f"dn_w_{axis}"] = 0.0
+            dn_override[f"dn_2w_{axis}"] = delta_n if axis in axes else 0.0
+        return dn_override
+
     def _resolve_frequency_tag(self, meta, wav_nm):
         """
         Map the model wavelength onto the fundamental / SH tags used by dn_override.

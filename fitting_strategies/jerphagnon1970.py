@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import json
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, least_squares
 from scipy.signal import argrelextrema
 from scipy.signal import find_peaks, savgol_filter  # <-- add
 from scipy.optimize import minimize
@@ -352,6 +352,159 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
             "k_scale": k_fit,
             "k_scale_std": float(perr[1]),
             # "theta_window_deg": [mask[0], mask[-1]]
+        }
+
+    def _fit_L_delta_n_small_angle(self, meta, data):
+        """Fit L and a single delta_n added to the Sellmeier n(2w)."""
+        pos = np.asarray(data.get("position_centered", data["position"]), dtype=float)
+        intensity = np.asarray(data["offset_corrected"], dtype=float)
+        finite = np.isfinite(pos) & np.isfinite(intensity)
+        mask = finite & (np.abs(pos) < 5.0)
+        if np.count_nonzero(mask) < 3:
+            fit_L = self._fit_L_small_angle(meta, data)
+            fit_L.update(
+                {
+                    "delta_n": 0.0,
+                    "delta_n_std": float("nan"),
+                    "delta_n_fit_cost": float("nan"),
+                    "delta_n_fit_success": False,
+                }
+            )
+            return fit_L
+
+        theta_small = pos[mask]
+        intensity_small = intensity[mask]
+        L_guess = float(meta["thickness_info"]["t_center_mm"])
+        k_guess = float(np.nanmax(intensity_small))
+        if not np.isfinite(k_guess) or k_guess <= 0.0:
+            k_guess = 1.0
+
+        def residual(params):
+            L_mm = float(params[0])
+            delta_n = float(params[1])
+            k_scale = float(params[2])
+            dn_override = self._delta_n_override(meta, delta_n)
+            model = np.asarray(
+                self._maker_fringes(
+                    override={
+                        "meta": meta,
+                        "data": data,
+                        "theta_deg": theta_small,
+                        "L": L_mm,
+                        "dn_override": dn_override,
+                    }
+                ),
+                dtype=float,
+            )
+            if model.shape != intensity_small.shape:
+                raise ValueError("Model length mismatch during delta_n fit.")
+            return k_scale * model - intensity_small
+
+        x0 = np.array([L_guess, 0.0, k_guess], dtype=float)
+        lower = np.array([L_guess - 0.01, -0.001, 0.0], dtype=float)
+        upper = np.array([L_guess + 0.01, 0.001, np.inf], dtype=float)
+        try:
+            result = least_squares(residual, x0=x0, bounds=(lower, upper), max_nfev=20000)
+        except Exception:
+            fit_L = self._fit_L_small_angle(meta, data)
+            fit_L.update(
+                {
+                    "delta_n": 0.0,
+                    "delta_n_std": float("nan"),
+                    "delta_n_fit_cost": float("nan"),
+                    "delta_n_fit_success": False,
+                }
+            )
+            return fit_L
+
+        stderr = np.full(3, np.nan, dtype=float)
+        if result.jac.size and result.fun.size > result.x.size:
+            try:
+                _, singular_values, vt = np.linalg.svd(result.jac, full_matrices=False)
+                threshold = np.finfo(float).eps * max(result.jac.shape) * singular_values[0]
+                valid = singular_values > threshold
+                covariance = (vt[valid].T / singular_values[valid] ** 2) @ vt[valid]
+                covariance *= 2.0 * float(result.cost) / max(result.fun.size - result.x.size, 1)
+                stderr = np.sqrt(np.diag(covariance))
+            except Exception:
+                pass
+
+        return {
+            "L_mm": float(result.x[0]),
+            "L_mm_std": float(stderr[0]),
+            "k_scale": float(result.x[2]),
+            "k_scale_std": float(stderr[2]),
+            "delta_n": float(result.x[1]),
+            "delta_n_std": float(stderr[1]),
+            "delta_n_fit_cost": float(result.cost),
+            "delta_n_fit_success": bool(result.success),
+        }
+
+    def _fit_L_delta_n_all_angle(self, meta, data):
+        """Fit L and delta_n against the full finite trace for app use."""
+        pos = np.asarray(data.get("position_centered", data["position"]), dtype=float)
+        intensity = np.asarray(data["offset_corrected"], dtype=float)
+        mask = np.isfinite(pos) & np.isfinite(intensity)
+        if np.count_nonzero(mask) < 3:
+            return self._fit_L_delta_n_small_angle(meta, data)
+
+        theta_fit = pos[mask]
+        intensity_fit = intensity[mask]
+        L_guess = float(meta["thickness_info"]["t_center_mm"])
+        k_guess = float(np.nanmax(intensity_fit))
+        if not np.isfinite(k_guess) or k_guess <= 0.0:
+            k_guess = 1.0
+
+        def residual(params):
+            L_mm = float(params[0])
+            delta_n = float(params[1])
+            k_scale = float(params[2])
+            dn_override = self._delta_n_override(meta, delta_n)
+            model = np.asarray(
+                self._maker_fringes(
+                    override={
+                        "meta": meta,
+                        "data": data,
+                        "theta_deg": theta_fit,
+                        "L": L_mm,
+                        "dn_override": dn_override,
+                    }
+                ),
+                dtype=float,
+            )
+            if model.shape != intensity_fit.shape:
+                raise ValueError("Model length mismatch during full-range delta_n fit.")
+            return k_scale * model - intensity_fit
+
+        x0 = np.array([L_guess, 0.0, k_guess], dtype=float)
+        lower = np.array([L_guess - 0.01, -0.001, 0.0], dtype=float)
+        upper = np.array([L_guess + 0.01, 0.001, np.inf], dtype=float)
+        try:
+            result = least_squares(residual, x0=x0, bounds=(lower, upper), max_nfev=20000)
+        except Exception:
+            return self._fit_L_delta_n_small_angle(meta, data)
+
+        stderr = np.full(3, np.nan, dtype=float)
+        if result.jac.size and result.fun.size > result.x.size:
+            try:
+                _, singular_values, vt = np.linalg.svd(result.jac, full_matrices=False)
+                threshold = np.finfo(float).eps * max(result.jac.shape) * singular_values[0]
+                valid = singular_values > threshold
+                covariance = (vt[valid].T / singular_values[valid] ** 2) @ vt[valid]
+                covariance *= 2.0 * float(result.cost) / max(result.fun.size - result.x.size, 1)
+                stderr = np.sqrt(np.diag(covariance))
+            except Exception:
+                pass
+
+        return {
+            "L_mm": float(result.x[0]),
+            "L_mm_std": float(stderr[0]),
+            "k_scale": float(result.x[2]),
+            "k_scale_std": float(stderr[2]),
+            "delta_n": float(result.x[1]),
+            "delta_n_std": float(stderr[1]),
+            "delta_n_fit_cost": float(result.cost),
+            "delta_n_fit_success": bool(result.success),
         }
     
     def _fit_n_large_angle(
@@ -733,7 +886,9 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
         """Run full Jerphagnon1970 fitting pipeline and return results."""
         data, _centering = self._position_centering(self.analysis.data)
         data, _offset = self._subtract_offset(data)
-        L_fit = self._fit_L_small_angle(self.analysis.meta, data)
+        L_fit = self._fit_L_delta_n_all_angle(self.analysis.meta, data)
+        delta_n = float(L_fit.get("delta_n", 0.0))
+        dn_override = self._delta_n_override(self.analysis.meta, delta_n)
         try:
             Lc, _Lc = self._calc_Lc_large_angle(self.analysis.meta, data, [15, 180], L_fit["L_mm"])
         except Exception as e:
@@ -741,7 +896,11 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
             Lc = []
         Pm0_fit, _Pm0 = self._fit_Pm0(data)
         _fit_model, fit_aux = self._maker_fringes(
-            override={"L": L_fit["L_mm"], "theta_deg": data["position_centered"]},
+            override={
+                "L": L_fit["L_mm"],
+                "theta_deg": data["position_centered"],
+                "dn_override": dn_override,
+            },
             return_aux=True,
         )
 
@@ -754,8 +913,14 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
         results.update(L_fit)
         results.update(Lc)
         results.update(Pm0_fit)
+        results.update(dn_override)
         if isinstance(fit_aux, dict) and fit_aux.get("d_factor") is not None:
             results["d_factor"] = float(fit_aux["d_factor"])
+        if isinstance(fit_aux, dict) and fit_aux.get("delta_k") is not None:
+            delta_k = self._coerce_scalar(fit_aux["delta_k"])
+            if np.isfinite(delta_k):
+                results["delta_k_theory_inv_mm"] = float(delta_k)
+                results["Lc_theory_mm"] = float(np.pi / abs(delta_k)) if not np.isclose(delta_k, 0.0) else float("nan")
         self.analysis.meta = upsert_fitting_result(
             self.analysis.meta,
             self.__class__.__name__,
