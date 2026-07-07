@@ -24,6 +24,7 @@ import sys
 import math
 import ast
 import importlib
+from io import BytesIO
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,18 +34,21 @@ import numpy as np
 import pandas as pd
 
 from PyQt6.QtCore import Qt, QLocale, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QGuiApplication
+from PyQt6.QtGui import QColor, QGuiApplication, QImage
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QPushButton, QLabel, QLineEdit, QComboBox,
     QFileDialog, QGroupBox, QMessageBox,
     QTableWidget, QTableWidgetItem,
-    QDoubleSpinBox, QSlider, QDialog, QDialogButtonBox, QCheckBox,
+    QDoubleSpinBox, QSlider, QDialog, QCheckBox,
     QListWidget, QListWidgetItem, QMenu, QProgressBar, QStackedWidget,
+    QTabWidget,
 )
 
 import logging
+from matplotlib import rcParams
+from matplotlib.ticker import FormatStrFormatter, FuncFormatter, ScalarFormatter
 from measurement_metadata import (
     build_sample_catalog_key,
     format_beam_profile_display,
@@ -66,12 +70,19 @@ from fitting_results import (
 )
 from widgets.refractive_index_global_fit_widget import RefractiveIndexGlobalFitWidget
 from widgets.standard_fit_widget import MplCanvas, SavedStrategyListWidget, StandardFitWidget
+from widgets.plot_settings_widget import (
+    ExtraAxisPlotSettings,
+    PlotSettingsDialog,
+    SeriesPlotSettings,
+    SharedPlotSettings,
+)
 from windows_dialogs import select_multiple_directories
 # self made database
 # from crystaldatabase import CRYSTALS
 # from crystaldatabase import *
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - in %(filename)s - %(message)s')
+rcParams["font.family"] = "Arial"
 
 
 # External analysis entry point (import at top-level for user feedback if missing)
@@ -94,17 +105,8 @@ class StrategyInfo:
         return f"{self.module_name} / {short_name}"
 
 
-@dataclass
-class PlotSettings:
-    font_size: float = 10.0
-    show_legend: bool = True
-    box_aspect: float = 0.0
-    data_plot_style: str = "markers"
-    show_fit_annotation: bool = True
-    x_min: Optional[float] = None
-    x_max: Optional[float] = None
-    y_min: Optional[float] = None
-    y_max: Optional[float] = None
+class PlotSettings(SharedPlotSettings):
+    pass
 
 
 class FitWorker(QThread):
@@ -269,9 +271,11 @@ class FittingAnalysisWidget(QWidget):
             "canvas_lc",
             "canvas_n_landscape",
             "lbl_n_landscape_solutions",
+            "lbl_lc_summary",
             "sb_n_landscape_l_points",
             "sb_n_landscape_delta_points",
             "plot_setting_buttons",
+            "plot_range_edits",
             "btn_plot_settings",
             "btn_save_current_plot",
             "btn_copy_current_plot",
@@ -823,6 +827,9 @@ class FittingAnalysisWidget(QWidget):
         self.btn_plot_settings.clicked.connect(self._edit_current_plot_settings)
         for plot_key, button in getattr(self, "plot_setting_buttons", {}).items():
             button.clicked.connect(lambda _checked=False, key=plot_key: self._edit_current_plot_settings(key))
+        for plot_key, edits in getattr(self, "plot_range_edits", {}).items():
+            for edit in edits.values():
+                edit.editingFinished.connect(lambda key=plot_key: self._plot_range_edits_changed(key))
         self.btn_save_current_plot.clicked.connect(self._save_current_plot_clicked)
         self.btn_copy_current_plot.clicked.connect(self._copy_current_plot_clicked)
         self.btn_reset_manual.clicked.connect(self._reset_manual_controls_clicked)
@@ -2285,17 +2292,8 @@ class FittingAnalysisWidget(QWidget):
     def _canvas_target_height(self, plot_key: str) -> int:
         settings = self._plot_settings[plot_key]
         base_height = self._canvas_base_height(plot_key)
-        if settings.box_aspect <= 0:
-            return base_height
-
-        if hasattr(self, "right_scroll") and self.right_scroll.viewport() is not None:
-            width_hint = self.right_scroll.viewport().width() - 80
-        else:
-            width_hint = self.width() - 520
-        width_hint = max(width_hint, 520)
-
         extra_height = 120 if self._canvas_supports_top_axis(plot_key) else 90
-        computed = int(width_hint * settings.box_aspect + extra_height)
+        computed = int(settings.figure_height * 100 + extra_height)
         return max(base_height, computed)
 
     def _update_canvas_height(self, plot_key: str):
@@ -2312,12 +2310,33 @@ class FittingAnalysisWidget(QWidget):
             self._update_canvas_height(plot_key)
 
     def _default_plot_settings(self, plot_key: str) -> PlotSettings:
+        font_size = 11.0 if plot_key == "fit" else 10.0
+        heights = {
+            "fit": 3.6,
+            "resid": 2.8,
+            "centering": 2.8,
+            "extrema": 2.8,
+            "lc": 2.8,
+            "n_landscape": 3.0,
+        }
         return PlotSettings(
-            font_size=11.0 if plot_key == "fit" else 10.0,
+            font_family="Arial",
+            label_font_size=font_size,
+            legend_font_size=font_size,
+            tick_font_size=font_size,
             show_legend=plot_key not in {"resid", "lc"},
-            box_aspect=0.0,
-            data_plot_style="markers",
-            show_fit_annotation=True,
+            show_grid=True,
+            figure_width=6.0,
+            figure_height=heights.get(plot_key, 2.8),
+            colormap="viridis",
+            marker_size=5.0,
+            line_width=1.2,
+            series={item.label: item for item in self._plot_series_defaults(plot_key)},
+            series_order=[item.label for item in self._plot_series_defaults(plot_key)],
+            extra_axes={
+                item.key: item
+                for item in self._plot_extra_axis_defaults(plot_key)
+            },
         )
 
     def _parse_range_bound(self, text: str) -> Optional[float]:
@@ -2338,165 +2357,187 @@ class FittingAnalysisWidget(QWidget):
         return range_min, range_max
 
     def _fit_data_plot_kwargs(self) -> Dict[str, Any]:
-        style = self._plot_settings["fit"].data_plot_style
-        kwargs: Dict[str, Any] = {
-            "marker": "*",
-            "markersize": 5,
+        return self._series_plot_kwargs("fit", "Data")
+
+    def _plot_series_defaults(self, plot_key: str) -> List[SeriesPlotSettings]:
+        defaults = {
+            "fit": [
+                SeriesPlotSettings("Data", "C0", "*"),
+                SeriesPlotSettings("Fitting", "C1", "-"),
+                SeriesPlotSettings("Envelope", "C2", "--"),
+            ],
+            "resid": [
+                SeriesPlotSettings("Residual", "C0", "."),
+                SeriesPlotSettings("Zero line", "0.3", "-"),
+            ],
+            "centering": [
+                SeriesPlotSettings("Coarse cost", "C0", "-"),
+                SeriesPlotSettings("Refined cost", "C1", "-"),
+                SeriesPlotSettings("Best center", "C3", "--"),
+            ],
+            "extrema": [
+                SeriesPlotSettings("Data", "C0", "-"),
+                SeriesPlotSettings("Current fit", "C1", "-"),
+                SeriesPlotSettings("Minima", "C3", "o"),
+                SeriesPlotSettings("Maxima", "C2", "^"),
+            ],
+            "lc": [
+                SeriesPlotSettings("Positive pairs", "C0", "-"),
+                SeriesPlotSettings("Negative pairs", "C1", "-"),
+                SeriesPlotSettings("Pair centers", "black", "o"),
+                SeriesPlotSettings("Extrapolation", "C3", "-"),
+                SeriesPlotSettings("Lc(0)", "C3", "--"),
+                SeriesPlotSettings("Theory Lc", "C2", "-"),
+            ],
+            "n_landscape": [
+                SeriesPlotSettings("Current point", "white", "o"),
+                SeriesPlotSettings("Best grid", "C3", "x"),
+                SeriesPlotSettings("Measured L", "black", ":"),
+            ],
         }
-        if style == "line+markers":
-            kwargs["linestyle"] = "-"
-            kwargs["linewidth"] = 1.0
-        elif style == "line":
-            kwargs["linestyle"] = "-"
-            kwargs["linewidth"] = 1.2
-            kwargs["marker"] = None
-        else:
-            kwargs["linestyle"] = "none"
+        return [SeriesPlotSettings(**item.__dict__) for item in defaults.get(plot_key, [])]
+
+    def _plot_extra_axis_defaults(self, plot_key: str) -> List[ExtraAxisPlotSettings]:
+        defaults: List[ExtraAxisPlotSettings] = []
+        if plot_key == "n_landscape":
+            defaults.append(
+                ExtraAxisPlotSettings(
+                    key="colorbar",
+                    name="Colorbar",
+                    label="log10(SSR - min + 1)",
+                    label_font_size=10.0,
+                    tick_font_size=10.0,
+                )
+            )
+        if self._canvas_supports_top_axis(plot_key):
+            defaults.append(
+                ExtraAxisPlotSettings(
+                    key="top_x",
+                    name="Top X axis",
+                    label="Sample thickness (mm)",
+                    label_font_size=10.0,
+                    tick_font_size=10.0,
+                )
+            )
+        return defaults
+
+    def _series_setting(self, plot_key: str, label: str) -> SeriesPlotSettings:
+        settings = self._plot_settings[plot_key]
+        if label not in settings.series:
+            settings.series[label] = SeriesPlotSettings(label)
+        if label not in settings.series_order:
+            settings.series_order.append(label)
+        return settings.series[label]
+
+    def _series_visible(self, plot_key: str, label: str) -> bool:
+        return self._series_setting(plot_key, label).visible
+
+    def _series_order_index(self, plot_key: str, label: str) -> int:
+        order = self._plot_settings[plot_key].series_order
+        return order.index(label) if label in order else len(order)
+
+    def _style_to_kwargs(self, style: str, plot_key: str) -> Dict[str, Any]:
+        settings = self._plot_settings[plot_key]
+        marker = None
+        linestyle = "none"
+        if style == "*-":
+            marker = "*"
+            linestyle = "-"
+        elif style in {"*", "^", "s", ".", "x", "o"}:
+            marker = style
+        elif style in {"-", "--", ":"}:
+            linestyle = style
+        return {
+            "marker": marker,
+            "linestyle": linestyle,
+            "markersize": settings.marker_size,
+            "linewidth": settings.line_width,
+        }
+
+    def _series_plot_kwargs(self, plot_key: str, label: str) -> Dict[str, Any]:
+        series = self._series_setting(plot_key, label)
+        kwargs = self._style_to_kwargs(series.style, plot_key)
+        kwargs["color"] = series.color
+        kwargs["label"] = series.label or label
+        kwargs["zorder"] = 2 + self._series_order_index(plot_key, label)
         return kwargs
+
+    def _extra_axis_setting(self, plot_key: str, key: str) -> Optional[ExtraAxisPlotSettings]:
+        settings = self._plot_settings[plot_key]
+        if key not in settings.extra_axes:
+            for item in self._plot_extra_axis_defaults(plot_key):
+                if item.key == key:
+                    settings.extra_axes[key] = item
+                    break
+        return settings.extra_axes.get(key)
+
+    def _format_optional_range_bound(self, value: Optional[float]) -> str:
+        return "" if value is None else f"{value:g}"
+
+    def _sync_plot_range_edits(self, plot_key: Optional[str] = None) -> None:
+        if not hasattr(self, "plot_range_edits"):
+            return
+        keys = [plot_key] if plot_key is not None else list(self.plot_range_edits.keys())
+        for key in keys:
+            edits = self.plot_range_edits.get(key)
+            settings = self._plot_settings.get(key)
+            if not edits or settings is None:
+                continue
+            for name, value in [
+                ("x_min", settings.x_min),
+                ("x_max", settings.x_max),
+                ("y_min", settings.y_min),
+                ("y_max", settings.y_max),
+            ]:
+                edit = edits.get(name)
+                if edit is None:
+                    continue
+                edit.blockSignals(True)
+                edit.setText(self._format_optional_range_bound(value))
+                edit.blockSignals(False)
+
+    def _plot_range_edits_changed(self, plot_key: str) -> None:
+        edits = getattr(self, "plot_range_edits", {}).get(plot_key)
+        if not edits:
+            return
+        try:
+            x_min, x_max = self._parse_optional_range_bounds(edits["x_min"].text(), edits["x_max"].text())
+            y_min, y_max = self._parse_optional_range_bounds(edits["y_min"].text(), edits["y_max"].text())
+        except Exception as e:
+            QMessageBox.warning(self, "Invalid range", str(e))
+            self._sync_plot_range_edits(plot_key)
+            return
+        settings = self._plot_settings[plot_key]
+        settings.x_min = x_min
+        settings.x_max = x_max
+        settings.y_min = y_min
+        settings.y_max = y_max
+        self._render_analysis_plots()
 
     def _edit_current_plot_settings(self, plot_key: Optional[str] = None):
         plot_key = plot_key or self._current_plot_key()
         settings = self._plot_settings[plot_key]
-
-        dialog = QDialog(self)
         page = self._plot_pages.get(plot_key)
         tab_index = self.plot_tabs.indexOf(page) if page is not None else self.plot_tabs.currentIndex()
         tab_label = self.plot_tabs.tabText(tab_index) if tab_index >= 0 else plot_key
-        dialog.setWindowTitle(f"Plot Settings: {tab_label}")
-        layout = QVBoxLayout(dialog)
-        form = QFormLayout()
-
-        sb_font = QDoubleSpinBox()
-        sb_font.setRange(6.0, 48.0)
-        sb_font.setDecimals(1)
-        sb_font.setSingleStep(0.5)
-        sb_font.setValue(settings.font_size)
-
-        cb_legend = QCheckBox("Show legend")
-        cb_legend.setChecked(settings.show_legend)
-
-        cmb_data_style = QComboBox()
-        cmb_data_style.addItem("Markers only", userData="markers")
-        cmb_data_style.addItem("Markers + line", userData="line+markers")
-        cmb_data_style.addItem("Line only", userData="line")
-        data_style_index = max(cmb_data_style.findData(settings.data_plot_style), 0)
-        cmb_data_style.setCurrentIndex(data_style_index)
-
-        cb_fit_annotation = QCheckBox("Show L / Peak annotation")
-        cb_fit_annotation.setChecked(settings.show_fit_annotation)
-
-        sb_aspect = QDoubleSpinBox()
-        sb_aspect.setRange(0.0, 5.0)
-        sb_aspect.setDecimals(2)
-        sb_aspect.setSingleStep(0.05)
-        sb_aspect.setSpecialValueText("Auto")
-        sb_aspect.setValue(settings.box_aspect)
-
-        le_x_min = QLineEdit("" if settings.x_min is None else f"{settings.x_min:g}")
-        le_x_min.setPlaceholderText("auto")
-        le_x_max = QLineEdit("" if settings.x_max is None else f"{settings.x_max:g}")
-        le_x_max.setPlaceholderText("auto")
-        le_y_min = QLineEdit("" if settings.y_min is None else f"{settings.y_min:g}")
-        le_y_min.setPlaceholderText("auto")
-        le_y_max = QLineEdit("" if settings.y_max is None else f"{settings.y_max:g}")
-        le_y_max.setPlaceholderText("auto")
-
-        x_range_row = QWidget()
-        x_range_layout = QHBoxLayout(x_range_row)
-        x_range_layout.setContentsMargins(0, 0, 0, 0)
-        x_range_layout.setSpacing(6)
-        x_range_layout.addWidget(le_x_min)
-        x_range_layout.addWidget(QLabel("-"))
-        x_range_layout.addWidget(le_x_max)
-
-        y_range_row = QWidget()
-        y_range_layout = QHBoxLayout(y_range_row)
-        y_range_layout.setContentsMargins(0, 0, 0, 0)
-        y_range_layout.setSpacing(6)
-        y_range_layout.addWidget(le_y_min)
-        y_range_layout.addWidget(QLabel("-"))
-        y_range_layout.addWidget(le_y_max)
-
-        form.addRow("Font size:", sb_font)
-        form.addRow("", cb_legend)
-        if plot_key == "fit":
-            form.addRow("Data style:", cmb_data_style)
-            form.addRow("", cb_fit_annotation)
-        form.addRow("Box aspect:", sb_aspect)
-        form.addRow("X range:", x_range_row)
-        form.addRow("Y range:", y_range_row)
-        layout.addLayout(form)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok
-            | QDialogButtonBox.StandardButton.Cancel
-            | QDialogButtonBox.StandardButton.RestoreDefaults
+        dialog = PlotSettingsDialog(
+            settings,
+            self._plot_series_defaults(plot_key),
+            title=f"Plot Settings: {tab_label}",
+            heatmap=(plot_key == "n_landscape"),
+            extra_axis_defaults=self._plot_extra_axis_defaults(plot_key),
+            parent=self,
         )
-        layout.addWidget(buttons)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(
-            lambda: self._restore_plot_settings_dialog_defaults(
-                plot_key=plot_key,
-                sb_font=sb_font,
-                cb_legend=cb_legend,
-                sb_aspect=sb_aspect,
-                le_x_min=le_x_min,
-                le_x_max=le_x_max,
-                le_y_min=le_y_min,
-                le_y_max=le_y_max,
-                cmb_data_style=cmb_data_style,
-                cb_fit_annotation=cb_fit_annotation,
-            )
-        )
-
+        dialog.applied.connect(lambda key=plot_key, active_settings=settings: self._apply_plot_settings_dialog(key, active_settings))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        self._apply_plot_settings_dialog(plot_key, settings)
 
-        try:
-            x_min, x_max = self._parse_optional_range_bounds(le_x_min.text(), le_x_max.text())
-            y_min, y_max = self._parse_optional_range_bounds(le_y_min.text(), le_y_max.text())
-            self._plot_settings[plot_key] = PlotSettings(
-                font_size=float(sb_font.value()),
-                show_legend=bool(cb_legend.isChecked()),
-                box_aspect=float(sb_aspect.value()),
-                data_plot_style=str(cmb_data_style.currentData() or "markers"),
-                show_fit_annotation=bool(cb_fit_annotation.isChecked()),
-                x_min=x_min,
-                x_max=x_max,
-                y_min=y_min,
-                y_max=y_max,
-            )
-        except Exception as e:
-            QMessageBox.warning(self, "Invalid setting", str(e))
-            return
-
+    def _apply_plot_settings_dialog(self, plot_key: str, settings: PlotSettings) -> None:
+        self._plot_settings[plot_key] = settings
         self._update_canvas_height(plot_key)
+        self._sync_plot_range_edits(plot_key)
         self._render_analysis_plots()
-
-    def _restore_plot_settings_dialog_defaults(
-        self,
-        plot_key: str,
-        sb_font: QDoubleSpinBox,
-        cb_legend: QCheckBox,
-        sb_aspect: QDoubleSpinBox,
-        le_x_min: QLineEdit,
-        le_x_max: QLineEdit,
-        le_y_min: QLineEdit,
-        le_y_max: QLineEdit,
-        cmb_data_style: QComboBox,
-        cb_fit_annotation: QCheckBox,
-    ) -> None:
-        defaults = self._default_plot_settings(plot_key)
-        sb_font.setValue(defaults.font_size)
-        cb_legend.setChecked(defaults.show_legend)
-        sb_aspect.setValue(defaults.box_aspect)
-        le_x_min.clear()
-        le_x_max.clear()
-        le_y_min.clear()
-        le_y_max.clear()
-        cmb_data_style.setCurrentIndex(max(cmb_data_style.findData(defaults.data_plot_style), 0))
-        cb_fit_annotation.setChecked(defaults.show_fit_annotation)
 
     def _save_current_plot_clicked(self):
         if not self._current_dir:
@@ -2531,25 +2572,45 @@ class FittingAnalysisWidget(QWidget):
         if not self._current_dir:
             QMessageBox.information(self, "No folder", "Load a result folder first.")
             return
-        clipboard = QGuiApplication.clipboard()
-        clipboard.setPixmap(self._current_plot_canvas().grab())
+        try:
+            buffer = BytesIO()
+            self._current_plot_canvas().figure.savefig(buffer, format="png", dpi=200, bbox_inches="tight")
+            image = QImage()
+            if not image.loadFromData(buffer.getvalue(), "PNG"):
+                raise RuntimeError("Could not render the current plot as a clipboard image.")
+            clipboard = QGuiApplication.clipboard()
+            clipboard.setImage(image)
+        except Exception as e:
+            QMessageBox.critical(self, "Copy failed", str(e))
+            return
         QMessageBox.information(self, "Copied", "Current plot image was copied to the clipboard.")
 
     def _configure_plot_axes(self, canvas: MplCanvas, plot_key: str, y_label: str, top_axis_L_mm: Optional[float] = None):
         settings = self._plot_settings[plot_key]
         ax = canvas.ax
         is_wedge = self._is_wedge_scan()
+        rcParams["font.family"] = settings.font_family
+        canvas.figure.set_size_inches(settings.figure_width, settings.figure_height, forward=False)
 
-        bottom_label = "position (mm)" if is_wedge else "Incidence angle (deg.)"
-        ax.set_xlabel(bottom_label)
-        ax.set_ylabel(y_label)
+        if plot_key == "n_landscape":
+            bottom_label = "L (mm)"
+        else:
+            bottom_label = "position (mm)" if is_wedge else "Incidence angle (deg.)"
+        ax.set_title(settings.title, fontfamily=settings.font_family, fontsize=settings.label_font_size)
+        ax.set_xlabel(settings.x_label or bottom_label, fontfamily=settings.font_family)
+        ax.set_ylabel(settings.y_label or y_label, fontfamily=settings.font_family)
+        ax.grid(settings.show_grid, which="both", alpha=0.25)
 
-        font_size = settings.font_size
-        ax.xaxis.label.set_size(font_size)
-        ax.yaxis.label.set_size(font_size)
-        ax.tick_params(axis="both", labelsize=font_size)
-        if settings.box_aspect > 0:
-            ax.set_box_aspect(settings.box_aspect)
+        label_size = settings.label_font_size
+        tick_size = settings.tick_font_size
+        legend_size = settings.legend_font_size
+        ax.xaxis.label.set_size(label_size)
+        ax.yaxis.label.set_size(label_size)
+        ax.tick_params(axis="both", labelsize=tick_size)
+        for tick_label in ax.get_xticklabels() + ax.get_yticklabels():
+            tick_label.set_fontfamily(settings.font_family)
+        ax.set_xscale("log" if settings.x_log else "linear")
+        ax.set_yscale("log" if settings.y_log else "linear")
 
         if settings.x_min is not None or settings.x_max is not None:
             ax.set_xlim(
@@ -2561,14 +2622,39 @@ class FittingAnalysisWidget(QWidget):
                 bottom=settings.y_min if settings.y_min is not None else None,
                 top=settings.y_max if settings.y_max is not None else None,
             )
+        x_ticks = self._parse_ticks_text(settings.x_ticks_text)
+        y_ticks = self._parse_ticks_text(settings.y_ticks_text)
+        if x_ticks is not None:
+            ax.set_xticks(x_ticks)
+        elif settings.x_tick_count > 0:
+            ax.locator_params(axis="x", nbins=settings.x_tick_count)
+        if y_ticks is not None:
+            ax.set_yticks(y_ticks)
+        elif settings.y_tick_count > 0:
+            ax.locator_params(axis="y", nbins=settings.y_tick_count)
+        self._apply_tick_formatter(ax.xaxis, settings.x_digit_count, settings.x_scientific)
+        self._apply_tick_formatter(ax.yaxis, settings.y_digit_count, settings.y_scientific)
 
         handles, labels = ax.get_legend_handles_labels()
         if settings.show_legend and handles:
-            legend = ax.legend(loc="best", fontsize=font_size)
+            unique: Dict[str, Any] = {}
+            for handle, label in zip(handles, labels):
+                if label and label not in unique:
+                    unique[label] = handle
+            legend = ax.legend(
+                list(unique.values()),
+                list(unique.keys()),
+                loc="best",
+                fontsize=legend_size,
+                prop={"family": settings.font_family, "size": legend_size},
+            )
             if legend is not None:
                 legend.set_title(None)
 
         if not is_wedge or top_axis_L_mm is None:
+            return
+        top_axis_settings = self._extra_axis_setting(plot_key, "top_x")
+        if top_axis_settings is not None and not top_axis_settings.visible:
             return
 
         strategy = self._analysis_context.get("strategy")
@@ -2588,9 +2674,101 @@ class FittingAnalysisWidget(QWidget):
             return center_pos + (arr - top_axis_L_mm) / slope
 
         secax = ax.secondary_xaxis("top", functions=(pos_to_thickness, thickness_to_pos))
-        secax.set_xlabel("Sample thickness (mm)")
-        secax.xaxis.label.set_size(font_size)
-        secax.tick_params(axis="x", labelsize=font_size)
+        self._apply_extra_axis_settings(
+            secax,
+            top_axis_settings,
+            axis="x",
+            default_label="Sample thickness (mm)",
+            font_family=settings.font_family,
+        )
+
+    def _parse_ticks_text(self, text: str) -> Optional[List[float]]:
+        stripped = str(text or "").strip()
+        if not stripped:
+            return None
+        return [float(part.strip()) for part in stripped.split(",") if part.strip()]
+
+    def _apply_tick_formatter(self, axis_obj: Any, digits: int, scientific: bool) -> None:
+        digits = int(digits)
+        if scientific:
+            if digits < 0:
+                formatter = ScalarFormatter(useMathText=True)
+                formatter.set_scientific(True)
+                formatter.set_powerlimits((0, 0))
+                formatter.set_useOffset(False)
+                axis_obj.set_major_formatter(formatter)
+            else:
+                axis_obj.set_major_formatter(FuncFormatter(lambda value, _pos: self._format_scientific_tick(value, digits)))
+        elif digits < 0:
+            formatter = ScalarFormatter(useMathText=True)
+            formatter.set_scientific(False)
+            formatter.set_useOffset(False)
+            axis_obj.set_major_formatter(formatter)
+        else:
+            axis_obj.set_major_formatter(FormatStrFormatter(f"%.{digits}f"))
+
+    def _format_scientific_tick(self, value: float, digits: int) -> str:
+        if not np.isfinite(value):
+            return ""
+        if np.isclose(value, 0.0):
+            return f"{0.0:.{digits}f}"
+        exponent = int(np.floor(np.log10(abs(value))))
+        mantissa = value / (10.0 ** exponent)
+        return rf"${mantissa:.{digits}f}\times10^{{{exponent}}}$"
+
+    def _apply_extra_axis_settings(
+        self,
+        axis_obj: Any,
+        axis_settings: Optional[ExtraAxisPlotSettings],
+        *,
+        axis: str,
+        default_label: str,
+        font_family: str,
+    ) -> None:
+        if axis_settings is None:
+            axis_settings = ExtraAxisPlotSettings(key="", name="", label=default_label)
+        label = axis_settings.label or default_label
+        label_size = axis_settings.label_font_size
+        tick_size = axis_settings.tick_font_size
+        if axis == "x":
+            axis_obj.set_xlabel(label)
+            axis_obj.xaxis.label.set_size(label_size)
+            axis_obj.xaxis.label.set_fontfamily(font_family)
+            axis_obj.tick_params(axis="x", labelsize=tick_size)
+            labels = axis_obj.get_xticklabels()
+            target_axis = axis_obj.xaxis
+            if axis_settings.axis_min is not None or axis_settings.axis_max is not None:
+                axis_obj.set_xlim(
+                    left=axis_settings.axis_min if axis_settings.axis_min is not None else None,
+                    right=axis_settings.axis_max if axis_settings.axis_max is not None else None,
+                )
+            if axis_settings.log_scale:
+                axis_obj.set_xscale("log")
+        else:
+            axis_obj.set_ylabel(label)
+            axis_obj.yaxis.label.set_size(label_size)
+            axis_obj.yaxis.label.set_fontfamily(font_family)
+            axis_obj.tick_params(axis="y", labelsize=tick_size)
+            labels = axis_obj.get_yticklabels()
+            target_axis = axis_obj.yaxis
+            if axis_settings.axis_min is not None or axis_settings.axis_max is not None:
+                axis_obj.set_ylim(
+                    bottom=axis_settings.axis_min if axis_settings.axis_min is not None else None,
+                    top=axis_settings.axis_max if axis_settings.axis_max is not None else None,
+                )
+            if axis_settings.log_scale:
+                axis_obj.set_yscale("log")
+        for tick_label in labels:
+            tick_label.set_fontfamily(font_family)
+        ticks = self._parse_ticks_text(axis_settings.ticks_text)
+        if ticks is not None:
+            if axis == "x":
+                axis_obj.set_xticks(ticks)
+            else:
+                axis_obj.set_yticks(ticks)
+        elif axis_settings.tick_count > 0:
+            axis_obj.locator_params(axis=axis, nbins=axis_settings.tick_count)
+        self._apply_tick_formatter(target_axis, axis_settings.digit_count, axis_settings.scientific)
 
     def _manual_controls_ready(self) -> bool:
         if not self._manual_controls:
@@ -3819,8 +3997,7 @@ class FittingAnalysisWidget(QWidget):
                     return
                 y = np.asarray(data[numeric_columns[-1]], dtype=float)
 
-        sample_label = str(self._meta.get("sample") or self._meta.get("sample_id") or "Data")
-        ax.plot(x, y, label=sample_label, **self._fit_data_plot_kwargs())
+        ax.plot(x, y, **self._fit_data_plot_kwargs())
         self._configure_plot_axes(self.canvas_fit, "fit", "Signal (V)")
         self.canvas_fit.figure.tight_layout()
         self.canvas_fit.draw()
@@ -3832,32 +4009,28 @@ class FittingAnalysisWidget(QWidget):
         self.canvas_fit.clear()
         ax = self.canvas_fit.ax
         settings = self._plot_settings["fit"]
-        sample_label = str(self._meta.get("sample") or self._meta.get("sample_id") or "Data")
-        if self.chk_fit_show_data.isChecked():
-            ax.plot(live["x"], live["y"], label=sample_label, **self._fit_data_plot_kwargs())
-        if self.chk_fit_show_fitting.isChecked():
-            ax.plot(live["x"], live["fit_curve"], linewidth=1.6, label="Fitting")
-        if self.chk_fit_show_envelope.isChecked() and not self._is_wedge_scan():
-            ax.plot(live["x"], live["envelope_curve"], linewidth=1.2, linestyle="--", label="Envelope")
+        if self.chk_fit_show_data.isChecked() and self._series_visible("fit", "Data"):
+            kwargs = self._series_plot_kwargs("fit", "Data")
+            ax.plot(live["x"], live["y"], **kwargs)
+        if self.chk_fit_show_fitting.isChecked() and self._series_visible("fit", "Fitting"):
+            ax.plot(live["x"], live["fit_curve"], **self._series_plot_kwargs("fit", "Fitting"))
+        if self.chk_fit_show_envelope.isChecked() and not self._is_wedge_scan() and self._series_visible("fit", "Envelope"):
+            ax.plot(live["x"], live["envelope_curve"], **self._series_plot_kwargs("fit", "Envelope"))
         nominal_L = self._nominal_thickness_mm()
         delta_um = (float(live["L_value"]) - nominal_L) * 1000.0
-        ax.text(
-            0.02,
-            0.98,
-            f"L = {live['L_value']:.4f} mm (ΔL= {delta_um:+.1f} um)\n"
-            f"Peak = {self._format_sigfigs(live['peak_value'], 3)}",
-            transform=ax.transAxes,
-            va="top",
-            ha="left",
-        )
-        if ax.texts:
-            ax.texts[-1].set_text(
+        if settings.show_annotation:
+            ax.text(
+                0.02,
+                0.98,
                 f"L = {live['L_value']:.4f} mm (\u0394L= {delta_um:+.1f} um)\n"
                 f"Peak = {self._format_sigfigs(live['peak_value'], 3)}\n"
-                f"\u0394n = {float(live.get('delta_n', 0.0)):+.6f}"
+                f"\u0394n = {float(live.get('delta_n', 0.0)):+.6f}",
+                transform=ax.transAxes,
+                va="top",
+                ha="left",
+                fontfamily=settings.font_family,
+                fontsize=settings.legend_font_size,
             )
-        if not settings.show_fit_annotation and ax.texts:
-            ax.texts[-1].remove()
         self._configure_plot_axes(
             self.canvas_fit,
             "fit",
@@ -3871,10 +4044,21 @@ class FittingAnalysisWidget(QWidget):
         if "error" in live:
             self._show_plot_message(self.canvas_resid, str(live["error"]))
             return
+        settings = self._plot_settings["resid"]
         self.canvas_resid.clear()
         ax = self.canvas_resid.ax
-        ax.plot(live["x"], live["residual"], linestyle="none", marker=".", markersize=3)
-        ax.axhline(0.0, linewidth=1.0)
+        if self._series_visible("resid", "Residual"):
+            ax.plot(live["x"], live["residual"], **self._series_plot_kwargs("resid", "Residual"))
+        if self._series_visible("resid", "Zero line"):
+            zero = self._series_setting("resid", "Zero line")
+            ax.axhline(
+                0.0,
+                color=zero.color,
+                linestyle=self._style_to_kwargs(zero.style, "resid").get("linestyle", "-"),
+                linewidth=settings.line_width,
+                label="Zero line",
+                zorder=2 + self._series_order_index("resid", "Zero line"),
+            )
         self._configure_plot_axes(
             self.canvas_resid,
             "resid",
@@ -3894,11 +4078,21 @@ class FittingAnalysisWidget(QWidget):
         if not isinstance(centering, dict) or centering.get("c_candidates") is None or centering.get("costs") is None:
             self._show_plot_message(self.canvas_centering, "Centering cost is not available for the current strategy/data.")
             return
-        ax.plot(centering["c_candidates"], centering["costs"], label="Coarse cost")
-        if centering.get("c_local") is not None and centering.get("costs_local") is not None:
-            ax.plot(centering["c_local"], centering["costs_local"], label="Refined cost")
-        if centering.get("c_best") is not None:
-            ax.axvline(float(centering["c_best"]), color="C3", linewidth=1.2, label="Best center")
+        settings = self._plot_settings["centering"]
+        if self._series_visible("centering", "Coarse cost"):
+            ax.plot(centering["c_candidates"], centering["costs"], **self._series_plot_kwargs("centering", "Coarse cost"))
+        if centering.get("c_local") is not None and centering.get("costs_local") is not None and self._series_visible("centering", "Refined cost"):
+            ax.plot(centering["c_local"], centering["costs_local"], **self._series_plot_kwargs("centering", "Refined cost"))
+        if centering.get("c_best") is not None and self._series_visible("centering", "Best center"):
+            best = self._series_setting("centering", "Best center")
+            ax.axvline(
+                float(centering["c_best"]),
+                color=best.color,
+                linestyle=self._style_to_kwargs(best.style, "centering").get("linestyle", "--"),
+                linewidth=settings.line_width,
+                label="Best center",
+                zorder=2 + self._series_order_index("centering", "Best center"),
+            )
         self._configure_plot_axes(self.canvas_centering, "centering", "Cost")
         ax.set_xlabel("Center candidate")
         self.canvas_centering.figure.tight_layout()
@@ -3929,27 +4123,30 @@ class FittingAnalysisWidget(QWidget):
         self._extrema_force_reset = False
 
     def _render_lc_plot(self, lc_info: Dict[str, Any]):
+        if hasattr(self, "lbl_lc_summary"):
+            self.lbl_lc_summary.setText("")
         if self._is_wedge_scan():
             self._show_plot_message(self.canvas_lc, "No data for wedge scans.")
             return
         self.canvas_lc.clear()
         ax = self.canvas_lc.ax
+        settings = self._plot_settings["lc"]
         if lc_info.get("skipped"):
             theory = lc_info.get("theory") if isinstance(lc_info.get("theory"), dict) else {}
             theory_lc = self._safe_float(theory.get("Lc_theory_mm"))
-            if np.isfinite(theory_lc):
-                ax.axhline(theory_lc * 1000.0, color="C2", linestyle="-.", linewidth=1.4, label="Theory Lc")
-                ax.set_ylabel("Lc (um)")
-                ax.set_title("Theoretical Lc from fitted \u0394n")
-                ax.text(
-                    0.02,
-                    0.98,
-                    f"theory = {theory_lc * 1000.0:.3f} um",
-                    transform=ax.transAxes,
-                    va="top",
-                    ha="left",
+            if np.isfinite(theory_lc) and self._series_visible("lc", "Theory Lc"):
+                theory_series = self._series_setting("lc", "Theory Lc")
+                ax.axhline(
+                    theory_lc * 1000.0,
+                    color=theory_series.color,
+                    linestyle=self._style_to_kwargs(theory_series.style, "lc").get("linestyle", "-"),
+                    linewidth=settings.line_width,
+                    label="Theory Lc",
+                    zorder=2 + self._series_order_index("lc", "Theory Lc"),
                 )
-                ax.legend(loc="best")
+                if hasattr(self, "lbl_lc_summary"):
+                    self.lbl_lc_summary.setText(f"theory = {theory_lc * 1000.0:.3f} um")
+                self._configure_plot_axes(self.canvas_lc, "lc", "Lc (um)")
                 self.canvas_lc.figure.tight_layout()
                 self.canvas_lc.draw()
                 return
@@ -3959,20 +4156,19 @@ class FittingAnalysisWidget(QWidget):
         if "error" in lc_info:
             theory = lc_info.get("theory") if isinstance(lc_info.get("theory"), dict) else {}
             theory_lc = self._safe_float(theory.get("Lc_theory_mm"))
-            if np.isfinite(theory_lc):
-                ax.axhline(theory_lc * 1000.0, color="C2", linestyle="-.", linewidth=1.4, label="Theory Lc")
-                ax.set_ylabel("Lc (um)")
-                ax.set_title("Theoretical Lc from fitted \u0394n")
-                ax.text(
-                    0.02,
-                    0.98,
-                    f"theory = {theory_lc * 1000.0:.3f} um\nempirical unavailable: {lc_info['error']}",
-                    transform=ax.transAxes,
-                    va="top",
-                    ha="left",
-                    wrap=True,
+            if np.isfinite(theory_lc) and self._series_visible("lc", "Theory Lc"):
+                theory_series = self._series_setting("lc", "Theory Lc")
+                ax.axhline(
+                    theory_lc * 1000.0,
+                    color=theory_series.color,
+                    linestyle=self._style_to_kwargs(theory_series.style, "lc").get("linestyle", "-"),
+                    linewidth=settings.line_width,
+                    label="Theory Lc",
+                    zorder=2 + self._series_order_index("lc", "Theory Lc"),
                 )
-                ax.legend(loc="best")
+                if hasattr(self, "lbl_lc_summary"):
+                    self.lbl_lc_summary.setText(f"theory = {theory_lc * 1000.0:.3f} um; empirical unavailable: {lc_info['error']}")
+                self._configure_plot_axes(self.canvas_lc, "lc", "Lc (um)")
                 self.canvas_lc.figure.tight_layout()
                 self.canvas_lc.draw()
                 return
@@ -3994,19 +4190,24 @@ class FittingAnalysisWidget(QWidget):
         pair_center_deg = np.asarray(aux.get("pair_center_deg", []), dtype=float)
         pair_lc_mm = np.asarray(aux.get("pair_lc_mm", []), dtype=float)
 
-        for i in range(min(len(dL_pos), max(len(minima_pos) - 1, 0))):
-            ax.plot([minima_pos[i], minima_pos[i + 1]], [1000.0 * dL_pos[i], 1000.0 * dL_pos[i]], color="C0")
-        for i in range(min(len(dL_neg), max(len(minima_neg) - 1, 0))):
-            ax.plot([minima_neg[i], minima_neg[i + 1]], [1000.0 * dL_neg[i], 1000.0 * dL_neg[i]], color="C1")
+        if self._series_visible("lc", "Positive pairs"):
+            kwargs = self._series_plot_kwargs("lc", "Positive pairs")
+            for i in range(min(len(dL_pos), max(len(minima_pos) - 1, 0))):
+                ax.plot([minima_pos[i], minima_pos[i + 1]], [1000.0 * dL_pos[i], 1000.0 * dL_pos[i]], **kwargs)
+        if self._series_visible("lc", "Negative pairs"):
+            kwargs = self._series_plot_kwargs("lc", "Negative pairs")
+            for i in range(min(len(dL_neg), max(len(minima_neg) - 1, 0))):
+                ax.plot([minima_neg[i], minima_neg[i + 1]], [1000.0 * dL_neg[i], 1000.0 * dL_neg[i]], **kwargs)
         finite_pairs = np.isfinite(pair_center_deg) & np.isfinite(pair_lc_mm)
-        if np.any(finite_pairs):
+        if np.any(finite_pairs) and self._series_visible("lc", "Pair centers"):
             ax.scatter(
                 pair_center_deg[finite_pairs],
                 1000.0 * pair_lc_mm[finite_pairs],
-                color="0.2",
-                marker="o",
-                s=18,
-                zorder=3,
+                color=self._series_setting("lc", "Pair centers").color,
+                marker=self._style_to_kwargs(self._series_setting("lc", "Pair centers").style, "lc").get("marker") or "o",
+                s=settings.marker_size**2,
+                label="Pair centers",
+                zorder=2 + self._series_order_index("lc", "Pair centers"),
             )
 
         mean_lc = self._safe_float(result.get("Lc_mean_mm"))
@@ -4017,17 +4218,26 @@ class FittingAnalysisWidget(QWidget):
         fit_theta_deg = np.asarray(aux.get("fit_theta_deg", []), dtype=float)
         fit_lc_mm = np.asarray(aux.get("fit_lc_mm", []), dtype=float)
         finite_fit = np.isfinite(fit_theta_deg) & np.isfinite(fit_lc_mm)
-        if np.any(finite_fit):
+        if np.any(finite_fit) and self._series_visible("lc", "Extrapolation"):
             theta_fit = fit_theta_deg[finite_fit]
             lc_fit_um = 1000.0 * fit_lc_mm[finite_fit]
-            ax.plot(theta_fit, lc_fit_um, color="C3", linewidth=1.6)
-            ax.plot(-theta_fit, lc_fit_um, color="C3", linewidth=1.6)
-        if np.isfinite(mean_lc):
-            ax.scatter([0.0], [mean_lc * 1000.0], color="C3", marker="o", zorder=4)
-            ax.axhline(mean_lc * 1000.0, color="0.3", linestyle="--", linewidth=1.0)
-        if np.isfinite(theory_lc):
-            ax.axhline(theory_lc * 1000.0, color="C2", linestyle="-.", linewidth=1.4, label="Theory Lc")
-        ax.set_title(f"Empirical Lc(0) extrapolation from minima pairs ({source})")
+            kwargs = self._series_plot_kwargs("lc", "Extrapolation")
+            ax.plot(theta_fit, lc_fit_um, **kwargs)
+            ax.plot(-theta_fit, lc_fit_um, **kwargs)
+        if np.isfinite(mean_lc) and self._series_visible("lc", "Lc(0)"):
+            lc0 = self._series_setting("lc", "Lc(0)")
+            ax.scatter([0.0], [mean_lc * 1000.0], color=lc0.color, marker="o", zorder=4)
+            ax.axhline(mean_lc * 1000.0, color=lc0.color, linestyle="--", linewidth=settings.line_width, label="Lc(0)")
+        if np.isfinite(theory_lc) and self._series_visible("lc", "Theory Lc"):
+            theory_series = self._series_setting("lc", "Theory Lc")
+            ax.axhline(
+                theory_lc * 1000.0,
+                color=theory_series.color,
+                linestyle=self._style_to_kwargs(theory_series.style, "lc").get("linestyle", "-"),
+                linewidth=settings.line_width,
+                label="Theory Lc",
+                zorder=2 + self._series_order_index("lc", "Theory Lc"),
+            )
         if np.isfinite(mean_lc) and np.isfinite(std_lc):
             text = f"Lc(0) = {mean_lc * 1000.0:.3f} +/- {std_lc * 1000.0:.3f} um"
         elif np.isfinite(mean_lc):
@@ -4040,18 +4250,9 @@ class FittingAnalysisWidget(QWidget):
             text += f"\ntheory = {theory_lc * 1000.0:.3f} um"
             if np.isfinite(theory_delta_k):
                 text += f" (delta_k={theory_delta_k:.4g} 1/mm)"
-        ax.text(
-            0.02,
-            0.98,
-            text,
-            transform=ax.transAxes,
-            va="top",
-            ha="left",
-        )
+        if hasattr(self, "lbl_lc_summary"):
+            self.lbl_lc_summary.setText(f"{source}: {text}")
         self._configure_plot_axes(self.canvas_lc, "lc", "Lc (um)")
-        handles, labels = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend(loc="best")
         self.canvas_lc.figure.tight_layout()
         self.canvas_lc.draw()
 
@@ -4063,6 +4264,7 @@ class FittingAnalysisWidget(QWidget):
 
         self.canvas_n_landscape.clear()
         ax = self.canvas_n_landscape.ax
+        settings = self._plot_settings["n_landscape"]
         L_grid = np.asarray(info["L_grid"], dtype=float)
         delta_grid = np.asarray(info["delta_grid"], dtype=float)
         cost = np.asarray(info["cost"], dtype=float)
@@ -4072,30 +4274,68 @@ class FittingAnalysisWidget(QWidget):
             min_cost = float(np.nanmin(cost))
             plot_cost[finite] = np.log10(np.maximum(cost[finite] - min_cost, 0.0) + 1.0)
 
-        mesh = ax.pcolormesh(L_grid, delta_grid, plot_cost, shading="auto", cmap="viridis")
-        self.canvas_n_landscape.figure.colorbar(mesh, ax=ax, label="log10(SSR - min + 1)")
-        ax.scatter(
-            [float(info["current_L"])],
-            [float(info["current_delta_n"])],
-            color="white",
-            edgecolor="black",
-            s=42,
-            zorder=3,
-        )
+        mesh = ax.pcolormesh(L_grid, delta_grid, plot_cost, shading="auto", cmap=settings.colormap)
+        colorbar_axis = self._extra_axis_setting("n_landscape", "colorbar")
+        if colorbar_axis is not None and (colorbar_axis.axis_min is not None or colorbar_axis.axis_max is not None):
+            finite_plot = plot_cost[np.isfinite(plot_cost)]
+            fallback_min = float(np.nanmin(finite_plot)) if finite_plot.size else None
+            fallback_max = float(np.nanmax(finite_plot)) if finite_plot.size else None
+            mesh.set_clim(
+                vmin=colorbar_axis.axis_min if colorbar_axis.axis_min is not None else fallback_min,
+                vmax=colorbar_axis.axis_max if colorbar_axis.axis_max is not None else fallback_max,
+            )
+        if colorbar_axis is None or colorbar_axis.visible:
+            colorbar = self.canvas_n_landscape.figure.colorbar(
+                mesh,
+                ax=ax,
+                label=(colorbar_axis.label if colorbar_axis is not None and colorbar_axis.label else "log10(SSR - min + 1)"),
+            )
+            self._apply_extra_axis_settings(
+                colorbar.ax,
+                colorbar_axis,
+                axis="y",
+                default_label="log10(SSR - min + 1)",
+                font_family=settings.font_family,
+            )
+        if self._series_visible("n_landscape", "Current point"):
+            current_series = self._series_setting("n_landscape", "Current point")
+            ax.scatter(
+                [float(info["current_L"])],
+                [float(info["current_delta_n"])],
+                color=current_series.color,
+                edgecolor="black",
+                marker=self._style_to_kwargs(current_series.style, "n_landscape").get("marker") or "o",
+                s=settings.marker_size**2,
+                label="Current point",
+                zorder=2 + self._series_order_index("n_landscape", "Current point"),
+            )
         candidates = list(info.get("candidates") or [])
-        if candidates:
+        if candidates and self._series_visible("n_landscape", "Best grid"):
             best = candidates[0]
-            ax.scatter([best[1]], [best[2]], color="C3", marker="x", s=64, zorder=4, label="best grid")
+            best_series = self._series_setting("n_landscape", "Best grid")
+            ax.scatter(
+                [best[1]],
+                [best[2]],
+                color=best_series.color,
+                marker=self._style_to_kwargs(best_series.style, "n_landscape").get("marker") or "x",
+                s=(settings.marker_size + 3.0) ** 2,
+                zorder=2 + self._series_order_index("n_landscape", "Best grid"),
+                label="Best grid",
+            )
         nominal_L = self._safe_float(info.get("nominal_L"))
-        if np.isfinite(nominal_L):
-            ax.axvline(nominal_L, color="white", linestyle=":", linewidth=1.5, label="measured L")
-        ax.set_xlabel("L (mm)")
-        ax.set_ylabel("\u0394n")
-        if info.get("cost_data_label"):
-            ax.set_title(f"Profiled SSR ({info['cost_data_label']})")
-        handles, labels = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend(loc="best")
+        if np.isfinite(nominal_L) and self._series_visible("n_landscape", "Measured L"):
+            measured = self._series_setting("n_landscape", "Measured L")
+            ax.axvline(
+                nominal_L,
+                color=measured.color,
+                linestyle=self._style_to_kwargs(measured.style, "n_landscape").get("linestyle", ":"),
+                linewidth=settings.line_width,
+                label="Measured L",
+                zorder=2 + self._series_order_index("n_landscape", "Measured L"),
+            )
+        ax.set_xlabel("L (mm)", fontfamily=settings.font_family)
+        ax.set_ylabel("\u0394n", fontfamily=settings.font_family)
+        self._configure_plot_axes(self.canvas_n_landscape, "n_landscape", "\u0394n")
         self.canvas_n_landscape.figure.tight_layout()
         self.canvas_n_landscape.draw()
 
@@ -4118,6 +4358,7 @@ class FittingAnalysisWidget(QWidget):
             va="center",
             transform=canvas.ax.transAxes,
             wrap=True,
+            fontfamily="Arial",
         )
         canvas.figure.tight_layout()
         canvas.draw()
@@ -4250,6 +4491,8 @@ class FittingAnalysisWidget(QWidget):
             canvas.clear()
             canvas.draw()
         self.lbl_n_landscape_solutions.setText("")
+        if hasattr(self, "lbl_lc_summary"):
+            self.lbl_lc_summary.setText("")
         self.extrema_widget.clear_plot()
 
     # --------------------------------- Save ---------------------------------

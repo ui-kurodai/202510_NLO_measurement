@@ -16,9 +16,12 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
+from matplotlib import rcParams
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.widgets import RectangleSelector
+
+rcParams["font.family"] = "Arial"
 
 
 class MplCanvas(FigureCanvas):

@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from matplotlib import rcParams
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
@@ -35,6 +36,8 @@ from measurement_metadata import (
 from power_measurement import PowerMeasurementRunner
 
 from crystaldatabase import CRYSTALS
+
+rcParams["font.family"] = "Arial"
 
 POWER_UNITS = [
     ("Auto", None),

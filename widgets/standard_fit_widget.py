@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -25,11 +26,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from matplotlib import rcParams
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 from measurement_metadata import COMMON_BOXCAR_SENSITIVITIES
 from widgets.manual_extrema_detection_widget import ManualExtremaDetectionWidget
+
+rcParams["font.family"] = "Arial"
 
 
 class MplCanvas(FigureCanvas):
@@ -67,6 +71,7 @@ class StandardFitWidget(QWidget):
         self._slider_steps = slider_steps
         self._manual_controls: Dict[str, Dict[str, QDoubleSpinBox | QSlider]] = {}
         self.plot_setting_buttons: Dict[str, QPushButton] = {}
+        self.plot_range_edits: Dict[str, Dict[str, QLineEdit]] = {}
         self._build_ui()
 
     def _add_plot_settings_button(self, layout: QVBoxLayout, plot_key: str) -> None:
@@ -76,6 +81,36 @@ class StandardFitWidget(QWidget):
         row.addWidget(button)
         layout.addLayout(row)
         self.plot_setting_buttons[plot_key] = button
+
+    def _add_canvas_with_range_controls(self, layout: QVBoxLayout, plot_key: str, canvas: QWidget) -> None:
+        frame = QWidget()
+        grid = QGridLayout(frame)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(4)
+
+        edits: Dict[str, QLineEdit] = {}
+        for key, placeholder in [
+            ("y_max", "y max"),
+            ("y_min", "y min"),
+            ("x_min", "x min"),
+            ("x_max", "x max"),
+        ]:
+            edit = QLineEdit()
+            edit.setPlaceholderText(placeholder)
+            edit.setFixedWidth(74)
+            edit.setClearButtonEnabled(True)
+            edits[key] = edit
+
+        grid.addWidget(edits["y_max"], 0, 0, alignment=Qt.AlignmentFlag.AlignBottom)
+        grid.addWidget(edits["y_min"], 1, 0, alignment=Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(canvas, 0, 1, 2, 2)
+        grid.addWidget(edits["x_min"], 2, 1, alignment=Qt.AlignmentFlag.AlignLeft)
+        grid.addWidget(edits["x_max"], 2, 2, alignment=Qt.AlignmentFlag.AlignRight)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+        layout.addWidget(frame)
+        self.plot_range_edits[plot_key] = edits
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -226,6 +261,8 @@ class StandardFitWidget(QWidget):
 
         fit_tab = QWidget()
         fit_layout = QVBoxLayout(fit_tab)
+        fit_layout.setContentsMargins(0, 4, 0, 0)
+        fit_layout.setSpacing(4)
         fit_series_row = QHBoxLayout()
         fit_series_row.addWidget(QLabel("Show:"))
         self.chk_fit_show_data = QCheckBox("Data")
@@ -242,26 +279,32 @@ class StandardFitWidget(QWidget):
         fit_series_row.addWidget(self.plot_setting_buttons["fit"])
         fit_layout.addLayout(fit_series_row)
         self.canvas_fit = MplCanvas(fit_tab, width=6.0, height=3.6)
-        fit_layout.addWidget(self.canvas_fit)
+        self._add_canvas_with_range_controls(fit_layout, "fit", self.canvas_fit)
         fit_layout.addWidget(self._build_manual_fit_group())
         self.plot_tabs.addTab(fit_tab, "Data & Fit")
 
         resid_tab = QWidget()
         resid_layout = QVBoxLayout(resid_tab)
+        resid_layout.setContentsMargins(0, 4, 0, 0)
+        resid_layout.setSpacing(4)
         self._add_plot_settings_button(resid_layout, "resid")
         self.canvas_resid = MplCanvas(resid_tab, width=6.0, height=2.8)
-        resid_layout.addWidget(self.canvas_resid)
+        self._add_canvas_with_range_controls(resid_layout, "resid", self.canvas_resid)
         self.plot_tabs.addTab(resid_tab, "Residuals")
 
         center_tab = QWidget()
         center_layout = QVBoxLayout(center_tab)
+        center_layout.setContentsMargins(0, 4, 0, 0)
+        center_layout.setSpacing(4)
         self._add_plot_settings_button(center_layout, "centering")
         self.canvas_centering = MplCanvas(center_tab, width=6.0, height=2.8)
-        center_layout.addWidget(self.canvas_centering)
+        self._add_canvas_with_range_controls(center_layout, "centering", self.canvas_centering)
         self.plot_tabs.addTab(center_tab, "Centering Cost")
 
         extrema_tab = QWidget()
         extrema_layout = QVBoxLayout(extrema_tab)
+        extrema_layout.setContentsMargins(0, 4, 0, 0)
+        extrema_layout.setSpacing(4)
         self._add_plot_settings_button(extrema_layout, "extrema")
         self.extrema_widget = ManualExtremaDetectionWidget(extrema_tab)
         extrema_layout.addWidget(self.extrema_widget)
@@ -269,6 +312,8 @@ class StandardFitWidget(QWidget):
 
         lc_tab = QWidget()
         lc_layout = QVBoxLayout(lc_tab)
+        lc_layout.setContentsMargins(0, 4, 0, 0)
+        lc_layout.setSpacing(4)
         lc_toolbar = QHBoxLayout()
         self.cmb_lc_source = QComboBox()
         self.cmb_lc_source.addItem("Experimental Data", userData="data")
@@ -283,11 +328,17 @@ class StandardFitWidget(QWidget):
         lc_toolbar.addWidget(self.plot_setting_buttons["lc"])
         lc_layout.addLayout(lc_toolbar)
         self.canvas_lc = MplCanvas(lc_tab, width=6.0, height=2.8)
-        lc_layout.addWidget(self.canvas_lc)
+        self._add_canvas_with_range_controls(lc_layout, "lc", self.canvas_lc)
+        self.lbl_lc_summary = QLabel("")
+        self.lbl_lc_summary.setWordWrap(True)
+        self.lbl_lc_summary.setStyleSheet("color: gray;")
+        lc_layout.addWidget(self.lbl_lc_summary)
         self.plot_tabs.addTab(lc_tab, "Lc")
 
         n_landscape_tab = QWidget()
         n_landscape_layout = QVBoxLayout(n_landscape_tab)
+        n_landscape_layout.setContentsMargins(0, 4, 0, 0)
+        n_landscape_layout.setSpacing(4)
         n_landscape_toolbar = QHBoxLayout()
         self.sb_n_landscape_l_points = QSpinBox()
         self.sb_n_landscape_l_points.setRange(5, 401)
@@ -309,7 +360,7 @@ class StandardFitWidget(QWidget):
         self.lbl_n_landscape_solutions = QLabel("")
         self.lbl_n_landscape_solutions.setWordWrap(True)
         self.lbl_n_landscape_solutions.setStyleSheet("color: gray;")
-        n_landscape_layout.addWidget(self.canvas_n_landscape)
+        self._add_canvas_with_range_controls(n_landscape_layout, "n_landscape", self.canvas_n_landscape)
         n_landscape_layout.addWidget(self.lbl_n_landscape_solutions)
         self.plot_tabs.addTab(n_landscape_tab, "L-\u0394n Cost")
 

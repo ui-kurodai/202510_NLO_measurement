@@ -23,8 +23,11 @@ from PyQt6.QtWidgets import (
     QTimeEdit,
     QVBoxLayout,
 )
+from matplotlib import rcParams
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+
+rcParams["font.family"] = "Arial"
 
 _CONTROL_PATH = Path(__file__).resolve().parents[1] / "devices" / "thorlabs_s120c_powermeter_control.py"
 _CONTROL_SPEC = importlib.util.spec_from_file_location("thorlabs_s120c_powermeter_control", _CONTROL_PATH)

@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from PyQt6.QtCore import Qt, QThread, QLocale, pyqtSignal
+from matplotlib import rcParams
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from measure_shg import SHGMeasurementRunner
@@ -32,6 +33,8 @@ from measurement_metadata import (
     normalize_crystal_orientation,
     parse_boxcar_sensitivity,
 )
+
+rcParams["font.family"] = "Arial"
 
 # self made database
 from crystaldatabase import CRYSTALS

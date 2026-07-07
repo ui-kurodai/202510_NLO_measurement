@@ -25,8 +25,11 @@ from PyQt6.QtWidgets import (
     QTimeEdit,
     QVBoxLayout,
 )
+from matplotlib import rcParams
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+
+rcParams["font.family"] = "Arial"
 
 _OPHIR_CONTROL_PATH = Path(__file__).resolve().parents[1] / "devices" / "ophir-3A_powermeter_control.py"
 _OPHIR_CONTROL_SPEC = importlib.util.spec_from_file_location(
