@@ -5,7 +5,7 @@ from scipy.optimize import least_squares
 from scipy.signal import argrelextrema
 
 from crystaldatabase import CRYSTALS
-from fitting_results import upsert_fitting_result
+from fitting_results import extract_fit_payload, upsert_fitting_result
 
 class BaseFittingStrategy:
     """Abstract base class for SHG fitting algorithms."""
@@ -392,6 +392,21 @@ class BaseRotationStrategy(BaseFittingStrategy):
         """
         Find the accurate position of 0 degree assuming a symmetry Maker fringe.
         """
+        saved_center = self._saved_centering_pos()
+        if np.isfinite(saved_center):
+            out = data.copy()
+            out["position_centered"] = data["position"] - saved_center
+            fit_data = {
+                "c_candidates": None,
+                "costs": None,
+                "c0": saved_center,
+                "c_local": None,
+                "costs_local": None,
+                "c_best": saved_center,
+                "source": "saved",
+            }
+            return out, fit_data
+
         x = np.asarray(data["position"])
         y = np.asarray(data["intensity_corrected"])
         n = len(x)
@@ -476,6 +491,14 @@ class BaseRotationStrategy(BaseFittingStrategy):
         out = data.copy()
         out["position_centered"] = data["position"] - c_best
         return out, fit_data
+
+    def _saved_centering_pos(self):
+        meta = getattr(getattr(self, "analysis", None), "meta", None)
+        saved_fit = extract_fit_payload(meta, self.__class__.__name__)
+        saved_center = self._coerce_scalar(saved_fit.get("centering_pos"))
+        if np.isfinite(saved_center):
+            return saved_center
+        return float("nan")
 
 
 

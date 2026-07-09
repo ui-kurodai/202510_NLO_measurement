@@ -195,6 +195,8 @@ def upsert_fitting_result(
         same_strategy = str(existing.get("strategy") or "").strip() == strategy_name
         same_result = str(existing.get("result_id") or "").strip() == str(result_id or "").strip()
         if same_strategy and same_result:
+            if "centering_pos" not in entry and "centering_pos" in existing:
+                entry["centering_pos"] = existing["centering_pos"]
             entries[index] = entry
             replaced = True
             break
