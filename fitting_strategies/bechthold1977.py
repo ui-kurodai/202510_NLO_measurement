@@ -351,6 +351,30 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
                         
                         lc = A - B
                         lc_list.append(abs(lc))
+            
+            elif np.isclose(pol_in, 45):
+                if np.isclose(pol_out, 0):
+                    n_w_dic = self.n_eff(pol_in, wl1_nm, aux=True)
+                    n_w_rot = n_w_dic["n_rot"]
+                    n_w_cut = n_w_dic["n_cut"]
+                    n_w_third = n_w_dic["n_third"]
+                    n_w = (n_w_rot + n_w_third) / 2.0
+
+                    n_2w = self.n_eff(pol_out, wl1_nm / 2.0, aux=True)
+                    n_2w_rot = n_2w["n_rot"]
+                    n_2w_cut = n_2w["n_cut"]
+                    n_2w_third = n_2w["n_third"]
+                    for i in range(th_rad.size - 1):
+                        A = fitted_L_mm * (np.sin(th_rad[i + 1])**2 - np.sin(th_rad[i])**2) / (4.0 * n_w * n_2w)
+                        B = A* (n_w * (n_w_third**2 - n_w_cut**2) * n_2w_rot / (2*(n_w - n_2w_rot) * n_2w_cut**2 * n_w_rot))
+                        
+                        lc = A + B
+                        lc_list.append(abs(lc))
+
+            else:
+                raise ValueError(
+                    "Input polarization is supported only for 0, 90, or 45 degrees."
+                )
 
             return np.asarray(lc_list, dtype=float)
 
