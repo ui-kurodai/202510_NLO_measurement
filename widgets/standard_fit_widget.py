@@ -72,6 +72,9 @@ class StandardFitWidget(QWidget):
         self._manual_controls: Dict[str, Dict[str, QDoubleSpinBox | QSlider]] = {}
         self.plot_setting_buttons: Dict[str, QPushButton] = {}
         self.plot_range_edits: Dict[str, Dict[str, QLineEdit]] = {}
+        self.plot_canvas_frames: Dict[str, QWidget] = {}
+        self._main_splitter: Optional[QSplitter] = None
+        self._left_panel: Optional[QWidget] = None
         self._build_ui()
 
     def _add_plot_settings_button(self, layout: QVBoxLayout, plot_key: str) -> None:
@@ -111,14 +114,17 @@ class StandardFitWidget(QWidget):
         grid.setColumnStretch(2, 1)
         layout.addWidget(frame)
         self.plot_range_edits[plot_key] = edits
+        self.plot_canvas_frames[plot_key] = frame
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._main_splitter = splitter
 
         left = QWidget()
+        self._left_panel = left
         left_layout = QVBoxLayout(left)
 
         folder_group = QGroupBox("Folder")
@@ -253,8 +259,9 @@ class StandardFitWidget(QWidget):
 
         self.right_scroll = QScrollArea()
         self.right_scroll.setWidgetResizable(True)
-        self.right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         right = QWidget()
+        right.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Preferred)
         right_layout = QVBoxLayout(right)
 
         self.plot_tabs = QTabWidget()

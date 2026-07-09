@@ -434,7 +434,7 @@ class ManualExtremaDetectionWidget(QWidget):
         self._pick_targets = {}
         ax = self.canvas.ax
         ax.plot(self._display_x, self._display_y, linewidth=1.0, label="Data")
-        ax.plot(self._display_x, self._fit_curve, linewidth=1.2, alpha=0.7, label="Current fit")
+        ax.plot(self._display_x, self._fit_curve, linewidth=1.2, alpha=0.7, label="Current Fit")
 
         minima_idx = np.asarray(self._editor.get("minima_idx", []), dtype=int)
         maxima_idx = np.asarray(self._editor.get("maxima_idx", []), dtype=int)

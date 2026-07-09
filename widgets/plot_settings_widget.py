@@ -35,6 +35,7 @@ class SeriesPlotSettings:
     color: str = "C0"
     style: str = "*"
     visible: bool = True
+    legend_visible: bool = True
 
 
 @dataclass
@@ -265,12 +266,13 @@ class PlotSettingsDialog(QDialog):
         else:
             self.colormap = QComboBox()
 
-        self.series_table = QTableWidget(len(self.settings.series_order), 4)
-        self.series_table.setHorizontalHeaderLabels(["Data", "Color", "Style", "Show"])
+        self.series_table = QTableWidget(len(self.settings.series_order), 5)
+        self.series_table.setHorizontalHeaderLabels(["Data", "Color", "Style", "Show", "Legend"])
         self.series_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.series_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.series_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.series_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.series_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         for row, label in enumerate(self.settings.series_order):
             self._populate_series_row(row, label)
         layout.addWidget(self.series_table)
@@ -321,6 +323,10 @@ class PlotSettingsDialog(QDialog):
         show = QCheckBox()
         show.setChecked(series.visible)
         self.series_table.setCellWidget(row, 3, show)
+
+        legend = QCheckBox()
+        legend.setChecked(series.legend_visible)
+        self.series_table.setCellWidget(row, 4, legend)
 
     def _paint_color_button(self, button: QPushButton, color: str) -> None:
         button.setText(color)
@@ -474,11 +480,13 @@ class PlotSettingsDialog(QDialog):
             color_button = self.series_table.cellWidget(row, 1)
             style_combo = self.series_table.cellWidget(row, 2)
             show_box = self.series_table.cellWidget(row, 3)
+            legend_box = self.series_table.cellWidget(row, 4)
             self.settings.series[key] = SeriesPlotSettings(
                 label=legend_label,
                 color=color_button.text() if isinstance(color_button, QPushButton) else "C0",
                 style=style_combo.currentText() if isinstance(style_combo, QComboBox) else "*",
                 visible=show_box.isChecked() if isinstance(show_box, QCheckBox) else True,
+                legend_visible=legend_box.isChecked() if isinstance(legend_box, QCheckBox) else True,
             )
         self.settings.series_order = order
 

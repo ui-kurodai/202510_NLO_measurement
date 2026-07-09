@@ -276,9 +276,12 @@ class FittingAnalysisWidget(QWidget):
             "sb_n_landscape_delta_points",
             "plot_setting_buttons",
             "plot_range_edits",
+            "plot_canvas_frames",
             "btn_plot_settings",
             "btn_save_current_plot",
             "btn_copy_current_plot",
+            "_main_splitter",
+            "_left_panel",
             "sb_manual_centering",
             "btn_reset_manual",
             "btn_apply_manual",
@@ -762,6 +765,7 @@ class FittingAnalysisWidget(QWidget):
             button.setChecked(key == page_key)
             button.blockSignals(False)
         self._sync_page_chrome()
+        self._update_plot_scroll_width()
         if page_changed:
             self._populate_strategy_list()
         if page_key != "home" and self._analysis_context:
@@ -2261,6 +2265,7 @@ class FittingAnalysisWidget(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_all_canvas_heights()
+        self._update_plot_scroll_width()
 
     def _update_plot_tab_visibility(self):
         if not hasattr(self, "_plot_pages"):
@@ -2296,18 +2301,69 @@ class FittingAnalysisWidget(QWidget):
         computed = int(settings.figure_height * 100 + extra_height)
         return max(base_height, computed)
 
+    def _canvas_target_width(self, plot_key: str) -> int:
+        settings = self._plot_settings[plot_key]
+        canvas = self._plot_canvases.get(plot_key) if hasattr(self, "_plot_canvases") else None
+        dpi = float(getattr(getattr(canvas, "figure", None), "dpi", 100.0) or 100.0)
+        return max(420, int(settings.figure_width * dpi))
+
+    def _plot_frame_target_width(self, plot_key: str) -> int:
+        # Leave room for the external y-range boxes and the small grid gaps around the canvas.
+        return self._canvas_target_width(plot_key) + 96
+
     def _update_canvas_height(self, plot_key: str):
         if not hasattr(self, "_plot_canvases"):
             return
         canvas = self._plot_canvases[plot_key]
         height = self._canvas_target_height(plot_key)
         canvas.setFixedHeight(height)
+        canvas.setMinimumWidth(self._canvas_target_width(plot_key))
+        frame = getattr(self, "plot_canvas_frames", {}).get(plot_key)
+        if frame is not None:
+            frame.setMinimumWidth(self._plot_frame_target_width(plot_key))
 
     def _update_all_canvas_heights(self):
         if not hasattr(self, "_plot_canvases"):
             return
         for plot_key in self._plot_canvases:
             self._update_canvas_height(plot_key)
+        self._update_plot_scroll_width()
+
+    def _update_plot_scroll_width(self):
+        if not hasattr(self, "right_scroll") or not hasattr(self, "_plot_canvases"):
+            return
+        if getattr(self, "_current_page_key", None) != "standard":
+            if hasattr(self, "page_stack"):
+                self.page_stack.setMinimumWidth(0)
+            self.setMinimumWidth(0)
+            return
+        content = self.right_scroll.widget()
+        if content is None:
+            return
+        required_width = max(
+            (self._plot_frame_target_width(plot_key) for plot_key in self._plot_canvases),
+            default=0,
+        )
+        right_content_width = required_width + 24
+        content.setMinimumWidth(right_content_width)
+        self.plot_tabs.setMinimumWidth(required_width)
+
+        left_panel = getattr(self, "_left_panel", None)
+        left_width = 0
+        if left_panel is not None:
+            left_width = max(
+                left_panel.minimumWidth(),
+                left_panel.minimumSizeHint().width(),
+                340,
+            )
+        splitter = getattr(self, "_main_splitter", None)
+        handle_width = splitter.handleWidth() if splitter is not None else 4
+        standard_width = left_width + right_content_width + handle_width + 24
+        if hasattr(self, "standard_fit_widget"):
+            self.standard_fit_widget.setMinimumWidth(standard_width)
+        if hasattr(self, "page_stack") and self._current_page_key == "standard":
+            self.page_stack.setMinimumWidth(standard_width)
+            self.setMinimumWidth(standard_width + 16)
 
     def _default_plot_settings(self, plot_key: str) -> PlotSettings:
         font_size = 11.0 if plot_key == "fit" else 10.0
@@ -2363,7 +2419,7 @@ class FittingAnalysisWidget(QWidget):
         defaults = {
             "fit": [
                 SeriesPlotSettings("Data", "C0", "*"),
-                SeriesPlotSettings("Fitting", "C1", "-"),
+                SeriesPlotSettings("Fit", "C1", "-"),
                 SeriesPlotSettings("Envelope", "C2", "--"),
             ],
             "resid": [
@@ -2377,7 +2433,7 @@ class FittingAnalysisWidget(QWidget):
             ],
             "extrema": [
                 SeriesPlotSettings("Data", "C0", "-"),
-                SeriesPlotSettings("Current fit", "C1", "-"),
+                SeriesPlotSettings("Current Fit", "C1", "-"),
                 SeriesPlotSettings("Minima", "C3", "o"),
                 SeriesPlotSettings("Maxima", "C2", "^"),
             ],
@@ -2404,7 +2460,7 @@ class FittingAnalysisWidget(QWidget):
                 ExtraAxisPlotSettings(
                     key="colorbar",
                     name="Colorbar",
-                    label="log10(SSR - min + 1)",
+                    label="log$_{10}$(SSR - min + 1)",
                     label_font_size=10.0,
                     tick_font_size=10.0,
                 )
@@ -2458,9 +2514,21 @@ class FittingAnalysisWidget(QWidget):
         series = self._series_setting(plot_key, label)
         kwargs = self._style_to_kwargs(series.style, plot_key)
         kwargs["color"] = series.color
-        kwargs["label"] = series.label or label
+        kwargs["label"] = self._legend_label(plot_key, label)
         kwargs["zorder"] = 2 + self._series_order_index(plot_key, label)
         return kwargs
+
+    def _legend_label(self, plot_key: str, label: str, override: Optional[str] = None) -> str:
+        series = self._series_setting(plot_key, label)
+        if not series.legend_visible:
+            return "_nolegend_"
+        return override or series.label or label
+
+    def _lc_legend_label(self, label: str, value_mm: float) -> str:
+        if not np.isfinite(value_mm):
+            return self._legend_label("lc", label)
+        prefix = "Calc. Lc(0)" if label == "Theory Lc" else "Fit Lc(0)"
+        return self._legend_label("lc", label, rf"{prefix}={value_mm * 1000.0:.1f} $\mathrm{{\mu m}}$")
 
     def _extra_axis_setting(self, plot_key: str, key: str) -> Optional[ExtraAxisPlotSettings]:
         settings = self._plot_settings[plot_key]
@@ -4012,8 +4080,8 @@ class FittingAnalysisWidget(QWidget):
         if self.chk_fit_show_data.isChecked() and self._series_visible("fit", "Data"):
             kwargs = self._series_plot_kwargs("fit", "Data")
             ax.plot(live["x"], live["y"], **kwargs)
-        if self.chk_fit_show_fitting.isChecked() and self._series_visible("fit", "Fitting"):
-            ax.plot(live["x"], live["fit_curve"], **self._series_plot_kwargs("fit", "Fitting"))
+        if self.chk_fit_show_fitting.isChecked() and self._series_visible("fit", "Fit"):
+            ax.plot(live["x"], live["fit_curve"], **self._series_plot_kwargs("fit", "Fit"))
         if self.chk_fit_show_envelope.isChecked() and not self._is_wedge_scan() and self._series_visible("fit", "Envelope"):
             ax.plot(live["x"], live["envelope_curve"], **self._series_plot_kwargs("fit", "Envelope"))
         nominal_L = self._nominal_thickness_mm()
@@ -4056,7 +4124,7 @@ class FittingAnalysisWidget(QWidget):
                 color=zero.color,
                 linestyle=self._style_to_kwargs(zero.style, "resid").get("linestyle", "-"),
                 linewidth=settings.line_width,
-                label="Zero line",
+                label=self._legend_label("resid", "Zero line"),
                 zorder=2 + self._series_order_index("resid", "Zero line"),
             )
         self._configure_plot_axes(
@@ -4090,7 +4158,7 @@ class FittingAnalysisWidget(QWidget):
                 color=best.color,
                 linestyle=self._style_to_kwargs(best.style, "centering").get("linestyle", "--"),
                 linewidth=settings.line_width,
-                label="Best center",
+                label=self._legend_label("centering", "Best center"),
                 zorder=2 + self._series_order_index("centering", "Best center"),
             )
         self._configure_plot_axes(self.canvas_centering, "centering", "Cost")
@@ -4141,7 +4209,7 @@ class FittingAnalysisWidget(QWidget):
                     color=theory_series.color,
                     linestyle=self._style_to_kwargs(theory_series.style, "lc").get("linestyle", "-"),
                     linewidth=settings.line_width,
-                    label="Theory Lc",
+                    label=self._lc_legend_label("Theory Lc", theory_lc),
                     zorder=2 + self._series_order_index("lc", "Theory Lc"),
                 )
                 if hasattr(self, "lbl_lc_summary"):
@@ -4163,7 +4231,7 @@ class FittingAnalysisWidget(QWidget):
                     color=theory_series.color,
                     linestyle=self._style_to_kwargs(theory_series.style, "lc").get("linestyle", "-"),
                     linewidth=settings.line_width,
-                    label="Theory Lc",
+                    label=self._lc_legend_label("Theory Lc", theory_lc),
                     zorder=2 + self._series_order_index("lc", "Theory Lc"),
                 )
                 if hasattr(self, "lbl_lc_summary"):
@@ -4206,7 +4274,7 @@ class FittingAnalysisWidget(QWidget):
                 color=self._series_setting("lc", "Pair centers").color,
                 marker=self._style_to_kwargs(self._series_setting("lc", "Pair centers").style, "lc").get("marker") or "o",
                 s=settings.marker_size**2,
-                label="Pair centers",
+                label=self._legend_label("lc", "Pair centers"),
                 zorder=2 + self._series_order_index("lc", "Pair centers"),
             )
 
@@ -4227,7 +4295,13 @@ class FittingAnalysisWidget(QWidget):
         if np.isfinite(mean_lc) and self._series_visible("lc", "Lc(0)"):
             lc0 = self._series_setting("lc", "Lc(0)")
             ax.scatter([0.0], [mean_lc * 1000.0], color=lc0.color, marker="o", zorder=4)
-            ax.axhline(mean_lc * 1000.0, color=lc0.color, linestyle="--", linewidth=settings.line_width, label="Lc(0)")
+            ax.axhline(
+                mean_lc * 1000.0,
+                color=lc0.color,
+                linestyle="--",
+                linewidth=settings.line_width,
+                label=self._lc_legend_label("Lc(0)", mean_lc),
+            )
         if np.isfinite(theory_lc) and self._series_visible("lc", "Theory Lc"):
             theory_series = self._series_setting("lc", "Theory Lc")
             ax.axhline(
@@ -4235,7 +4309,7 @@ class FittingAnalysisWidget(QWidget):
                 color=theory_series.color,
                 linestyle=self._style_to_kwargs(theory_series.style, "lc").get("linestyle", "-"),
                 linewidth=settings.line_width,
-                label="Theory Lc",
+                label=self._lc_legend_label("Theory Lc", theory_lc),
                 zorder=2 + self._series_order_index("lc", "Theory Lc"),
             )
         if np.isfinite(mean_lc) and np.isfinite(std_lc):
@@ -4288,13 +4362,13 @@ class FittingAnalysisWidget(QWidget):
             colorbar = self.canvas_n_landscape.figure.colorbar(
                 mesh,
                 ax=ax,
-                label=(colorbar_axis.label if colorbar_axis is not None and colorbar_axis.label else "log10(SSR - min + 1)"),
+                label=(colorbar_axis.label if colorbar_axis is not None and colorbar_axis.label else "log$_{10}$(SSR - min + 1)"),
             )
             self._apply_extra_axis_settings(
                 colorbar.ax,
                 colorbar_axis,
                 axis="y",
-                default_label="log10(SSR - min + 1)",
+                default_label="log$_{10}$(SSR - min + 1)",
                 font_family=settings.font_family,
             )
         if self._series_visible("n_landscape", "Current point"):
@@ -4306,7 +4380,7 @@ class FittingAnalysisWidget(QWidget):
                 edgecolor="black",
                 marker=self._style_to_kwargs(current_series.style, "n_landscape").get("marker") or "o",
                 s=settings.marker_size**2,
-                label="Current point",
+                label=self._legend_label("n_landscape", "Current point"),
                 zorder=2 + self._series_order_index("n_landscape", "Current point"),
             )
         candidates = list(info.get("candidates") or [])
@@ -4320,7 +4394,7 @@ class FittingAnalysisWidget(QWidget):
                 marker=self._style_to_kwargs(best_series.style, "n_landscape").get("marker") or "x",
                 s=(settings.marker_size + 3.0) ** 2,
                 zorder=2 + self._series_order_index("n_landscape", "Best grid"),
-                label="Best grid",
+                label=self._legend_label("n_landscape", "Best grid"),
             )
         nominal_L = self._safe_float(info.get("nominal_L"))
         if np.isfinite(nominal_L) and self._series_visible("n_landscape", "Measured L"):
@@ -4330,7 +4404,7 @@ class FittingAnalysisWidget(QWidget):
                 color=measured.color,
                 linestyle=self._style_to_kwargs(measured.style, "n_landscape").get("linestyle", ":"),
                 linewidth=settings.line_width,
-                label="Measured L",
+                label=self._legend_label("n_landscape", "Measured L"),
                 zorder=2 + self._series_order_index("n_landscape", "Measured L"),
             )
         ax.set_xlabel("L (mm)", fontfamily=settings.font_family)
@@ -4404,6 +4478,7 @@ class FittingAnalysisWidget(QWidget):
             fit_result = {
                 "L_mm": float(live["L_value"]),
                 "delta_n": float(live.get("delta_n", 0.0)),
+                "centering_pos": self._manual_centering_value(),
                 "d_rel_abs": float(np.sqrt(linear_coeff)),
                 "d_component": str((self._analysis_context.get("saved_fit") or {}).get("d_component") or meta.get("d_component", "")),
             }
