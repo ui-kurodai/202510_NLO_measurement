@@ -162,6 +162,8 @@ class FittingAnalysisWidget(QWidget):
         self._use_saved_fit_preview = False
         self._manual_controls: Dict[str, Dict[str, QDoubleSpinBox | QSlider]] = {}
         self._manual_syncing = False
+        self._fit_range_controls: Dict[str, Any] = {}
+        self._fit_range_syncing = False
         self._extrema_force_reset = False
         self._sample_catalog_map: Dict[str, Dict[str, Any]] = {}
         self._beam_profile_catalog_map: Dict[str, Dict[str, Any]] = {}
@@ -286,6 +288,7 @@ class FittingAnalysisWidget(QWidget):
             "btn_reset_manual",
             "btn_apply_manual",
             "lbl_manual_hint",
+            "_fit_range_controls",
         ]:
             setattr(self, attr, getattr(self.standard_fit_widget, attr))
         self._plot_pages = self.standard_fit_widget._plot_pages
@@ -851,6 +854,7 @@ class FittingAnalysisWidget(QWidget):
         self.chk_fit_show_fitting.stateChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_envelope.stateChanged.connect(lambda *_args: self._render_analysis_plots())
         self.sb_manual_centering.valueChanged.connect(lambda *_args: self._manual_centering_changed())
+        self._connect_fit_range_controls()
         self.btn_nfit_select_folders.clicked.connect(self._nfit_select_folders_clicked)
         self.btn_nfit_refresh.clicked.connect(self._nfit_refresh_clicked)
         self.lst_nfit_group_paths.itemChanged.connect(self._nfit_folder_check_changed)
@@ -875,6 +879,18 @@ class FittingAnalysisWidget(QWidget):
         self.reload_sample_catalog()
         self.reload_beam_profile_catalog()
         self.reload_filter_catalog()
+
+    def _connect_fit_range_controls(self) -> None:
+        controls = getattr(self, "_fit_range_controls", {})
+        slider = controls.get("slider")
+        min_box = controls.get("min")
+        max_box = controls.get("max")
+        if slider is not None:
+            slider.rangeChanged.connect(lambda *_args: self._fit_range_slider_changed())
+        if min_box is not None:
+            min_box.valueChanged.connect(lambda *_args: self._fit_range_spin_changed())
+        if max_box is not None:
+            max_box.valueChanged.connect(lambda *_args: self._fit_range_spin_changed())
 
     # ------------------------------- Strategies -------------------------------
     def _populate_strategy_list(self):
@@ -1789,6 +1805,9 @@ class FittingAnalysisWidget(QWidget):
         else:
             payload.pop("n_fit_group_paths", None)
             payload.pop("n_fit_excluded_paths", None)
+        fit_range = self._current_fit_range_payload()
+        if fit_range:
+            payload["fit_range"] = fit_range
         payload = self.extrema_widget.merge_into_metadata(payload)
         return payload
 
@@ -1961,6 +1980,8 @@ class FittingAnalysisWidget(QWidget):
         if reset_manual or not self._manual_controls_ready():
             self._initialize_manual_controls_from_context()
             self._use_saved_fit_preview = self._csv_fit_matches_selected_strategy()
+        if reset_manual:
+            self._initialize_fit_range_from_context()
         self._extrema_force_reset = bool(reset_manual)
         self._render_analysis_plots()
 
@@ -2881,6 +2902,141 @@ class FittingAnalysisWidget(QWidget):
         self._set_manual_control("peak", 0.0, max(auto_peak + peak_span, peak_span), max(auto_peak, 0.0))
         self._set_manual_control("delta_n", delta_n - delta_n_span, delta_n + delta_n_span, delta_n)
         self.sb_manual_centering.setValue(float(centering_value))
+
+    def _fit_range_values_from_meta(self, meta: Optional[Dict[str, Any]] = None) -> Tuple[float, float]:
+        raw = (meta if meta is not None else self._meta or {}).get("fit_range")
+        if not isinstance(raw, dict):
+            return float("nan"), float("nan")
+        low = self._safe_float(raw.get("min"))
+        high = self._safe_float(raw.get("max"))
+        if np.isfinite(low) and np.isfinite(high):
+            return (min(low, high), max(low, high))
+        return float("nan"), float("nan")
+
+    def _initialize_fit_range_from_context(self) -> None:
+        controls = getattr(self, "_fit_range_controls", {})
+        slider = controls.get("slider")
+        min_box = controls.get("min")
+        max_box = controls.get("max")
+        if slider is None or min_box is None or max_box is None:
+            return
+
+        context = self._analysis_context or {}
+        x = np.asarray(context.get("display_x", []), dtype=float)
+        finite = x[np.isfinite(x)]
+        if finite.size == 0 and isinstance(self._df, pd.DataFrame) and "position" in self._df.columns:
+            fallback = np.asarray(self._df["position"], dtype=float)
+            finite = fallback[np.isfinite(fallback)]
+        if finite.size == 0:
+            return
+
+        data_min = float(np.nanmin(finite))
+        data_max = float(np.nanmax(finite))
+        if not np.isfinite(data_min) or not np.isfinite(data_max):
+            return
+        if data_max <= data_min:
+            data_max = data_min + 1e-9
+
+        saved_min, saved_max = self._fit_range_values_from_meta(self._meta)
+        range_min = data_min if not np.isfinite(saved_min) else max(data_min, min(saved_min, data_max))
+        range_max = data_max if not np.isfinite(saved_max) else max(data_min, min(saved_max, data_max))
+        if range_max < range_min:
+            range_min, range_max = range_max, range_min
+
+        span = data_max - data_min
+        step = 10.0 ** (math.floor(math.log10(span)) - 3) if span > 0 else 0.0001
+        step = max(step, 0.0001)
+
+        self._fit_range_syncing = True
+        try:
+            for box in (min_box, max_box):
+                box.setRange(data_min, data_max)
+                box.setSingleStep(step)
+            min_box.setValue(range_min)
+            max_box.setValue(range_max)
+            slider.setRange(0, self._SLIDER_STEPS)
+            slider.setValues(
+                self._fit_range_value_to_step(range_min, data_min, data_max),
+                self._fit_range_value_to_step(range_max, data_min, data_max),
+            )
+        finally:
+            self._fit_range_syncing = False
+
+    def _fit_range_value_to_step(self, value: float, data_min: float, data_max: float) -> int:
+        if data_max <= data_min:
+            return 0
+        ratio = (float(value) - data_min) / (data_max - data_min)
+        return max(0, min(self._SLIDER_STEPS, int(round(ratio * self._SLIDER_STEPS))))
+
+    def _fit_range_step_to_value(self, step: int) -> float:
+        controls = self._fit_range_controls
+        min_box = controls.get("min")
+        max_box = controls.get("max")
+        if min_box is None or max_box is None:
+            return float("nan")
+        data_min = float(min_box.minimum())
+        data_max = float(max_box.maximum())
+        if data_max <= data_min:
+            return data_min
+        return data_min + (data_max - data_min) * int(step) / self._SLIDER_STEPS
+
+    def _fit_range_slider_changed(self) -> None:
+        if self._fit_range_syncing:
+            return
+        controls = self._fit_range_controls
+        slider = controls.get("slider")
+        min_box = controls.get("min")
+        max_box = controls.get("max")
+        if slider is None or min_box is None or max_box is None:
+            return
+        low_step, high_step = slider.values()
+        self._fit_range_syncing = True
+        try:
+            min_box.setValue(self._fit_range_step_to_value(low_step))
+            max_box.setValue(self._fit_range_step_to_value(high_step))
+        finally:
+            self._fit_range_syncing = False
+
+    def _fit_range_spin_changed(self) -> None:
+        if self._fit_range_syncing:
+            return
+        controls = self._fit_range_controls
+        slider = controls.get("slider")
+        min_box = controls.get("min")
+        max_box = controls.get("max")
+        if slider is None or min_box is None or max_box is None:
+            return
+        low = float(min_box.value())
+        high = float(max_box.value())
+        if high < low:
+            high = low
+            self._fit_range_syncing = True
+            try:
+                max_box.setValue(high)
+            finally:
+                self._fit_range_syncing = False
+        data_min = float(min_box.minimum())
+        data_max = float(max_box.maximum())
+        self._fit_range_syncing = True
+        try:
+            slider.setValues(
+                self._fit_range_value_to_step(low, data_min, data_max),
+                self._fit_range_value_to_step(high, data_min, data_max),
+            )
+        finally:
+            self._fit_range_syncing = False
+
+    def _current_fit_range_payload(self) -> Dict[str, float]:
+        controls = getattr(self, "_fit_range_controls", {})
+        min_box = controls.get("min")
+        max_box = controls.get("max")
+        if min_box is None or max_box is None:
+            return {}
+        low = float(min_box.value())
+        high = float(max_box.value())
+        if not (np.isfinite(low) and np.isfinite(high)):
+            return {}
+        return {"min": min(low, high), "max": max(low, high)}
 
     def _set_manual_control(self, key: str, minimum: float, maximum: float, value: float):
         controls = self._manual_controls[key]

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from PyQt6.QtCore import QLocale, Qt
+from PyQt6.QtCore import QLocale, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -65,11 +66,102 @@ class SavedStrategyListWidget(QListWidget):
         super().mousePressEvent(event)
 
 
+class RangeSlider(QWidget):
+    rangeChanged = pyqtSignal(int, int)
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._minimum = 0
+        self._maximum = 100
+        self._low = 0
+        self._high = 100
+        self._active_handle: Optional[str] = None
+        self.setMinimumWidth(260)
+        self.setFixedHeight(28)
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def setRange(self, minimum: int, maximum: int) -> None:
+        self._minimum = int(minimum)
+        self._maximum = max(int(maximum), self._minimum + 1)
+        self.setValues(self._low, self._high)
+
+    def values(self) -> tuple[int, int]:
+        return self._low, self._high
+
+    def setValues(self, low: int, high: int) -> None:
+        low = max(self._minimum, min(int(low), self._maximum))
+        high = max(self._minimum, min(int(high), self._maximum))
+        if low > high:
+            low, high = high, low
+        changed = (low != self._low) or (high != self._high)
+        self._low = low
+        self._high = high
+        self.update()
+        if changed:
+            self.rangeChanged.emit(self._low, self._high)
+
+    def _track_rect(self) -> QRectF:
+        margin = 9.0
+        y = self.height() / 2.0 - 2.0
+        return QRectF(margin, y, max(1.0, self.width() - 2.0 * margin), 4.0)
+
+    def _value_to_x(self, value: int) -> float:
+        track = self._track_rect()
+        ratio = (float(value) - self._minimum) / (self._maximum - self._minimum)
+        return track.left() + ratio * track.width()
+
+    def _x_to_value(self, x: float) -> int:
+        track = self._track_rect()
+        ratio = (float(x) - track.left()) / track.width()
+        value = self._minimum + ratio * (self._maximum - self._minimum)
+        return max(self._minimum, min(self._maximum, int(round(value))))
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        track = self._track_rect()
+        low_x = self._value_to_x(self._low)
+        high_x = self._value_to_x(self._high)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#d0d0d0"))
+        painter.drawRoundedRect(track, 2.0, 2.0)
+        painter.setBrush(QColor("#4f7fbf"))
+        painter.drawRoundedRect(QRectF(low_x, track.top(), high_x - low_x, track.height()), 2.0, 2.0)
+
+        painter.setPen(QPen(QColor("#335f99"), 1.0))
+        painter.setBrush(QColor("#ffffff"))
+        for x in (low_x, high_x):
+            painter.drawEllipse(QRectF(x - 6.0, self.height() / 2.0 - 6.0, 12.0, 12.0))
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        value = self._x_to_value(event.position().x())
+        low_dist = abs(value - self._low)
+        high_dist = abs(value - self._high)
+        self._active_handle = "low" if low_dist <= high_dist else "high"
+        self._move_active_handle(value)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._active_handle:
+            self._move_active_handle(self._x_to_value(event.position().x()))
+
+    def mouseReleaseEvent(self, _event: QMouseEvent) -> None:
+        self._active_handle = None
+
+    def _move_active_handle(self, value: int) -> None:
+        if self._active_handle == "low":
+            self.setValues(min(value, self._high), self._high)
+        elif self._active_handle == "high":
+            self.setValues(self._low, max(value, self._low))
+
+
 class StandardFitWidget(QWidget):
     def __init__(self, slider_steps: int, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._slider_steps = slider_steps
         self._manual_controls: Dict[str, Dict[str, QDoubleSpinBox | QSlider]] = {}
+        self._fit_range_controls: Dict[str, QDoubleSpinBox | RangeSlider] = {}
         self.plot_setting_buttons: Dict[str, QPushButton] = {}
         self.plot_range_edits: Dict[str, Dict[str, QLineEdit]] = {}
         self.plot_canvas_frames: Dict[str, QWidget] = {}
@@ -428,6 +520,7 @@ class StandardFitWidget(QWidget):
         group = QGroupBox("Manual Fit Control")
         layout = QVBoxLayout(group)
         form = QFormLayout()
+        self._create_fit_range_row(form)
         self._create_manual_control_row(
             form=form,
             key="L",
@@ -479,6 +572,39 @@ class StandardFitWidget(QWidget):
         self.lbl_manual_hint.setStyleSheet("color: gray;")
         layout.addWidget(self.lbl_manual_hint)
         return group
+
+    def _create_fit_range_row(self, form: QFormLayout) -> None:
+        slider = RangeSlider()
+
+        min_box = QDoubleSpinBox()
+        min_box.setLocale(QLocale.c())
+        min_box.setDecimals(4)
+        min_box.setSingleStep(0.1)
+        min_box.setKeyboardTracking(False)
+        min_box.setFixedWidth(88)
+
+        max_box = QDoubleSpinBox()
+        max_box.setLocale(QLocale.c())
+        max_box.setDecimals(4)
+        max_box.setSingleStep(0.1)
+        max_box.setKeyboardTracking(False)
+        max_box.setFixedWidth(88)
+
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+        row_layout.addWidget(slider, 1)
+        row_layout.addWidget(min_box, 0)
+        row_layout.addWidget(QLabel("-"), 0)
+        row_layout.addWidget(max_box, 0)
+        form.addRow("Fit range:", row)
+
+        self._fit_range_controls = {
+            "slider": slider,
+            "min": min_box,
+            "max": max_box,
+        }
 
     def _create_manual_control_row(
         self,

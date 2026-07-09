@@ -359,7 +359,7 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
         pos = np.asarray(data.get("position_centered", data["position"]), dtype=float)
         intensity = np.asarray(data["offset_corrected"], dtype=float)
         finite = np.isfinite(pos) & np.isfinite(intensity)
-        mask = finite & (np.abs(pos) < 5.0)
+        mask = self._fit_range_mask(data, meta=meta, base_mask=finite & (np.abs(pos) < 5.0), min_points=3)
         if np.count_nonzero(mask) < 3:
             fit_L = self._fit_L_small_angle(meta, data)
             fit_L.update(
@@ -444,7 +444,8 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
         """Fit L and delta_n against the full finite trace for app use."""
         pos = np.asarray(data.get("position_centered", data["position"]), dtype=float)
         intensity = np.asarray(data["offset_corrected"], dtype=float)
-        mask = np.isfinite(pos) & np.isfinite(intensity)
+        finite = np.isfinite(pos) & np.isfinite(intensity)
+        mask = self._fit_range_mask(data, meta=meta, base_mask=finite, min_points=3)
         if np.count_nonzero(mask) < 3:
             return self._fit_L_delta_n_small_angle(meta, data)
 
@@ -894,7 +895,8 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
         except Exception as e:
             print(f"Error: {e}")
             Lc = []
-        Pm0_fit, _Pm0 = self._fit_Pm0(data)
+        fit_eval_data = self._data_for_fit_range(data, meta=self.analysis.meta)
+        Pm0_fit, _Pm0 = self._fit_Pm0(fit_eval_data)
         _fit_model, fit_aux = self._maker_fringes(
             override={
                 "L": L_fit["L_mm"],

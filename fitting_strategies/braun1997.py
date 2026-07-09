@@ -1085,11 +1085,12 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
         theta_deg = np.asarray(data.get("position_centered", data["position"]), dtype=float)
         y = np.asarray(data.get("intensity_corrected", data.get("ch2")), dtype=float)
         finite_y = np.isfinite(theta_deg) & np.isfinite(y)
-        if not np.any(finite_y):
+        fit_mask = self._fit_range_mask(data, meta=meta, base_mask=finite_y, min_points=3)
+        if not np.any(fit_mask):
             raise ValueError("No finite points available for Braun1997 fitting.")
 
-        theta_fit = theta_deg[finite_y]
-        y_fit = y[finite_y]
+        theta_fit = theta_deg[fit_mask]
+        y_fit = y[fit_mask]
         L0_mm = float(meta["thickness_info"]["t_center_mm"])
 
         def residual(params):

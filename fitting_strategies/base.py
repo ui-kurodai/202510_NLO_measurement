@@ -52,6 +52,45 @@ class BaseFittingStrategy:
         if finite.size == 0:
             return default
         return float(finite[0])
+
+    def _fit_range_bounds(self, meta=None):
+        if meta is None:
+            meta = getattr(getattr(self, "analysis", None), "meta", None)
+        raw = meta.get("fit_range") if isinstance(meta, dict) else None
+        if not isinstance(raw, dict):
+            return None
+        try:
+            lo = float(raw.get("min"))
+            hi = float(raw.get("max"))
+        except Exception:
+            return None
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            return None
+        if hi < lo:
+            lo, hi = hi, lo
+        return lo, hi
+
+    def _fit_range_axis(self, data):
+        if "position_centered" in data:
+            return np.asarray(data["position_centered"], dtype=float)
+        return np.asarray(data["position"], dtype=float)
+
+    def _fit_range_mask(self, data, meta=None, base_mask=None, min_points=3):
+        axis = self._fit_range_axis(data)
+        mask = np.isfinite(axis)
+        if base_mask is not None:
+            mask &= np.asarray(base_mask, dtype=bool)
+        bounds = self._fit_range_bounds(meta)
+        if bounds is not None:
+            lo, hi = bounds
+            mask &= (axis >= lo) & (axis <= hi)
+        if np.count_nonzero(mask) < int(min_points):
+            raise ValueError("Not enough finite data points inside fit_range.")
+        return mask
+
+    def _data_for_fit_range(self, data, meta=None, min_points=3):
+        mask = self._fit_range_mask(data, meta=meta, min_points=min_points)
+        return data.loc[mask].copy()
     
 
     _UNSET = object()
@@ -596,7 +635,8 @@ class BaseWedgeStrategy(BaseFittingStrategy):
         """
         meta, data = self._resolve_input_info(meta=meta, data=data)
 
-        y = np.asarray(data["intensity_corrected"], dtype=float)
+        fit_data = self._data_for_fit_range(data, meta=meta)
+        y = np.asarray(fit_data["intensity_corrected"], dtype=float)
         L0_mm = meta["thickness_info"]["t_center_mm"]
 
         search_um = 15
@@ -609,7 +649,7 @@ class BaseWedgeStrategy(BaseFittingStrategy):
 
         def residual(params):
             L_mm = float(params[0])
-            y_model = self._maker_fringes(override={"L": L_mm, "meta": meta, "data": data})
+            y_model = self._maker_fringes(override={"L": L_mm, "meta": meta, "data": fit_data})
             y_model = np.asarray(y_model, dtype=float)
             if y_model.shape != y.shape:
                 raise ValueError(f"Model returned shape {y_model.shape}, expected {y.shape}.")
