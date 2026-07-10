@@ -1759,6 +1759,35 @@ class Bechthold1977WedgeStrategy(Bechthold1977Strategy, BaseWedgeStrategy):
         ("BaMgF4", "100", "001", 45, 0): ("BaMgF4", "100", "010", 45, 0),
     }
 
+    def _delta_n_axis_roles(self, meta):
+        theory_meta = self._rotation_theory_meta(meta)
+        cut_axis = self.normalize_axis(theory_meta["crystal_orientation"])
+        rot_axis = self.normalize_axis(theory_meta["rot/trans_axis"])
+        third_axis = self._third_axis(cut_axis, rot_axis)
+        axis_label = self.BIAXIAL_N
+
+        key = self._geometry_key(theory_meta)
+        exp_config = Bechthold1977Strategy.GEOMETRY_FUNCTIONS.get(key)
+        if exp_config in ("7", "9"):
+            return {
+                "w_axes": (axis_label[rot_axis],),
+                "two_w_axes": (axis_label[third_axis],),
+                "weight": 2.0,
+            }
+        if exp_config in ("11", "12"):
+            return {
+                "w_axes": (axis_label[rot_axis],),
+                "two_w_axes": (axis_label[rot_axis],),
+                "weight": 4.0,
+            }
+        if exp_config in ("13", "15"):
+            return {
+                "w_axes": (axis_label[third_axis], axis_label[rot_axis]),
+                "two_w_axes": (axis_label[rot_axis],),
+                "weight": 1.0,
+            }
+        return super()._delta_n_axis_roles(theory_meta)
+
     def _rotation_theory_meta(self, meta: dict):
         key = (
             meta["material"],

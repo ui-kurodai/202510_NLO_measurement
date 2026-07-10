@@ -711,7 +711,8 @@ class BaseWedgeStrategy(BaseFittingStrategy):
         finite = np.isfinite(intensity) & np.isfinite(fit_curve)
         if not np.any(finite):
             raise ValueError("No finite residual points available for wedge fitting.")
-        residual_rms = float(np.sqrt(np.mean((intensity[finite] - fit_curve[finite]) ** 2)))
+        fit_eval_mask = self._fit_range_mask(data, meta=meta, base_mask=finite, min_points=1)
+        residual_rms = float(np.sqrt(np.mean((intensity[fit_eval_mask] - fit_curve[fit_eval_mask]) ** 2)))
 
         out = data.copy()
         out["fit"] = fit_curve
