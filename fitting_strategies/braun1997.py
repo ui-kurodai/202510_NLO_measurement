@@ -1176,7 +1176,6 @@ class Braun1997Strategy(Jerphagnon1970Strategy):
         if isinstance(_fit_aux, dict) and _fit_aux.get("delta_k") is not None:
             delta_k = self._coerce_scalar(_fit_aux["delta_k"])
             if np.isfinite(delta_k):
-                results["delta_k_theory_inv_mm"] = float(delta_k)
                 results["Lc_theory_mm"] = float(np.pi / abs(delta_k)) if not np.isclose(delta_k, 0.0) else float("nan")
 
         self.analysis.meta = upsert_fitting_result(

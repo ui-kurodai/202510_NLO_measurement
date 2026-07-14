@@ -14,12 +14,16 @@ FITTING_RESULT_KEYS: tuple[str, ...] = (
     "d_rel_abs",
     "d_component",
     "d_factor",
+    "Lc_exp_mm",
+    "Lc_exp_std_mm",
     "Lc_mean_mm",
     "Lc_std_mm",
     "Lc_pair_mean_mm",
     "Lc_pair_std_mm",
     "Lc_theory_mm",
     "delta_k_theory_inv_mm",
+    "lc_wedge_minima_mm",
+    "lc_wedge_minima_std_mm",
     "lc_extrapolation_order",
     "lc_order_residual_rms",
     "residual_rms",
@@ -60,22 +64,64 @@ FITTING_ACTIVE_STRATEGY_KEY = "fitting_active_strategy"
 FITTING_ACTIVE_RESULT_ID_KEY = "fitting_active_result_id"
 
 
+def normalize_lc_aliases(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    if "Lc_exp_mm" not in normalized and "Lc_mean_mm" in normalized:
+        normalized["Lc_exp_mm"] = normalized["Lc_mean_mm"]
+    if "Lc_exp_std_mm" not in normalized and "Lc_std_mm" in normalized:
+        normalized["Lc_exp_std_mm"] = normalized["Lc_std_mm"]
+    normalized.pop("Lc_mean_mm", None)
+    normalized.pop("Lc_std_mm", None)
+    return normalized
+
+
+def migrate_lc_aliases(meta: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+    payload = dict(meta) if isinstance(meta, dict) else {}
+    changed = False
+
+    def apply_aliases(entry: dict[str, Any]) -> dict[str, Any]:
+        nonlocal changed
+        updated = normalize_lc_aliases(entry)
+        if updated != entry:
+            changed = True
+        return updated
+
+    payload = apply_aliases(payload)
+
+    raw = payload.get(FITTING_CONTAINER_KEY)
+    if isinstance(raw, list):
+        entries = []
+        for entry in raw:
+            entries.append(apply_aliases(entry) if isinstance(entry, dict) else entry)
+        payload[FITTING_CONTAINER_KEY] = entries
+    elif isinstance(raw, dict):
+        if "strategy" in raw:
+            payload[FITTING_CONTAINER_KEY] = apply_aliases(raw)
+        else:
+            payload[FITTING_CONTAINER_KEY] = {
+                key: apply_aliases(value) if isinstance(value, dict) else value
+                for key, value in raw.items()
+            }
+
+    return payload, changed
+
+
 def normalize_fitting_entries(meta: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(meta, dict):
         return []
 
     raw = meta.get(FITTING_CONTAINER_KEY)
     if isinstance(raw, list):
-        return [dict(entry) for entry in raw if isinstance(entry, dict)]
+        return [normalize_lc_aliases(entry) for entry in raw if isinstance(entry, dict)]
 
     if isinstance(raw, dict):
         if "strategy" in raw:
-            return [dict(raw)]
+            return [normalize_lc_aliases(raw)]
         entries: list[dict[str, Any]] = []
         for strategy_name, entry in raw.items():
             if not isinstance(entry, dict):
                 continue
-            normalized = dict(entry)
+            normalized = normalize_lc_aliases(entry)
             normalized.setdefault("strategy", str(strategy_name))
             entries.append(normalized)
         return entries
@@ -147,7 +193,7 @@ def extract_fit_payload(
         if key in meta
     }
     if legacy_payload:
-        return legacy_payload
+        return normalize_lc_aliases(legacy_payload)
 
     return {}
 
@@ -175,6 +221,7 @@ def upsert_fitting_result(
     payload = dict(meta)
     entries = normalize_fitting_entries(payload)
 
+    result = normalize_lc_aliases(result)
     entry = {
         key: value
         for key, value in result.items()

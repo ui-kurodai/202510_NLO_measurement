@@ -609,6 +609,33 @@ class BaseWedgeStrategy(BaseFittingStrategy):
             "Supported values are 0 or 90 degree."
         )
 
+    def _theory_n_at_zero(self, pol_deg, wav_nm, meta=None, dn_override=None):
+        meta = self._resolve_input_info(meta=meta)
+        if np.isclose(pol_deg, 45.0, atol=1e-3):
+            principal = self.n_eff(pol_deg, wav_nm, meta=meta, aux=True, dn_override=dn_override)
+            return 0.5 * (float(principal["n_trans"]) + float(principal["n_third"]))
+        return float(self.n_eff(pol_deg, wav_nm, meta=meta, dn_override=dn_override))
+
+    def _calc_theoretical_lc(self, meta=None, dn_override=None):
+        meta = self._resolve_input_info(meta=meta)
+        wl1_nm = float(meta["wavelength_nm"])
+        wl1_mm = wl1_nm * 1e-6
+        n_w = self._theory_n_at_zero(
+            meta["input_polarization"],
+            wl1_nm,
+            meta=meta,
+            dn_override=dn_override,
+        )
+        n_2w = self._theory_n_at_zero(
+            meta["detected_polarization"],
+            wl1_nm / 2.0,
+            meta=meta,
+            dn_override=dn_override,
+        )
+        dn = abs(float(n_w) - float(n_2w))
+        lc = wl1_mm / (4.0 * dn) if np.isfinite(dn) and not np.isclose(dn, 0.0) else float("nan")
+        return {"Lc_theory_mm": float(lc)}
+
     def calc_thickness_array(self, override: dict = {}, meta="auto", data="auto"):
         """
         Calculate crystal thickness array from metadata
@@ -628,6 +655,38 @@ class BaseWedgeStrategy(BaseFittingStrategy):
 
         L_array = t_center + (data["position"] - self.center_pos) * np.tan(np.radians(wedge_angle_deg))
         return np.asarray(L_array, dtype=float)
+
+    def _calc_wedge_minima_lc(self, meta, data, intensity_column="intensity_corrected"):
+        x = np.asarray(data["position"], dtype=float)
+        y = np.asarray(data[intensity_column], dtype=float)
+        finite = np.isfinite(x) & np.isfinite(y)
+        if np.count_nonzero(finite) < 3:
+            return {}
+
+        x_fit = x[finite]
+        y_fit = y[finite]
+        minima_idx = self.detect_minima(x_fit, y_fit)
+        if minima_idx.size < 2:
+            return {}
+
+        minima_x = np.sort(x_fit[minima_idx])
+        wedge_deg = float(meta["thickness_info"].get("wedge_angle_deg", float("nan")))
+        if not np.isfinite(wedge_deg):
+            return {}
+
+        lc_values = 0.5 * np.abs(np.diff(minima_x)) * abs(np.tan(np.deg2rad(wedge_deg)))
+        lc_values = lc_values[np.isfinite(lc_values) & (lc_values > 0.0)]
+        if lc_values.size == 0:
+            return {}
+
+        return {
+            "lc_wedge_minima_mm": float(np.mean(lc_values)),
+            "lc_wedge_minima_std_mm": (
+                float(np.std(lc_values, ddof=1))
+                if lc_values.size >= 2
+                else float("nan")
+            ),
+        }
 
     def _fit_L(self, meta="auto", data="auto"):
         """
@@ -730,11 +789,9 @@ class BaseWedgeStrategy(BaseFittingStrategy):
             d_factor = self._coerce_scalar(fit_aux["d_factor"])
             if np.isfinite(d_factor):
                 results["d_factor"] = d_factor
-        if isinstance(fit_aux, dict) and fit_aux.get("Lc") is not None:
-            lc = self._coerce_scalar(fit_aux["Lc"])
-            if np.isfinite(lc):
-                results["Lc_mean_mm"] = lc
-                results["Lc_std_mm"] = float("nan")
+        results.update(self._calc_wedge_minima_lc(meta, data))
+        if hasattr(self, "_calc_theoretical_lc"):
+            results.update(self._calc_theoretical_lc(meta))
 
         self.analysis.meta = upsert_fitting_result(
             self.analysis.meta,

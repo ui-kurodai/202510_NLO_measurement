@@ -418,8 +418,8 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
             **extrapolation,
         }
         result =  {
-            "Lc_mean_mm": Lc_mean,
-            "Lc_std_mm": Lc_std,
+            "Lc_exp_mm": Lc_mean,
+            "Lc_exp_std_mm": Lc_std,
             "Lc_pair_mean_mm": extrapolation.get("Lc_pair_mean_mm", float("nan")),
             "Lc_pair_std_mm": extrapolation.get("Lc_pair_std_mm", float("nan")),
             "lc_extrapolation_order": extrapolation.get("lc_extrapolation_order", 0),
@@ -1363,6 +1363,19 @@ class GlobalNFitMixin:
                 local_result,
                 base_fit_result=fit_result if source_dir == current_source else None,
             )
+            dn_override = {
+                key: global_fit_result[key]
+                for key in self.DN_PARAMETER_KEYS
+                if key in global_fit_result
+            }
+            strategy = measurement.get("strategy")
+            if strategy is not None and hasattr(strategy, "_calc_theoretical_lc"):
+                local_fit_payload.update(
+                    strategy._calc_theoretical_lc(
+                        measurement.get("meta"),
+                        dn_override=dn_override,
+                    )
+                )
             meta = upsert_fitting_result(
                 meta,
                 self.__class__.__name__,
@@ -1627,6 +1640,7 @@ class GlobalNFitMixin:
             fit_result[result_key] = float(n_values[n_key])
         if isinstance(fit_aux, dict) and fit_aux.get("d_factor") is not None:
             fit_result["d_factor"] = self._coerce_scalar(fit_aux["d_factor"])
+        fit_result.update(current["strategy"]._calc_theoretical_lc(current["meta"], dn_override=dn_override))
 
         group_source_dirs = [self._measurement_source_dir(measurement) for measurement in measurements]
         fit_source_dirs = [self._measurement_source_dir(measurement) for measurement in fit_measurements]
@@ -1811,6 +1825,11 @@ class Bechthold1977WedgeStrategy(Bechthold1977Strategy, BaseWedgeStrategy):
         theory_meta["detected_polarization"] = theory_key[4]
         return theory_meta
 
+    def _calc_theoretical_lc(self, meta=None, dn_override=None):
+        meta = self.analysis.meta if meta is None else meta
+        theory_meta = self._rotation_theory_meta(meta)
+        return Bechthold1977Strategy._calc_theoretical_lc(self, theory_meta, dn_override=dn_override)
+
     def _maker_fringes(self, override: dict | None = None, return_aux=False):
         """
         Adapt Bechthold's rotation formula to wedge scans by fixing theta=0
@@ -1848,18 +1867,9 @@ class Bechthold1977WedgeStrategy(Bechthold1977Strategy, BaseWedgeStrategy):
         if not return_aux:
             return model
 
-        delta_k_values = np.asarray(rot_aux["delta_k"], dtype=float).reshape(-1)
-        finite_delta_k = delta_k_values[np.isfinite(delta_k_values)]
-        delta_k = float(finite_delta_k[0]) if finite_delta_k.size else float("nan")
-        if np.isfinite(delta_k) and not np.isclose(delta_k, 0.0):
-            lc = float(np.pi / delta_k)
-        else:
-            lc = float("nan")
-
         aux = {
             "d_factor": rot_aux["d_factor"],
             "L_array": L_array,
-            "Lc": lc,
         }
         return model, aux
     

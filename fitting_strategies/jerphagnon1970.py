@@ -23,6 +23,36 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
     def __init__(self, analysis):
         super().__init__(analysis)
 
+    def _theory_n_at_zero(self, pol_deg, wav_nm, meta=None, dn_override=None):
+        meta = self.analysis.meta if meta is None else meta
+        if np.isclose(pol_deg, 45.0, atol=1e-3):
+            principal = self.n_eff(pol_deg, wav_nm, theta_deg=0.0, meta=meta, aux=True, dn_override=dn_override)
+            if "n_rot" in principal and "n_third" in principal:
+                return 0.5 * (float(principal["n_rot"]) + float(principal["n_third"]))
+            if "n_trans" in principal and "n_third" in principal:
+                return 0.5 * (float(principal["n_trans"]) + float(principal["n_third"]))
+        return float(self.n_eff(pol_deg, wav_nm, 0.0, meta=meta, dn_override=dn_override))
+
+    def _calc_theoretical_lc(self, meta=None, dn_override=None):
+        meta = self.analysis.meta if meta is None else meta
+        wl1_nm = float(meta["wavelength_nm"])
+        wl1_mm = wl1_nm * 1e-6
+        n_w = self._theory_n_at_zero(
+            meta["input_polarization"],
+            wl1_nm,
+            meta=meta,
+            dn_override=dn_override,
+        )
+        n_2w = self._theory_n_at_zero(
+            meta["detected_polarization"],
+            wl1_nm / 2.0,
+            meta=meta,
+            dn_override=dn_override,
+        )
+        dn = abs(float(n_w) - float(n_2w))
+        lc = wl1_mm / (4.0 * dn) if np.isfinite(dn) and not np.isclose(dn, 0.0) else float("nan")
+        return {"Lc_theory_mm": float(lc)}
+
     GEOMETRY_P_FUNCTIONS = {
         # returns p(\theta) for possible combination
         # key configuration is:("material", (cut), "rot axis", pol_in, pol_out)
@@ -794,8 +824,8 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
             "parts": parts
         }
         result =  {
-            "Lc_mean_mm": Lc_mean,
-            "Lc_std_mm": Lc_std,
+            "Lc_exp_mm": Lc_mean,
+            "Lc_exp_std_mm": Lc_std,
             "minima_count": int(th_min.size),
             "n_count": int(diffs.size)
             # "theta_used_deg": mask
@@ -916,13 +946,9 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
         results.update(Lc)
         results.update(Pm0_fit)
         results.update(dn_override)
+        results.update(self._calc_theoretical_lc(self.analysis.meta, dn_override=dn_override))
         if isinstance(fit_aux, dict) and fit_aux.get("d_factor") is not None:
             results["d_factor"] = float(fit_aux["d_factor"])
-        if isinstance(fit_aux, dict) and fit_aux.get("delta_k") is not None:
-            delta_k = self._coerce_scalar(fit_aux["delta_k"])
-            if np.isfinite(delta_k):
-                results["delta_k_theory_inv_mm"] = float(delta_k)
-                results["Lc_theory_mm"] = float(np.pi / abs(delta_k)) if not np.isclose(delta_k, 0.0) else float("nan")
         self.analysis.meta = upsert_fitting_result(
             self.analysis.meta,
             self.__class__.__name__,
@@ -997,18 +1023,9 @@ class Jerphagnon1970WedgeStrategy(Jerphagnon1970Strategy, BaseWedgeStrategy):
         if not return_aux:
             return model
 
-        delta_k_values = np.asarray(rot_aux["delta_k"], dtype=float).reshape(-1)
-        finite_delta_k = delta_k_values[np.isfinite(delta_k_values)]
-        delta_k = float(finite_delta_k[0]) if finite_delta_k.size else float("nan")
-        if np.isfinite(delta_k) and not np.isclose(delta_k, 0.0):
-            lc = float(np.pi / delta_k)
-        else:
-            lc = float("nan")
-
         aux = {
             "d_factor": rot_aux["d_factor"],
             "L_array": L_array,
-            "Lc": lc,
         }
         return model, aux
 
