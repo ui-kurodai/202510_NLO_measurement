@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from html import escape
 from pathlib import Path
 
@@ -15,11 +16,14 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QHBoxLayout,
     QLabel,
+    QDialog,
+    QDialogButtonBox,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSplitter,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -36,6 +40,132 @@ from comparison_utils import (
 )
 from fitting_results import normalize_fitting_entries
 from windows_dialogs import select_multiple_directories
+
+
+@dataclass
+class ComparisonFilterSettings:
+    allowed_strategy_labels: set[str] = field(default_factory=set)
+    exclude_missing_filter_csv: bool = False
+
+
+class ComparisonFilterDialog(QDialog):
+    applied = pyqtSignal()
+
+    def __init__(
+        self,
+        settings: ComparisonFilterSettings,
+        available_strategy_labels: list[str],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Filtering")
+        self.resize(520, 420)
+        self._settings = ComparisonFilterSettings(
+            allowed_strategy_labels=set(settings.allowed_strategy_labels),
+            exclude_missing_filter_csv=settings.exclude_missing_filter_csv,
+        )
+        self._available_strategy_labels = list(available_strategy_labels)
+        self._strategy_checkboxes: dict[str, QCheckBox] = {}
+        self._build_ui()
+
+    @property
+    def filter_settings(self) -> ComparisonFilterSettings:
+        return ComparisonFilterSettings(
+            allowed_strategy_labels=set(self._settings.allowed_strategy_labels),
+            exclude_missing_filter_csv=self._settings.exclude_missing_filter_csv,
+        )
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        tabs = QTabWidget()
+        tabs.addTab(self._build_strategy_tab(), "Strategy")
+        tabs.addTab(self._build_filter_diff_tab(), "Filter diff")
+        layout.addWidget(tabs)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Apply
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        apply_button = buttons.button(QDialogButtonBox.StandardButton.Apply)
+        if apply_button is not None:
+            apply_button.clicked.connect(self.apply)
+        layout.addWidget(buttons)
+
+    def _build_strategy_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel("Choose strategies to keep near the top. If none are checked, all strategies are allowed."))
+
+        action_row = QHBoxLayout()
+        btn_select_all = QPushButton("Select All")
+        btn_clear_all = QPushButton("Clear All")
+        btn_select_all.clicked.connect(self._select_all_strategies)
+        btn_clear_all.clicked.connect(self._clear_all_strategies)
+        action_row.addWidget(btn_select_all)
+        action_row.addWidget(btn_clear_all)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(4)
+
+        strategy_labels = list(dict.fromkeys(self._available_strategy_labels))
+        if not strategy_labels:
+            container_layout.addWidget(QLabel("No compared strategies yet. Run Compare once to populate this list."))
+        for strategy_label in strategy_labels:
+            checkbox = QCheckBox(strategy_label)
+            checkbox.setChecked(strategy_label in self._settings.allowed_strategy_labels)
+            self._strategy_checkboxes[strategy_label] = checkbox
+            container_layout.addWidget(checkbox)
+        container_layout.addStretch(1)
+        scroll.setWidget(container)
+        layout.addWidget(scroll, 1)
+        return page
+
+    def _build_filter_diff_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self.chk_exclude_missing_filter_csv = QCheckBox(
+            "Demote rows whose filter diff contains filters without transmission CSV"
+        )
+        self.chk_exclude_missing_filter_csv.setChecked(self._settings.exclude_missing_filter_csv)
+        layout.addWidget(self.chk_exclude_missing_filter_csv)
+        layout.addWidget(
+            QLabel(
+                "Rows that fail this condition stay visible, but move to the gray lower section just like unchecked rows."
+            )
+        )
+        layout.addStretch(1)
+        return page
+
+    def _select_all_strategies(self) -> None:
+        for checkbox in self._strategy_checkboxes.values():
+            checkbox.setChecked(True)
+
+    def _clear_all_strategies(self) -> None:
+        for checkbox in self._strategy_checkboxes.values():
+            checkbox.setChecked(False)
+
+    def _apply_to_internal_settings(self) -> None:
+        self._settings.allowed_strategy_labels = {
+            label for label, checkbox in self._strategy_checkboxes.items() if checkbox.isChecked()
+        }
+        self._settings.exclude_missing_filter_csv = self.chk_exclude_missing_filter_csv.isChecked()
+
+    def apply(self) -> None:
+        self._apply_to_internal_settings()
+        self.applied.emit()
+
+    def accept(self) -> None:
+        self.apply()
+        super().accept()
 
 
 class DraggableTableWidget(QTableWidget):
@@ -203,6 +333,7 @@ class ComparisonWidget(QWidget):
         super().__init__(parent)
         self._reference_groups: list[ReferenceSelectionGroup] = []
         self._results: list[ComparisonResult] = []
+        self._filter_settings = ComparisonFilterSettings()
         self._row_enabled: dict[str, bool] = {}
         self._manual_row_order: list[str] = []
         self._displayed_result_keys: list[str] = []
@@ -253,6 +384,13 @@ class ComparisonWidget(QWidget):
         table_layout.setContentsMargins(0, 0, 0, 0)
         self.lbl_summary = QLabel("Add at least one reference set, choose target folders, and run comparison.")
         table_layout.addWidget(self.lbl_summary)
+        filter_row = QHBoxLayout()
+        self.btn_filtering = QPushButton("Filtering...")
+        self.lbl_filter_summary = QLabel(self._filter_summary_text())
+        self.lbl_filter_summary.setStyleSheet("color: #555;")
+        filter_row.addWidget(self.btn_filtering)
+        filter_row.addWidget(self.lbl_filter_summary, 1)
+        table_layout.addLayout(filter_row)
         table_split = QHBoxLayout()
         table_split.setContentsMargins(0, 0, 0, 0)
         table_split.setSpacing(0)
@@ -321,11 +459,55 @@ class ComparisonWidget(QWidget):
         self.btn_add_reference.clicked.connect(self._handle_add_reference)
         self.btn_compare.clicked.connect(self._run_comparison)
         self.btn_write_json.clicked.connect(self._write_results)
+        self.btn_filtering.clicked.connect(self._open_filter_dialog)
 
         self._add_reference_group()
 
     def _append_log(self, text: str) -> None:
         self.log_output.appendPlainText(text)
+
+    def _open_filter_dialog(self) -> None:
+        strategy_labels = self._available_strategy_labels()
+        dialog = ComparisonFilterDialog(self._filter_settings, strategy_labels, parent=self)
+        dialog.applied.connect(lambda current_dialog=dialog: self._apply_filter_settings_from_dialog(current_dialog))
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._apply_filter_settings_from_dialog(dialog)
+
+    def _apply_filter_settings(self) -> None:
+        self.lbl_filter_summary.setText(self._filter_summary_text())
+        if self._results:
+            self._populate_table(self._results)
+
+    def _apply_filter_settings_from_dialog(self, dialog: ComparisonFilterDialog) -> None:
+        self._filter_settings = dialog.filter_settings
+        self._apply_filter_settings()
+
+    def _available_strategy_labels(self) -> list[str]:
+        labels = [self._strategy_text(result) for result in self._results]
+        labels.extend(sorted(self._filter_settings.allowed_strategy_labels))
+        unique_labels: list[str] = []
+        seen: set[str] = set()
+        for label in labels:
+            if label in seen:
+                continue
+            seen.add(label)
+            unique_labels.append(label)
+        return unique_labels
+
+    def _filter_summary_text(self) -> str:
+        parts: list[str] = []
+        if self._filter_settings.allowed_strategy_labels:
+            parts.append(
+                "Strategy: " + ", ".join(sorted(self._filter_settings.allowed_strategy_labels))
+            )
+        else:
+            parts.append("Strategy: all")
+        if self._filter_settings.exclude_missing_filter_csv:
+            parts.append("Filter diff: hide missing CSV")
+        else:
+            parts.append("Filter diff: allow missing CSV")
+        return " | ".join(parts)
 
     def _add_reference_group(self) -> ReferenceSelectionGroup:
         group = ReferenceSelectionGroup(len(self._reference_groups) + 1, self)
@@ -483,7 +665,7 @@ class ComparisonWidget(QWidget):
         ordered_results = sorted(
             results,
             key=lambda result: (
-                0 if self._row_enabled.get(result.key, True) else 1,
+                self._display_bucket(result),
                 self._manual_order_index(result.key),
             ),
         )
@@ -504,7 +686,7 @@ class ComparisonWidget(QWidget):
             if current_group != previous_group:
                 group_index += 1
                 previous_group = current_group
-            enabled = self._row_enabled.get(result.key, True)
+            enabled = self._is_row_active(result)
             base_color = group_colors[group_index % len(group_colors)]
             if not enabled:
                 base_color = QColor(242, 242, 242)
@@ -568,9 +750,9 @@ class ComparisonWidget(QWidget):
         self.table.setColumnWidth(2, max(self.table.columnWidth(2), 400))
 
     def _write_results(self) -> None:
-        selected_results = [result for result in self._results if self._row_enabled.get(result.key, True)]
+        selected_results = [result for result in self._results if self._is_row_active(result)]
         if not selected_results:
-            message = "Run comparison first." if not self._results else "No visible rows are selected for saving."
+            message = "Run comparison first." if not self._results else "No rows currently pass the checkbox/filter conditions for saving."
             QMessageBox.information(self, "No results", message)
             return
 
@@ -648,6 +830,20 @@ class ComparisonWidget(QWidget):
         self._row_enabled[key] = enabled
         self._populate_table(self._results)
 
+    def _passes_filters(self, result: ComparisonResult) -> bool:
+        allowed_strategy_labels = self._filter_settings.allowed_strategy_labels
+        if allowed_strategy_labels and self._strategy_text(result) not in allowed_strategy_labels:
+            return False
+        if self._filter_settings.exclude_missing_filter_csv and result.differing_filters_missing_csv:
+            return False
+        return True
+
+    def _is_row_active(self, result: ComparisonResult) -> bool:
+        return self._row_enabled.get(result.key, True) and self._passes_filters(result)
+
+    def _display_bucket(self, result: ComparisonResult) -> int:
+        return 0 if self._is_row_active(result) else 1
+
     def _style_item(self, item: QTableWidgetItem, background: QColor, enabled: bool) -> None:
         item.setBackground(QBrush(background))
         if enabled:
@@ -690,10 +886,18 @@ class ComparisonWidget(QWidget):
         return f"<span style=\"color: {default_color};\">{highlighted_text}</span>"
 
     def _status_text(self, result: ComparisonResult, enabled: bool) -> str:
-        prefix = "" if enabled else "[hidden] "
+        prefixes: list[str] = []
+        if not self._row_enabled.get(result.key, True):
+            prefixes.append("[hidden]")
+        if not self._passes_filters(result):
+            prefixes.append("[filtered]")
         mode = "Braun pseudo d" if result.calculation_mode == "braun_pseudo_d" else ""
         status = result.status_text
-        return prefix + " | ".join(part for part in (mode, status) if part)
+        prefix = " ".join(prefixes)
+        suffix = " | ".join(part for part in (mode, status) if part)
+        if prefix and suffix:
+            return f"{prefix} {suffix}"
+        return prefix or suffix
 
     def _reconcile_manual_row_order(self, results: list[ComparisonResult]) -> None:
         seen_keys = {result.key for result in results}
@@ -721,14 +925,11 @@ class ComparisonWidget(QWidget):
 
     def _apply_manual_order_from_view(self) -> None:
         header = self.fixed_table.verticalHeader()
-        visible_keys = [
+        self._manual_row_order = [
             self._displayed_result_keys[header.logicalIndex(visual_index)]
             for visual_index in range(header.count())
             if 0 <= header.logicalIndex(visual_index) < len(self._displayed_result_keys)
         ]
-        enabled_keys = [key for key in visible_keys if self._row_enabled.get(key, True)]
-        disabled_keys = [key for key in visible_keys if not self._row_enabled.get(key, True)]
-        self._manual_row_order = enabled_keys + disabled_keys
         self._populate_table(self._results)
 
     def _move_result_row(self, source_row: int, target_row: int) -> None:
@@ -739,7 +940,11 @@ class ComparisonWidget(QWidget):
 
         source_key = self._displayed_result_keys[source_row]
         target_key = self._displayed_result_keys[target_row]
-        if self._row_enabled.get(source_key, True) != self._row_enabled.get(target_key, True):
+        source_result = next((result for result in self._results if result.key == source_key), None)
+        target_result = next((result for result in self._results if result.key == target_key), None)
+        if source_result is None or target_result is None:
+            return
+        if self._display_bucket(source_result) != self._display_bucket(target_result):
             return
 
         self._reconcile_manual_row_order(self._results)
