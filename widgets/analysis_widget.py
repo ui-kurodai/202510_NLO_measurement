@@ -2996,6 +2996,7 @@ class FittingAnalysisWidget(QWidget):
             max_box.setValue(self._fit_range_step_to_value(high_step))
         finally:
             self._fit_range_syncing = False
+        self._render_analysis_plots()
 
     def _fit_range_spin_changed(self) -> None:
         if self._fit_range_syncing:
@@ -3025,6 +3026,7 @@ class FittingAnalysisWidget(QWidget):
             )
         finally:
             self._fit_range_syncing = False
+        self._render_analysis_plots()
 
     def _current_fit_range_payload(self) -> Dict[str, float]:
         controls = getattr(self, "_fit_range_controls", {})
@@ -3138,7 +3140,7 @@ class FittingAnalysisWidget(QWidget):
         if (
             strategy is not None
             and getattr(strategy, "LIVE_UPDATE_ON_SLIDER", True) is False
-            and key != "peak"
+            and key not in {"peak", "delta_n"}
         ):
             return
         self._render_analysis_plots()
@@ -3188,6 +3190,42 @@ class FittingAnalysisWidget(QWidget):
         else:
             y = np.asarray(current["ch2"], dtype=float)
         return x, y, current
+
+    def _current_fit_range_mask(
+        self,
+        x: np.ndarray,
+        y: Optional[np.ndarray] = None,
+        *,
+        min_points: int = 1,
+    ) -> np.ndarray:
+        x = np.asarray(x, dtype=float)
+        mask = np.isfinite(x)
+        if y is not None:
+            mask &= np.isfinite(np.asarray(y, dtype=float))
+        bounds = self._current_fit_range_payload()
+        if bounds:
+            mask &= (x >= float(bounds["min"])) & (x <= float(bounds["max"]))
+        if np.count_nonzero(mask) < int(min_points):
+            raise ValueError("Not enough finite data points inside fit range.")
+        return mask
+
+    def _fit_range_label(self) -> str:
+        bounds = self._current_fit_range_payload()
+        if not bounds:
+            return "all finite points"
+        return f"fit range [{bounds['min']:.4g}, {bounds['max']:.4g}]"
+
+    def _residual_rms_for_fit_range(self, live: Dict[str, Any]) -> float:
+        residual = np.asarray(live.get("residual", []), dtype=float)
+        x = np.asarray(live.get("x", []), dtype=float)
+        try:
+            mask = self._current_fit_range_mask(x, residual, min_points=1)
+        except Exception:
+            mask = np.isfinite(residual)
+        values = residual[mask & np.isfinite(residual)]
+        if values.size == 0:
+            return float("nan")
+        return float(np.sqrt(np.mean(np.square(values))))
 
     def _compute_auto_extrema_info(self) -> Dict[str, Any]:
         context = self._analysis_context
@@ -3423,13 +3461,15 @@ class FittingAnalysisWidget(QWidget):
         if strategy is None or not hasattr(strategy, "_delta_n_override"):
             return {"error": "The selected strategy does not provide delta_n overrides."}
 
-        x, y, _prepared = self._current_display_xy()
-        finite = np.isfinite(x) & np.isfinite(y)
-        if np.count_nonzero(finite) < 3:
-            return {"error": "Not enough finite data points for L-\u0394n cost mapping."}
-        cost_data_label = "all finite points"
-        x_fit = x[finite]
-        y_fit = y[finite]
+        x, y, prepared = self._current_display_xy()
+        try:
+            fit_mask = self._current_fit_range_mask(x, y, min_points=3)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        cost_data_label = self._fit_range_label()
+        x_fit = x[fit_mask]
+        y_fit = y[fit_mask]
+        fit_data = prepared.loc[fit_mask].copy() if isinstance(prepared, pd.DataFrame) else pd.DataFrame()
 
         L_center = self._manual_value("L")
         delta_center = self._manual_value("delta_n")
@@ -3453,6 +3493,7 @@ class FittingAnalysisWidget(QWidget):
                         strategy._maker_fringes(
                             override={
                                 "L": float(L_mm),
+                                "data": fit_data,
                                 "theta_deg": x_fit,
                                 **({"dn_override": dn_override} if dn_override else {}),
                             }
@@ -4649,7 +4690,7 @@ class FittingAnalysisWidget(QWidget):
                 "k_scale_std": 0.0,
                 "Pm0": float(live["peak_value"]),
                 "Pm0_stderr": 0.0,
-                "residual_rms": float(np.sqrt(np.mean(np.square(live["residual"])))),
+                "residual_rms": self._residual_rms_for_fit_range(live),
             }
         existing_fit = self._fit_payload_for_strategy(meta, selected)
         if existing_fit and not self._strategy_uses_d_rel_abs(live.get("strategy")):
