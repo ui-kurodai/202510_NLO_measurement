@@ -24,6 +24,7 @@ import sys
 import math
 import ast
 import importlib
+import inspect
 import re
 from io import BytesIO
 from datetime import datetime
@@ -3588,24 +3589,32 @@ class FittingAnalysisWidget(QWidget):
             return {"error": "The selected strategy does not provide Lc diagnostics."}
 
         source = self.cmb_lc_source.currentData() or "data"
+        delta_n = self._manual_value("delta_n") if "delta_n" in self._manual_controls else self._safe_float(
+            (context.get("saved_fit") or {}).get("delta_n"), 0.0
+        )
+        dn_override = self._dn_override_from_delta_n(strategy, delta_n)
         theory = self._compute_theoretical_lc(
             strategy,
             L_value,
-            self._manual_value("delta_n") if "delta_n" in self._manual_controls else self._safe_float(
-                (context.get("saved_fit") or {}).get("delta_n"), 0.0
-            ),
+            delta_n,
         )
         try:
             lc_data = self._make_fit_theory_dataframe(L_value, peak_value) if source == "fit" else self._current_prepared_data()
             minima_override = None
             if source == "data":
                 minima_override = self.extrema_widget.saved_minima_indices()
+            lc_kwargs = {"minima_idx_override": minima_override}
+            try:
+                if dn_override and "dn_override" in inspect.signature(strategy._calc_Lc_large_angle).parameters:
+                    lc_kwargs["dn_override"] = dn_override
+            except (TypeError, ValueError):
+                pass
             result, aux = strategy._calc_Lc_large_angle(
                 context["analysis"].meta,
                 lc_data,
                 [0, 180],
                 L_value,
-                minima_idx_override=minima_override,
+                **lc_kwargs,
             )
             result = {**result, **theory}
             return {"result": result, "aux": aux, "source": source, "data": lc_data, "theory": theory}

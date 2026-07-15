@@ -283,7 +283,7 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
         return model, aux
     
 
-    def _calc_Lc_large_angle(self, meta, data, mask, fitted_L_mm, minima_threshold=None, minima_idx_override=None):
+    def _calc_Lc_large_angle(self, meta, data, mask, fitted_L_mm, minima_threshold=None, minima_idx_override=None, dn_override=None):
         """
         III D-1 (a): Calculate Lc from large angles (e.g., θ > 30 deg).
         Parameters
@@ -373,8 +373,8 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
                 )
             elif np.isclose(pol_in, 0):
                 if np.isclose(pol_out, 0):
-                    n_w = self.n_eff(pol_in, wl1_nm)
-                    n_2w = self.n_eff(pol_out, wl1_nm / 2.0)
+                    n_w = self.n_eff(pol_in, wl1_nm, meta=meta, dn_override=dn_override)
+                    n_2w = self.n_eff(pol_out, wl1_nm / 2.0, meta=meta, dn_override=dn_override)
                     for i in range(th_rad.size - 1):
                         A = fitted_L_mm * (np.sin(th_rad[i + 1])**2 - np.sin(th_rad[i])**2) / (4.0 * n_2w * n_w)
                         B = 0.0
@@ -384,9 +384,9 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
                         lc_angle_dependence_delta_list.append(abs(lc) - abs(A))
 
                 elif np.isclose(pol_out, 90):
-                    n_w = self.n_eff(pol_in, wl1_nm)
+                    n_w = self.n_eff(pol_in, wl1_nm, meta=meta, dn_override=dn_override)
 
-                    n_2w_dic = self.n_eff(pol_out, wl1_nm / 2.0, aux=True)
+                    n_2w_dic = self.n_eff(pol_out, wl1_nm / 2.0, meta=meta, aux=True, dn_override=dn_override)
                     n_2w_third = n_2w_dic["n_third"]
                     n_2w_cut = n_2w_dic["n_cut"]
                     for i in range(th_rad.size - 1):
@@ -402,13 +402,13 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
             
             elif np.isclose(pol_in, 45):
                 if np.isclose(pol_out, 0):
-                    n_w_dic = self.n_eff(pol_in, wl1_nm, aux=True)
+                    n_w_dic = self.n_eff(pol_in, wl1_nm, meta=meta, aux=True, dn_override=dn_override)
                     n_w_rot = n_w_dic["n_rot"]
                     n_w_cut = n_w_dic["n_cut"]
                     n_w_third = n_w_dic["n_third"]
                     n_w = (n_w_rot + n_w_third) / 2.0
 
-                    n_2w = self.n_eff(pol_out, wl1_nm / 2.0, aux=True)
+                    n_2w = self.n_eff(pol_out, wl1_nm / 2.0, meta=meta, aux=True, dn_override=dn_override)
                     n_2w_rot = n_2w["n_rot"]
                     n_2w_cut = n_2w["n_cut"]
                     n_2w_third = n_2w["n_third"]
