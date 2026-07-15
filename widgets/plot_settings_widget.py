@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -19,8 +20,10 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QSpinBox,
+    QStyledItemDelegate,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -36,6 +39,24 @@ class SeriesPlotSettings:
     style: str = "*"
     visible: bool = True
     legend_visible: bool = True
+    legend_label: str = ""
+    legend_digits: int = -1
+
+
+@dataclass
+class ManualPlotItemSettings:
+    key: str
+    kind: str = "point"
+    values: str = ""
+
+
+class OpaqueLineEditDelegate(QStyledItemDelegate):
+    def createEditor(self, parent: QWidget, option, index) -> QWidget:
+        editor = QLineEdit(parent)
+        editor.setAutoFillBackground(True)
+        editor.setFrame(True)
+        editor.setStyleSheet("QLineEdit { background: palette(base); color: palette(text); }")
+        return editor
 
 
 @dataclass
@@ -90,6 +111,73 @@ class SharedPlotSettings:
     series: Dict[str, SeriesPlotSettings] = field(default_factory=dict)
     series_order: List[str] = field(default_factory=list)
     extra_axes: Dict[str, ExtraAxisPlotSettings] = field(default_factory=dict)
+    manual_items: Dict[str, ManualPlotItemSettings] = field(default_factory=dict)
+
+
+class ManualPlotItemDialog(QDialog):
+    KIND_LABELS = {
+        "point": "Point (x, y)",
+        "vline": "Vertical line (x)",
+        "hline": "Horizontal line (y)",
+        "line": "Line segment (x1, y1, x2, y2)",
+    }
+
+    def __init__(
+        self,
+        item: ManualPlotItemSettings,
+        series: SeriesPlotSettings,
+        *,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Manual Data")
+        self.item = ManualPlotItemSettings(**item.__dict__)
+        self.series = SeriesPlotSettings(**series.__dict__)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.name_edit = QLineEdit(self.series.label)
+        self.legend_edit = QLineEdit(self.series.legend_label or self.series.label)
+        self.kind_combo = QComboBox()
+        for key, label in self.KIND_LABELS.items():
+            self.kind_combo.addItem(label, key)
+        index = self.kind_combo.findData(self.item.kind)
+        self.kind_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.values_edit = QLineEdit(self.item.values)
+        self.values_hint = QLabel()
+        self.values_hint.setStyleSheet("color: gray;")
+        self.kind_combo.currentIndexChanged.connect(self._update_hint)
+        form.addRow("Data name", self.name_edit)
+        form.addRow("Legend label", self.legend_edit)
+        form.addRow("Type", self.kind_combo)
+        form.addRow("Values", self.values_edit)
+        form.addRow("", self.values_hint)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._update_hint()
+
+    def _update_hint(self) -> None:
+        kind = str(self.kind_combo.currentData() or "point")
+        hints = {
+            "point": "Example: 0, 12.5",
+            "vline": "Example: 0",
+            "hline": "Example: 12.5",
+            "line": "Example: 0, 1, 10, 3",
+        }
+        self.values_hint.setText(hints.get(kind, "Comma-separated numbers"))
+
+    def accept(self) -> None:
+        self.item.kind = str(self.kind_combo.currentData() or "point")
+        self.item.values = self.values_edit.text().strip()
+        self.series.label = self.name_edit.text().strip() or self.series.label
+        self.series.legend_label = self.legend_edit.text().strip()
+        super().accept()
 
 
 class PlotSettingsDialog(QDialog):
@@ -127,6 +215,7 @@ class PlotSettingsDialog(QDialog):
         self.extra_axis_defaults = extra_axis_defaults or []
         self._ensure_series()
         self._ensure_extra_axes()
+        self._accepted_snapshot = copy.deepcopy(self.settings)
 
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -151,7 +240,10 @@ class PlotSettingsDialog(QDialog):
     def _ensure_series(self) -> None:
         for item in self.series_defaults:
             self.settings.series.setdefault(item.label, SeriesPlotSettings(**item.__dict__))
+        for key in self.settings.manual_items:
+            self.settings.series.setdefault(key, SeriesPlotSettings(key))
         known = {item.label for item in self.series_defaults}
+        known.update(self.settings.manual_items)
         self.settings.series = {
             label: value for label, value in self.settings.series.items() if label in known
         }
@@ -163,6 +255,9 @@ class PlotSettingsDialog(QDialog):
         for item in self.series_defaults:
             if item.label not in self.settings.series_order:
                 self.settings.series_order.append(item.label)
+        for key in self.settings.manual_items:
+            if key not in self.settings.series_order:
+                self.settings.series_order.append(key)
 
     def _ensure_extra_axes(self) -> None:
         for item in self.extra_axis_defaults:
@@ -266,22 +361,34 @@ class PlotSettingsDialog(QDialog):
         else:
             self.colormap = QComboBox()
 
-        self.series_table = QTableWidget(len(self.settings.series_order), 5)
-        self.series_table.setHorizontalHeaderLabels(["Data", "Color", "Style", "Show", "Legend"])
+        self.series_table = QTableWidget(len(self.settings.series_order), 7)
+        self.series_table.setHorizontalHeaderLabels(
+            ["Data", "Legend label", "Digits", "Color", "Style", "Show", "Legend"]
+        )
         self.series_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.series_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.series_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.series_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.series_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.series_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.series_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.series_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        self.series_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.series_table.customContextMenuRequested.connect(self._show_series_context_menu)
+        text_delegate = OpaqueLineEditDelegate(self.series_table)
+        self.series_table.setItemDelegateForColumn(0, text_delegate)
+        self.series_table.setItemDelegateForColumn(1, text_delegate)
         for row, label in enumerate(self.settings.series_order):
             self._populate_series_row(row, label)
         layout.addWidget(self.series_table)
 
         order_row = QHBoxLayout()
+        add_button = QPushButton("Add Data")
         up_button = QPushButton("Up")
         down_button = QPushButton("Down")
+        add_button.clicked.connect(self._add_manual_data)
         up_button.clicked.connect(lambda: self._move_selected_row(-1))
         down_button.clicked.connect(lambda: self._move_selected_row(1))
+        order_row.addWidget(add_button)
         order_row.addStretch(1)
         order_row.addWidget(up_button)
         order_row.addWidget(down_button)
@@ -310,23 +417,32 @@ class PlotSettingsDialog(QDialog):
         label_item.setData(Qt.ItemDataRole.UserRole, label)
         self.series_table.setItem(row, 0, label_item)
 
+        legend_item = QTableWidgetItem(series.legend_label or series.label)
+        self.series_table.setItem(row, 1, legend_item)
+
+        digits = QSpinBox()
+        digits.setRange(-1, 12)
+        digits.setSpecialValueText("Auto")
+        digits.setValue(series.legend_digits)
+        self.series_table.setCellWidget(row, 2, digits)
+
         color_button = QPushButton(series.color)
         color_button.clicked.connect(lambda _checked=False, r=row: self._choose_color(r))
         self._paint_color_button(color_button, series.color)
-        self.series_table.setCellWidget(row, 1, color_button)
+        self.series_table.setCellWidget(row, 3, color_button)
 
         style = QComboBox()
         style.addItems(self.STYLE_OPTIONS)
         style.setCurrentText(series.style if series.style in self.STYLE_OPTIONS else "*")
-        self.series_table.setCellWidget(row, 2, style)
+        self.series_table.setCellWidget(row, 4, style)
 
         show = QCheckBox()
         show.setChecked(series.visible)
-        self.series_table.setCellWidget(row, 3, show)
+        self.series_table.setCellWidget(row, 5, show)
 
         legend = QCheckBox()
         legend.setChecked(series.legend_visible)
-        self.series_table.setCellWidget(row, 4, legend)
+        self.series_table.setCellWidget(row, 6, legend)
 
     def _paint_color_button(self, button: QPushButton, color: str) -> None:
         button.setText(color)
@@ -336,7 +452,7 @@ class PlotSettingsDialog(QDialog):
         button.setStyleSheet(f"background-color: {QColor(color).name()};")
 
     def _choose_color(self, row: int) -> None:
-        button = self.series_table.cellWidget(row, 1)
+        button = self.series_table.cellWidget(row, 3)
         if not isinstance(button, QPushButton):
             return
         current = button.text() or "black"
@@ -362,6 +478,71 @@ class PlotSettingsDialog(QDialog):
         self.series_table.setRowCount(len(self.settings.series_order))
         for row, label in enumerate(self.settings.series_order):
             self._populate_series_row(row, label)
+
+    def _new_manual_key(self) -> str:
+        index = 1
+        while f"manual:{index}" in self.settings.manual_items:
+            index += 1
+        return f"manual:{index}"
+
+    def _add_manual_data(self) -> None:
+        self._read_series_table()
+        key = self._new_manual_key()
+        item = ManualPlotItemSettings(key=key, kind="point", values="")
+        series = SeriesPlotSettings(
+            label=f"Manual {len(self.settings.manual_items) + 1}",
+            color="black",
+            style="o",
+        )
+        dialog = ManualPlotItemDialog(item, series, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.settings.manual_items[key] = dialog.item
+        self.settings.series[key] = dialog.series
+        self.settings.series_order.append(key)
+        self._rebuild_series_table()
+        self.series_table.selectRow(self.settings.series_order.index(key))
+
+    def _show_series_context_menu(self, position) -> None:
+        row = self.series_table.rowAt(position.y())
+        if row < 0:
+            return
+        item = self.series_table.item(row, 0)
+        if item is None:
+            return
+        key = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if key not in self.settings.manual_items:
+            return
+        menu = QMenu(self)
+        edit_action = menu.addAction("Edit values")
+        delete_action = menu.addAction("Delete")
+        action = menu.exec(self.series_table.viewport().mapToGlobal(position))
+        if action == edit_action:
+            self._edit_manual_data(key)
+        elif action == delete_action:
+            self._delete_manual_data(key)
+
+    def _edit_manual_data(self, key: str) -> None:
+        self._read_series_table()
+        item = self.settings.manual_items.get(key)
+        series = self.settings.series.get(key)
+        if item is None or series is None:
+            return
+        dialog = ManualPlotItemDialog(item, series, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.settings.manual_items[key] = dialog.item
+        self.settings.series[key] = dialog.series
+        self._rebuild_series_table()
+        if key in self.settings.series_order:
+            self.series_table.selectRow(self.settings.series_order.index(key))
+
+    def _delete_manual_data(self, key: str) -> None:
+        self._read_series_table()
+        self.settings.manual_items.pop(key, None)
+        self.settings.series.pop(key, None)
+        self.settings.series_order = [item for item in self.settings.series_order if item != key]
+        self._rebuild_series_table()
 
     def _build_axis_tab(self) -> QWidget:
         page = QWidget()
@@ -475,18 +656,23 @@ class PlotSettingsDialog(QDialog):
             if item is None:
                 continue
             key = str(item.data(Qt.ItemDataRole.UserRole) or item.text())
-            legend_label = item.text().strip() or key
+            data_label = item.text().strip() or key
+            legend_item = self.series_table.item(row, 1)
+            legend_label = legend_item.text().strip() if legend_item is not None else data_label
             order.append(key)
-            color_button = self.series_table.cellWidget(row, 1)
-            style_combo = self.series_table.cellWidget(row, 2)
-            show_box = self.series_table.cellWidget(row, 3)
-            legend_box = self.series_table.cellWidget(row, 4)
+            digits_box = self.series_table.cellWidget(row, 2)
+            color_button = self.series_table.cellWidget(row, 3)
+            style_combo = self.series_table.cellWidget(row, 4)
+            show_box = self.series_table.cellWidget(row, 5)
+            legend_box = self.series_table.cellWidget(row, 6)
             self.settings.series[key] = SeriesPlotSettings(
-                label=legend_label,
+                label=data_label,
                 color=color_button.text() if isinstance(color_button, QPushButton) else "C0",
                 style=style_combo.currentText() if isinstance(style_combo, QComboBox) else "*",
                 visible=show_box.isChecked() if isinstance(show_box, QCheckBox) else True,
                 legend_visible=legend_box.isChecked() if isinstance(legend_box, QCheckBox) else True,
+                legend_label=legend_label,
+                legend_digits=int(digits_box.value()) if isinstance(digits_box, QSpinBox) else -1,
             )
         self.settings.series_order = order
 
@@ -577,9 +763,15 @@ class PlotSettingsDialog(QDialog):
 
     def apply(self) -> None:
         if self._read_form():
+            self._accepted_snapshot = copy.deepcopy(self.settings)
             self.applied.emit()
 
     def accept(self) -> None:
         if not self._read_form():
             return
         super().accept()
+
+    def reject(self) -> None:
+        self.settings.__dict__.clear()
+        self.settings.__dict__.update(copy.deepcopy(self._accepted_snapshot.__dict__))
+        super().reject()
