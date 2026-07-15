@@ -319,12 +319,54 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
         pol_out = meta["detected_polarization"] # 0-90 deg
 
 
+        def _combine_lc_extrapolation(theta_pair_parts, pair_lc_mm, *, raise_on_failure=True):
+            if pair_lc_mm.size == 0:
+                return float("nan"), float("nan"), {}
+            theta_pairs = np.vstack(theta_pair_parts)
+            s_pair = np.sin(np.deg2rad(theta_pairs)) ** 2
+            pair_center_s = np.mean(s_pair, axis=1)
+            pair_sign = np.sign(np.mean(theta_pairs, axis=1))
+            pair_center_deg = pair_sign * np.rad2deg(
+                np.arcsin(np.sqrt(np.clip(pair_center_s, 0.0, 1.0)))
+            )
+            if pair_lc_mm.size == 1:
+                value = float(pair_lc_mm[0])
+                return value, float("nan"), {
+                    "Lc_pair_mean_mm": value,
+                    "Lc_pair_std_mm": float("nan"),
+                    "lc_extrapolation_order": 0,
+                    "lc_order_residual_rms": float("nan"),
+                    "pair_theta_bounds_deg": theta_pairs,
+                    "pair_center_s": pair_center_s,
+                    "pair_center_deg": pair_center_deg,
+                    "pair_lc_mm": pair_lc_mm,
+                }
+            try:
+                extrapolated = _fit_lc_zero_from_minima_pairs(theta_pairs, pair_lc_mm)
+            except ValueError:
+                if raise_on_failure:
+                    raise
+                return float("nan"), float("nan"), {
+                    "pair_theta_bounds_deg": theta_pairs,
+                    "pair_center_s": pair_center_s,
+                    "pair_center_deg": pair_center_deg,
+                    "pair_lc_mm": pair_lc_mm,
+                }
+            return (
+                float(extrapolated["Lc_zero_mm"]),
+                float(extrapolated["Lc_zero_std_mm"]),
+                extrapolated,
+            )
+
         def differential_L(th_list, pol_in, pol_out):
             if th_list.size < 2:
-                return np.array([], dtype=float)
+                empty = np.array([], dtype=float)
+                return empty, empty, empty
             
             th_rad = np.radians(th_list)
-            lc_list = []
+            lc_angle_dependent_n_list = []
+            lc_constant_n_list = []
+            lc_angle_dependence_delta_list = []
             if np.isclose(pol_in, 90):
                 raise ValueError(
                     "Input polarization of 90 deg is not yet supported for biaxial crystals."
@@ -334,8 +376,12 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
                     n_w = self.n_eff(pol_in, wl1_nm)
                     n_2w = self.n_eff(pol_out, wl1_nm / 2.0)
                     for i in range(th_rad.size - 1):
-                        lc = fitted_L_mm * (np.sin(th_rad[i + 1])**2 - np.sin(th_rad[i])**2) / (4.0 * n_2w * n_w)
-                        lc_list.append(abs(lc))
+                        A = fitted_L_mm * (np.sin(th_rad[i + 1])**2 - np.sin(th_rad[i])**2) / (4.0 * n_2w * n_w)
+                        B = 0.0
+                        lc = A + B
+                        lc_angle_dependent_n_list.append(abs(lc))
+                        lc_constant_n_list.append(abs(A))
+                        lc_angle_dependence_delta_list.append(abs(lc) - abs(A))
 
                 elif np.isclose(pol_out, 90):
                     n_w = self.n_eff(pol_in, wl1_nm)
@@ -346,11 +392,13 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
                     for i in range(th_rad.size - 1):
                         # Use midpoint refractive indices between adjacent angles
                         A = fitted_L_mm * (np.sin(th_rad[i + 1])**2 - np.sin(th_rad[i])**2) / (4.0 * n_2w_third * n_w)
-                        B = fitted_L_mm * n_2w_third * (np.sin(th_rad[i + 1])**2 - np.sin(th_rad[i])**2) * \
+                        B = -fitted_L_mm * n_2w_third * (np.sin(th_rad[i + 1])**2 - np.sin(th_rad[i])**2) * \
                             ((1/n_2w_third**2) - (1/n_2w_cut**2)) / (4 * (n_w - n_2w_third))
                         
-                        lc = A - B
-                        lc_list.append(abs(lc))
+                        lc = A + B
+                        lc_angle_dependent_n_list.append(abs(lc))
+                        lc_constant_n_list.append(abs(A))
+                        lc_angle_dependence_delta_list.append(abs(lc) - abs(A))
             
             elif np.isclose(pol_in, 45):
                 if np.isclose(pol_out, 0):
@@ -365,65 +413,77 @@ class Bechthold1977Strategy(Jerphagnon1970Strategy):
                     n_2w_cut = n_2w["n_cut"]
                     n_2w_third = n_2w["n_third"]
                     for i in range(th_rad.size - 1):
-                        A = fitted_L_mm * (np.sin(th_rad[i + 1])**2 - np.sin(th_rad[i])**2) / (4.0 * n_w * n_2w)
+                        A = fitted_L_mm * (np.sin(th_rad[i + 1])**2 - np.sin(th_rad[i])**2) / (4.0 * n_w * n_2w_rot)
                         B = A* (n_w * (n_w_third**2 - n_w_cut**2) * n_2w_rot / (2*(n_w - n_2w_rot) * n_2w_cut**2 * n_w_rot))
                         
                         lc = A + B
-                        lc_list.append(abs(lc))
+                        lc_angle_dependent_n_list.append(abs(lc))
+                        lc_constant_n_list.append(abs(A))
+                        lc_angle_dependence_delta_list.append(abs(lc) - abs(A))
 
             else:
                 raise ValueError(
                     "Input polarization is supported only for 0, 90, or 45 degrees."
                 )
 
-            return np.asarray(lc_list, dtype=float)
+            return (
+                np.asarray(lc_angle_dependent_n_list, dtype=float),
+                np.asarray(lc_constant_n_list, dtype=float),
+                np.asarray(lc_angle_dependence_delta_list, dtype=float),
+            )
 
-        dL_pos = differential_L(th_pos, pol_in, pol_out)
-        dL_neg = differential_L(th_neg, pol_in, pol_out)
+        dL_angle_dependent_n_pos, dL_constant_n_pos, dL_angle_dependence_delta_pos = differential_L(th_pos, pol_in, pol_out)
+        dL_angle_dependent_n_neg, dL_constant_n_neg, dL_angle_dependence_delta_neg = differential_L(th_neg, pol_in, pol_out)
 
-        parts = [arr for arr in (dL_pos, dL_neg) if len(arr) > 0]
+        parts = [arr for arr in (dL_angle_dependent_n_pos, dL_angle_dependent_n_neg) if len(arr) > 0]
         diffs = np.concatenate(parts) if parts else np.array([], dtype=float)
         diffs = np.asarray(diffs, dtype=float)
+        constant_n_parts = [arr for arr in (dL_constant_n_pos, dL_constant_n_neg) if len(arr) > 0]
+        constant_n_diffs = np.concatenate(constant_n_parts) if constant_n_parts else np.array([], dtype=float)
+        constant_n_diffs = np.asarray(constant_n_diffs, dtype=float)
 
-        if diffs.size == 0:
-            Lc_mean = float("nan")
-            Lc_std = float("nan")
-            extrapolation = {}
-        elif diffs.size == 1:
-            Lc_mean = float(diffs[0])
-            Lc_std = float("nan")
-            extrapolation = {
-                "Lc_pair_mean_mm": Lc_mean,
-                "Lc_pair_std_mm": float("nan"),
-                "lc_extrapolation_order": 0,
-                "lc_order_residual_rms": float("nan"),
-            }
-        else:
-            theta_pair_parts = []
-            if dL_pos.size:
-                theta_pair_parts.append(np.column_stack((th_pos[:-1], th_pos[1:])))
-            if dL_neg.size:
-                theta_pair_parts.append(np.column_stack((th_neg[:-1], th_neg[1:])))
-            theta_pairs = np.vstack(theta_pair_parts)
-            extrapolation = _fit_lc_zero_from_minima_pairs(theta_pairs, diffs)
-            Lc_mean = float(extrapolation["Lc_zero_mm"])
-            Lc_std = float(extrapolation["Lc_zero_std_mm"])
+        theta_pair_parts = []
+        if dL_angle_dependent_n_pos.size:
+            theta_pair_parts.append(np.column_stack((th_pos[:-1], th_pos[1:])))
+        if dL_angle_dependent_n_neg.size:
+            theta_pair_parts.append(np.column_stack((th_neg[:-1], th_neg[1:])))
+
+        Lc_mean, Lc_std, extrapolation = _combine_lc_extrapolation(theta_pair_parts, diffs)
+        Lc_constant_n_mean, Lc_constant_n_std, constant_n_extrapolation = _combine_lc_extrapolation(
+            theta_pair_parts,
+            constant_n_diffs,
+            raise_on_failure=False,
+        )
 
         fit_data = {
             "minima_idx" : valid_minima_idx,
             "x_in_range" : m,
-            "dL_pos" : dL_pos,
-            "dL_neg" : dL_neg,
+            "dL_angle_dependent_n_pos" : dL_angle_dependent_n_pos,
+            "dL_angle_dependent_n_neg" : dL_angle_dependent_n_neg,
+            "dL_constant_n_pos" : dL_constant_n_pos,
+            "dL_constant_n_neg" : dL_constant_n_neg,
+            "dL_angle_dependence_delta_pos" : dL_angle_dependence_delta_pos,
+            "dL_angle_dependence_delta_neg" : dL_angle_dependence_delta_neg,
             "parts": parts,
+            "pair_lc_constant_n_mm": constant_n_extrapolation.get("pair_lc_mm", np.array([], dtype=float)),
+            "fit_lc_constant_n_mm": constant_n_extrapolation.get("fit_lc_mm", np.array([], dtype=float)),
+            "Lc_constant_n_mm": Lc_constant_n_mean,
+            "Lc_constant_n_std_mm": Lc_constant_n_std,
+            "Lc_angle_dependence_delta_mm": Lc_mean - Lc_constant_n_mean if np.isfinite(Lc_mean) and np.isfinite(Lc_constant_n_mean) else float("nan"),
             **extrapolation,
         }
         result =  {
             "Lc_exp_mm": Lc_mean,
             "Lc_exp_std_mm": Lc_std,
+            "Lc_angle_dependent_n_mm": Lc_mean,
+            "Lc_angle_dependent_n_std_mm": Lc_std,
             "Lc_pair_mean_mm": extrapolation.get("Lc_pair_mean_mm", float("nan")),
             "Lc_pair_std_mm": extrapolation.get("Lc_pair_std_mm", float("nan")),
             "lc_extrapolation_order": extrapolation.get("lc_extrapolation_order", 0),
             "lc_order_residual_rms": extrapolation.get("lc_order_residual_rms", float("nan")),
+            "Lc_constant_n_mm": Lc_constant_n_mean,
+            "Lc_constant_n_std_mm": Lc_constant_n_std,
+            "Lc_angle_dependence_delta_mm": Lc_mean - Lc_constant_n_mean if np.isfinite(Lc_mean) and np.isfinite(Lc_constant_n_mean) else float("nan"),
             "minima_count": int(th_min.size),
             "n_count": int(diffs.size)
             # "theta_used_deg": mask

@@ -24,6 +24,7 @@ import sys
 import math
 import ast
 import importlib
+import re
 from io import BytesIO
 from datetime import datetime
 from dataclasses import dataclass
@@ -64,6 +65,7 @@ from measurement_metadata import (
 from fitting_results import (
     extract_fit_payload,
     merge_fit_payload,
+    migrate_lc_aliases,
     normalize_fitting_entries,
     remove_fitting_results,
     upsert_fitting_result,
@@ -1626,6 +1628,13 @@ class FittingAnalysisWidget(QWidget):
                 meta = json.load(f)
         except Exception as e:
             return False, f"Failed to read JSON: {e}"
+        meta, migrated = migrate_lc_aliases(meta)
+        if migrated:
+            try:
+                with open(self.json_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                return False, f"Failed to migrate JSON Lc aliases: {e}"
 
         # Read CSV
         try:
@@ -1921,12 +1930,20 @@ class FittingAnalysisWidget(QWidget):
             ("d_rel_abs", "|d| relative"),
             ("d_component", "d component"),
             ("d_factor", "d factor"),
-            ("Lc_mean_mm", "Lc(0) [mm]"),
-            ("Lc_std_mm", "Lc(0) std [mm]"),
+            ("Lc_exp_mm", "Lc exp [mm]"),
+            ("Lc_exp_std_mm", "Lc exp std [mm]"),
+            ("Lc_angle_dependent_n_mm", "Lc angle-dependent-n [mm]"),
+            ("Lc_angle_dependent_n_std_mm", "Lc angle-dependent-n std [mm]"),
+            ("Lc_constant_n_mm", "Lc constant-n [mm]"),
+            ("Lc_constant_n_std_mm", "Lc constant-n std [mm]"),
+            ("Lc_angle_dependence_delta_mm", "Lc angle-dependence delta [mm]"),
             ("Lc_pair_mean_mm", "Lc pair mean [mm]"),
             ("Lc_pair_std_mm", "Lc pair std [mm]"),
+            ("Lc_theory_mm", "Lc fit/theory [mm]"),
             ("lc_extrapolation_order", "Lc extrapolation order"),
             ("lc_order_residual_rms", "Lc fit residual RMS [mm]"),
+            ("lc_wedge_minima_mm", "Wedge minima Lc [mm]"),
+            ("lc_wedge_minima_std_mm", "Wedge minima Lc std [mm]"),
             ("residual_rms", "Residual RMS"),
             ("minima_count", "Minima count"),
             ("n_count", "Lc pair count"),
@@ -2393,7 +2410,7 @@ class FittingAnalysisWidget(QWidget):
             "resid": 2.8,
             "centering": 2.8,
             "extrema": 2.8,
-            "lc": 2.8,
+            "lc": 3.6,
             "n_landscape": 3.0,
         }
         return PlotSettings(
@@ -2401,7 +2418,7 @@ class FittingAnalysisWidget(QWidget):
             label_font_size=font_size,
             legend_font_size=font_size,
             tick_font_size=font_size,
-            show_legend=plot_key not in {"resid", "lc"},
+            show_legend=plot_key != "resid",
             show_grid=True,
             figure_width=6.0,
             figure_height=heights.get(plot_key, 2.8),
@@ -2459,12 +2476,32 @@ class FittingAnalysisWidget(QWidget):
                 SeriesPlotSettings("Maxima", "C2", "^"),
             ],
             "lc": [
-                SeriesPlotSettings("Positive pairs", "C0", "-"),
-                SeriesPlotSettings("Negative pairs", "C1", "-"),
-                SeriesPlotSettings("Pair centers", "black", "o"),
-                SeriesPlotSettings("Extrapolation", "C3", "-"),
-                SeriesPlotSettings("Lc(0)", "C3", "--"),
-                SeriesPlotSettings("Theory Lc", "C2", "-"),
+                SeriesPlotSettings("Angle-dependent-n positive pairs", "C0", "-", legend_visible=False),
+                SeriesPlotSettings("Angle-dependent-n negative pairs", "C0", "-", legend_visible=False),
+                SeriesPlotSettings("Angle-dependent-n pair centers", "black", "o", legend_visible=False),
+                SeriesPlotSettings("Angle-dependent-n extrapolation", "C1", "-", legend_visible=False),
+                SeriesPlotSettings("Constant-n pair centers", "C3", "x", legend_visible=False),
+                SeriesPlotSettings("Constant-n extrapolation", "C3", ":", legend_visible=False),
+                SeriesPlotSettings(
+                    "Lc(0)",
+                    "C1",
+                    "--",
+                    legend_label=r"Fit $L_c(0)$={value_um:.1f} $\mathrm{\mu m}$",
+                ),
+                SeriesPlotSettings("Lc(0) point", "C1", "o", True, False),
+                SeriesPlotSettings(
+                    "Constant-n Lc(0)",
+                    "C3",
+                    ":",
+                    legend_visible=False,
+                    legend_label=r"Constant-n $L_c(0)$={value_um:.1f} $\mathrm{\mu m}$",
+                ),
+                SeriesPlotSettings(
+                    "Theory Lc",
+                    "black",
+                    "--",
+                    legend_label=r"Calc. $L_c(0)$={value_um:.1f} $\mathrm{\mu m}$",
+                ),
             ],
             "n_landscape": [
                 SeriesPlotSettings("Current point", "white", "o"),
@@ -2539,17 +2576,136 @@ class FittingAnalysisWidget(QWidget):
         kwargs["zorder"] = 2 + self._series_order_index(plot_key, label)
         return kwargs
 
-    def _legend_label(self, plot_key: str, label: str, override: Optional[str] = None) -> str:
+    def _legend_label(
+        self,
+        plot_key: str,
+        label: str,
+        override: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        class _LegendValue:
+            def __init__(self, value: float, digits: int) -> None:
+                self.value = float(value)
+                self.digits = digits
+
+            def __format__(self, spec: str) -> str:
+                if spec:
+                    return format(self.value, spec)
+                if self.digits >= 0:
+                    return f"{self.value:.{self.digits}f}"
+                return f"{self.value:g}"
+
         series = self._series_setting(plot_key, label)
         if not series.legend_visible:
             return "_nolegend_"
-        return override or series.label or label
+        template = override or series.legend_label or series.label or label
+        if context:
+            context = {
+                key: _LegendValue(value, series.legend_digits)
+                if isinstance(value, (int, float, np.integer, np.floating))
+                else value
+                for key, value in context.items()
+            }
+            def replace_placeholder(match: re.Match[str]) -> str:
+                key = match.group(1)
+                spec = match.group(2) or ""
+                if key not in context:
+                    return match.group(0)
+                try:
+                    return format(context[key], spec)
+                except Exception:
+                    return match.group(0)
+
+            return re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)(?::([^{}]+))?\}", replace_placeholder, template)
+        return template
 
     def _lc_legend_label(self, label: str, value_mm: float) -> str:
         if not np.isfinite(value_mm):
             return self._legend_label("lc", label)
-        prefix = "Calc. Lc(0)" if label == "Theory Lc" else "Fit Lc(0)"
-        return self._legend_label("lc", label, rf"{prefix}={value_mm * 1000.0:.1f} $\mathrm{{\mu m}}$")
+        prefix = r"Calc. $L_c(0)$" if label == "Theory Lc" else r"Fit $L_c(0)$"
+        fallback = rf"{prefix}={{value_um:.1f}} $\mathrm{{\mu m}}$"
+        value_um = value_mm * 1000.0
+        series = self._series_setting("lc", label)
+        return self._legend_label(
+            "lc",
+            label,
+            None if series.legend_label else fallback,
+            {
+                "value": value_mm,
+                "value_mm": value_mm,
+                "value_um": value_um,
+            },
+        )
+
+    def _parse_manual_values(self, values_text: str) -> List[float]:
+        values: List[float] = []
+        for chunk in values_text.replace(";", ",").split(","):
+            text = chunk.strip()
+            if text:
+                values.append(float(text))
+        return values
+
+    def _plot_manual_items(self, ax: Any, plot_key: str) -> None:
+        settings = self._plot_settings[plot_key]
+        for key in settings.series_order:
+            item = settings.manual_items.get(key)
+            if item is None or not self._series_visible(plot_key, key):
+                continue
+            try:
+                values = self._parse_manual_values(item.values)
+            except ValueError:
+                continue
+            series = self._series_setting(plot_key, key)
+            label = self._legend_label(plot_key, key)
+            zorder = 2 + self._series_order_index(plot_key, key)
+            style_kwargs = self._style_to_kwargs(series.style, plot_key)
+            line_style = style_kwargs.get("linestyle") or "-"
+            if line_style == "none":
+                line_style = "--"
+            try:
+                if item.kind == "point" and len(values) >= 2:
+                    ax.plot(
+                        [values[0]],
+                        [values[1]],
+                        color=series.color,
+                        marker=style_kwargs.get("marker") or "o",
+                        linestyle="none",
+                        markersize=settings.marker_size,
+                        label=label,
+                        zorder=zorder,
+                    )
+                elif item.kind == "vline" and values:
+                    ax.axvline(
+                        values[0],
+                        color=series.color,
+                        linestyle=line_style,
+                        linewidth=settings.line_width,
+                        label=label,
+                        zorder=zorder,
+                    )
+                elif item.kind == "hline" and values:
+                    ax.axhline(
+                        values[0],
+                        color=series.color,
+                        linestyle=line_style,
+                        linewidth=settings.line_width,
+                        label=label,
+                        zorder=zorder,
+                    )
+                elif item.kind == "line" and len(values) >= 4:
+                    ax.plot(
+                        [values[0], values[2]],
+                        [values[1], values[3]],
+                        color=series.color,
+                        marker=style_kwargs.get("marker"),
+                        linestyle=line_style,
+                        markersize=settings.marker_size,
+                        linewidth=settings.line_width,
+                        label=label,
+                        zorder=zorder,
+                    )
+            except Exception:
+                continue
 
     def _extra_axis_setting(self, plot_key: str, key: str) -> Optional[ExtraAxisPlotSettings]:
         settings = self._plot_settings[plot_key]
@@ -2674,6 +2830,35 @@ class FittingAnalysisWidget(QWidget):
             return
         QMessageBox.information(self, "Copied", "Current plot image was copied to the clipboard.")
 
+    def _plain_plot_text(self, text: str) -> str:
+        plain = str(text).replace("$", "")
+        plain = re.sub(r"\\mathrm\{([^{}]*)\}", r"\1", plain)
+        plain = re.sub(r"\\([A-Za-z]+)", r"\1", plain)
+        return plain.replace("\\", "").replace("{", "").replace("}", "")
+
+    def _sanitize_mathtext_labels(self, canvas: MplCanvas) -> None:
+        for ax in canvas.figure.axes:
+            ax.set_title(self._plain_plot_text(ax.get_title()))
+            ax.set_xlabel(self._plain_plot_text(ax.get_xlabel()))
+            ax.set_ylabel(self._plain_plot_text(ax.get_ylabel()))
+            legend = ax.get_legend()
+            if legend is not None:
+                for text in legend.get_texts():
+                    text.set_text(self._plain_plot_text(text.get_text()))
+
+    def _safe_canvas_finish(self, canvas: MplCanvas) -> None:
+        try:
+            canvas.figure.tight_layout()
+            canvas.draw()
+        except Exception as exc:
+            print(f"Plot draw failed; retrying with plain text labels: {exc}", file=sys.stderr)
+            try:
+                self._sanitize_mathtext_labels(canvas)
+                canvas.figure.tight_layout()
+                canvas.draw()
+            except Exception as retry_exc:
+                print(f"Plot draw retry failed: {retry_exc}", file=sys.stderr)
+
     def _configure_plot_axes(self, canvas: MplCanvas, plot_key: str, y_label: str, top_axis_L_mm: Optional[float] = None):
         settings = self._plot_settings[plot_key]
         ax = canvas.ax
@@ -2723,6 +2908,7 @@ class FittingAnalysisWidget(QWidget):
             ax.locator_params(axis="y", nbins=settings.y_tick_count)
         self._apply_tick_formatter(ax.xaxis, settings.x_digit_count, settings.x_scientific)
         self._apply_tick_formatter(ax.yaxis, settings.y_digit_count, settings.y_scientific)
+        self._plot_manual_items(ax, plot_key)
 
         handles, labels = ax.get_legend_handles_labels()
         if settings.show_legend and handles:
@@ -3432,6 +3618,10 @@ class FittingAnalysisWidget(QWidget):
     def _compute_theoretical_lc(self, strategy: Any, L_value: float, delta_n: float) -> Dict[str, float]:
         try:
             dn_override = self._dn_override_from_delta_n(strategy, delta_n)
+            if hasattr(strategy, "_calc_theoretical_lc"):
+                return strategy._calc_theoretical_lc(
+                    dn_override=dn_override if dn_override else None
+                )
             _model, aux = self._unwrap_model_and_aux(
                 strategy._maker_fringes(
                     override={
@@ -3448,7 +3638,6 @@ class FittingAnalysisWidget(QWidget):
             lc = float(np.pi / abs(delta_k)) if not np.isclose(delta_k, 0.0) else float("nan")
             return {
                 "Lc_theory_mm": lc,
-                "delta_k_theory_inv_mm": float(delta_k),
             }
         except Exception:
             return {}
@@ -3967,8 +4156,7 @@ class FittingAnalysisWidget(QWidget):
         ax.set_ylabel("Signal (V)")
         ax.grid(True, which="both", alpha=0.25)
         ax.legend(loc="best", fontsize=9)
-        canvas.figure.tight_layout()
-        canvas.draw()
+        self._safe_canvas_finish(canvas)
 
     def _save_nfit_manual_changes(self, _source_dir: str) -> None:
         result_id = self._selected_result_id()
@@ -4264,8 +4452,7 @@ class FittingAnalysisWidget(QWidget):
 
         ax.plot(x, y, **self._fit_data_plot_kwargs())
         self._configure_plot_axes(self.canvas_fit, "fit", "Signal (V)")
-        self.canvas_fit.figure.tight_layout()
-        self.canvas_fit.draw()
+        self._safe_canvas_finish(self.canvas_fit)
 
     def _render_fit_plot(self, live: Dict[str, Any]):
         if "error" in live:
@@ -4302,8 +4489,7 @@ class FittingAnalysisWidget(QWidget):
             "Signal (V)",
             top_axis_L_mm=float(live["L_value"]),
         )
-        self.canvas_fit.figure.tight_layout()
-        self.canvas_fit.draw()
+        self._safe_canvas_finish(self.canvas_fit)
 
     def _render_residual_plot(self, live: Dict[str, Any]):
         if "error" in live:
@@ -4330,8 +4516,7 @@ class FittingAnalysisWidget(QWidget):
             "Residual (V)",
             top_axis_L_mm=float(live["L_value"]),
         )
-        self.canvas_resid.figure.tight_layout()
-        self.canvas_resid.draw()
+        self._safe_canvas_finish(self.canvas_resid)
 
     def _render_centering_plot(self):
         if self._is_wedge_scan():
@@ -4360,8 +4545,7 @@ class FittingAnalysisWidget(QWidget):
             )
         self._configure_plot_axes(self.canvas_centering, "centering", "Cost")
         ax.set_xlabel("Center candidate")
-        self.canvas_centering.figure.tight_layout()
-        self.canvas_centering.draw()
+        self._safe_canvas_finish(self.canvas_centering)
 
     def _render_extrema_plot(self, live: Dict[str, Any], extrema: Dict[str, Any]):
         if "error" in live:
@@ -4411,9 +4595,8 @@ class FittingAnalysisWidget(QWidget):
                 )
                 if hasattr(self, "lbl_lc_summary"):
                     self.lbl_lc_summary.setText(f"theory = {theory_lc * 1000.0:.3f} um")
-                self._configure_plot_axes(self.canvas_lc, "lc", "Lc (um)")
-                self.canvas_lc.figure.tight_layout()
-                self.canvas_lc.draw()
+                self._configure_plot_axes(self.canvas_lc, "lc", r"$L_c$ ($\mathrm{\mu m}$)")
+                self._safe_canvas_finish(self.canvas_lc)
                 return
             message = str(lc_info.get("message") or "Lc diagnostics were skipped.")
             self._show_plot_message(self.canvas_lc, f"Lc plot skipped: {message}")
@@ -4433,9 +4616,8 @@ class FittingAnalysisWidget(QWidget):
                 )
                 if hasattr(self, "lbl_lc_summary"):
                     self.lbl_lc_summary.setText(f"theory = {theory_lc * 1000.0:.3f} um; empirical unavailable: {lc_info['error']}")
-                self._configure_plot_axes(self.canvas_lc, "lc", "Lc (um)")
-                self.canvas_lc.figure.tight_layout()
-                self.canvas_lc.draw()
+                self._configure_plot_axes(self.canvas_lc, "lc", r"$L_c$ ($\mathrm{\mu m}$)")
+                self._safe_canvas_finish(self.canvas_lc)
                 return
             self._show_plot_message(self.canvas_lc, f"Lc plot unavailable: {lc_info['error']}")
             return
@@ -4450,54 +4632,102 @@ class FittingAnalysisWidget(QWidget):
         minima_x = position[minima_idx] if minima_idx.size else np.array([], dtype=float)
         minima_pos = np.sort(minima_x[minima_x > 0.0])
         minima_neg = np.sort(minima_x[minima_x < 0.0])
-        dL_pos = np.asarray(aux.get("dL_pos", []), dtype=float)
-        dL_neg = np.asarray(aux.get("dL_neg", []), dtype=float)
+        dL_angle_dependent_n_pos = np.asarray(aux.get("dL_angle_dependent_n_pos", []), dtype=float)
+        dL_angle_dependent_n_neg = np.asarray(aux.get("dL_angle_dependent_n_neg", []), dtype=float)
         pair_center_deg = np.asarray(aux.get("pair_center_deg", []), dtype=float)
         pair_lc_mm = np.asarray(aux.get("pair_lc_mm", []), dtype=float)
+        pair_lc_constant_n_mm = np.asarray(aux.get("pair_lc_constant_n_mm", []), dtype=float)
 
-        if self._series_visible("lc", "Positive pairs"):
-            kwargs = self._series_plot_kwargs("lc", "Positive pairs")
-            for i in range(min(len(dL_pos), max(len(minima_pos) - 1, 0))):
-                ax.plot([minima_pos[i], minima_pos[i + 1]], [1000.0 * dL_pos[i], 1000.0 * dL_pos[i]], **kwargs)
-        if self._series_visible("lc", "Negative pairs"):
-            kwargs = self._series_plot_kwargs("lc", "Negative pairs")
-            for i in range(min(len(dL_neg), max(len(minima_neg) - 1, 0))):
-                ax.plot([minima_neg[i], minima_neg[i + 1]], [1000.0 * dL_neg[i], 1000.0 * dL_neg[i]], **kwargs)
+        if self._series_visible("lc", "Angle-dependent-n positive pairs"):
+            kwargs = self._series_plot_kwargs("lc", "Angle-dependent-n positive pairs")
+            for i in range(min(len(dL_angle_dependent_n_pos), max(len(minima_pos) - 1, 0))):
+                ax.plot([minima_pos[i], minima_pos[i + 1]], [1000.0 * dL_angle_dependent_n_pos[i], 1000.0 * dL_angle_dependent_n_pos[i]], **kwargs)
+        if self._series_visible("lc", "Angle-dependent-n negative pairs"):
+            kwargs = self._series_plot_kwargs("lc", "Angle-dependent-n negative pairs")
+            for i in range(min(len(dL_angle_dependent_n_neg), max(len(minima_neg) - 1, 0))):
+                ax.plot([minima_neg[i], minima_neg[i + 1]], [1000.0 * dL_angle_dependent_n_neg[i], 1000.0 * dL_angle_dependent_n_neg[i]], **kwargs)
         finite_pairs = np.isfinite(pair_center_deg) & np.isfinite(pair_lc_mm)
-        if np.any(finite_pairs) and self._series_visible("lc", "Pair centers"):
+        if np.any(finite_pairs) and self._series_visible("lc", "Angle-dependent-n pair centers"):
             ax.scatter(
                 pair_center_deg[finite_pairs],
                 1000.0 * pair_lc_mm[finite_pairs],
-                color=self._series_setting("lc", "Pair centers").color,
-                marker=self._style_to_kwargs(self._series_setting("lc", "Pair centers").style, "lc").get("marker") or "o",
+                color=self._series_setting("lc", "Angle-dependent-n pair centers").color,
+                marker=self._style_to_kwargs(self._series_setting("lc", "Angle-dependent-n pair centers").style, "lc").get("marker") or "o",
                 s=settings.marker_size**2,
-                label=self._legend_label("lc", "Pair centers"),
-                zorder=2 + self._series_order_index("lc", "Pair centers"),
+                label=self._legend_label("lc", "Angle-dependent-n pair centers"),
+                zorder=2 + self._series_order_index("lc", "Angle-dependent-n pair centers"),
+            )
+        n_constant_n_pairs = min(pair_center_deg.size, pair_lc_constant_n_mm.size)
+        finite_constant_n_pairs = (
+            np.isfinite(pair_center_deg[:n_constant_n_pairs])
+            & np.isfinite(pair_lc_constant_n_mm[:n_constant_n_pairs])
+        )
+        if n_constant_n_pairs and np.any(finite_constant_n_pairs) and self._series_visible("lc", "Constant-n pair centers"):
+            ax.scatter(
+                pair_center_deg[:n_constant_n_pairs][finite_constant_n_pairs],
+                1000.0 * pair_lc_constant_n_mm[:n_constant_n_pairs][finite_constant_n_pairs],
+                color=self._series_setting("lc", "Constant-n pair centers").color,
+                marker=self._style_to_kwargs(self._series_setting("lc", "Constant-n pair centers").style, "lc").get("marker") or "x",
+                s=settings.marker_size**2,
+                label=self._legend_label("lc", "Constant-n pair centers"),
+                zorder=2 + self._series_order_index("lc", "Constant-n pair centers"),
             )
 
-        mean_lc = self._safe_float(result.get("Lc_mean_mm"))
-        std_lc = self._safe_float(result.get("Lc_std_mm"))
+        mean_lc = self._safe_float(result.get("Lc_exp_mm", result.get("Lc_mean_mm")))
+        std_lc = self._safe_float(result.get("Lc_exp_std_mm", result.get("Lc_std_mm")))
+        constant_n_lc = self._safe_float(result.get("Lc_constant_n_mm", aux.get("Lc_constant_n_mm")))
+        angle_dependence_delta_lc = self._safe_float(result.get("Lc_angle_dependence_delta_mm", aux.get("Lc_angle_dependence_delta_mm")))
         pair_mean_lc = self._safe_float(result.get("Lc_pair_mean_mm"))
         theory_lc = self._safe_float(result.get("Lc_theory_mm"))
-        theory_delta_k = self._safe_float(result.get("delta_k_theory_inv_mm"))
         fit_theta_deg = np.asarray(aux.get("fit_theta_deg", []), dtype=float)
         fit_lc_mm = np.asarray(aux.get("fit_lc_mm", []), dtype=float)
+        fit_lc_constant_n_mm = np.asarray(aux.get("fit_lc_constant_n_mm", []), dtype=float)
         finite_fit = np.isfinite(fit_theta_deg) & np.isfinite(fit_lc_mm)
-        if np.any(finite_fit) and self._series_visible("lc", "Extrapolation"):
+        if np.any(finite_fit) and self._series_visible("lc", "Angle-dependent-n extrapolation"):
             theta_fit = fit_theta_deg[finite_fit]
             lc_fit_um = 1000.0 * fit_lc_mm[finite_fit]
-            kwargs = self._series_plot_kwargs("lc", "Extrapolation")
+            kwargs = self._series_plot_kwargs("lc", "Angle-dependent-n extrapolation")
+            ax.plot(theta_fit, lc_fit_um, **kwargs)
+            ax.plot(-theta_fit, lc_fit_um, **kwargs)
+        n_constant_n_fit = min(fit_theta_deg.size, fit_lc_constant_n_mm.size)
+        finite_constant_n_fit = (
+            np.isfinite(fit_theta_deg[:n_constant_n_fit])
+            & np.isfinite(fit_lc_constant_n_mm[:n_constant_n_fit])
+        )
+        if n_constant_n_fit and np.any(finite_constant_n_fit) and self._series_visible("lc", "Constant-n extrapolation"):
+            theta_fit = fit_theta_deg[:n_constant_n_fit][finite_constant_n_fit]
+            lc_fit_um = 1000.0 * fit_lc_constant_n_mm[:n_constant_n_fit][finite_constant_n_fit]
+            kwargs = self._series_plot_kwargs("lc", "Constant-n extrapolation")
             ax.plot(theta_fit, lc_fit_um, **kwargs)
             ax.plot(-theta_fit, lc_fit_um, **kwargs)
         if np.isfinite(mean_lc) and self._series_visible("lc", "Lc(0)"):
             lc0 = self._series_setting("lc", "Lc(0)")
-            ax.scatter([0.0], [mean_lc * 1000.0], color=lc0.color, marker="o", zorder=4)
             ax.axhline(
                 mean_lc * 1000.0,
                 color=lc0.color,
-                linestyle="--",
+                linestyle=self._style_to_kwargs(lc0.style, "lc").get("linestyle", "--"),
                 linewidth=settings.line_width,
                 label=self._lc_legend_label("Lc(0)", mean_lc),
+            )
+        if np.isfinite(mean_lc) and self._series_visible("lc", "Lc(0) point"):
+            lc0_point = self._series_setting("lc", "Lc(0) point")
+            ax.scatter(
+                [0.0],
+                [mean_lc * 1000.0],
+                color=lc0_point.color,
+                marker=self._style_to_kwargs(lc0_point.style, "lc").get("marker") or "o",
+                s=settings.marker_size**2,
+                label=self._legend_label("lc", "Lc(0) point"),
+                zorder=2 + self._series_order_index("lc", "Lc(0) point"),
+            )
+        if np.isfinite(constant_n_lc) and self._series_visible("lc", "Constant-n Lc(0)"):
+            lc0_constant_n = self._series_setting("lc", "Constant-n Lc(0)")
+            ax.axhline(
+                constant_n_lc * 1000.0,
+                color=lc0_constant_n.color,
+                linestyle=self._style_to_kwargs(lc0_constant_n.style, "lc").get("linestyle", ":"),
+                linewidth=settings.line_width,
+                label=self._lc_legend_label("Constant-n Lc(0)", constant_n_lc),
             )
         if np.isfinite(theory_lc) and self._series_visible("lc", "Theory Lc"):
             theory_series = self._series_setting("lc", "Theory Lc")
@@ -4517,15 +4747,16 @@ class FittingAnalysisWidget(QWidget):
             text = "Lc summary unavailable"
         if np.isfinite(pair_mean_lc):
             text += f"\npair mean = {pair_mean_lc * 1000.0:.3f} um"
+        if np.isfinite(constant_n_lc):
+            text += f"\nconstant-n Lc(0) = {constant_n_lc * 1000.0:.3f} um"
+        if np.isfinite(angle_dependence_delta_lc):
+            text += f"\nangle-dependence delta = {angle_dependence_delta_lc * 1000.0:.3f} um"
         if np.isfinite(theory_lc):
             text += f"\ntheory = {theory_lc * 1000.0:.3f} um"
-            if np.isfinite(theory_delta_k):
-                text += f" (delta_k={theory_delta_k:.4g} 1/mm)"
         if hasattr(self, "lbl_lc_summary"):
             self.lbl_lc_summary.setText(f"{source}: {text}")
-        self._configure_plot_axes(self.canvas_lc, "lc", "Lc (um)")
-        self.canvas_lc.figure.tight_layout()
-        self.canvas_lc.draw()
+        self._configure_plot_axes(self.canvas_lc, "lc", r"$L_c$ ($\mathrm{\mu m}$)")
+        self._safe_canvas_finish(self.canvas_lc)
 
     def _render_n_landscape_plot(self, info: Dict[str, Any]):
         if "error" in info:
@@ -4607,8 +4838,7 @@ class FittingAnalysisWidget(QWidget):
         ax.set_xlabel("L (mm)", fontfamily=settings.font_family)
         ax.set_ylabel("\u0394n", fontfamily=settings.font_family)
         self._configure_plot_axes(self.canvas_n_landscape, "n_landscape", "\u0394n")
-        self.canvas_n_landscape.figure.tight_layout()
-        self.canvas_n_landscape.draw()
+        self._safe_canvas_finish(self.canvas_n_landscape)
 
         if candidates:
             lines = [
@@ -4631,8 +4861,7 @@ class FittingAnalysisWidget(QWidget):
             wrap=True,
             fontfamily="Arial",
         )
-        canvas.figure.tight_layout()
-        canvas.draw()
+        self._safe_canvas_finish(canvas)
 
     def _apply_manual_fit_clicked(self):
         if not self.json_path or not self.csv_path:
@@ -4709,8 +4938,13 @@ class FittingAnalysisWidget(QWidget):
         ):
             result = lc_info["result"]
             for key in (
-                "Lc_mean_mm",
-                "Lc_std_mm",
+                "Lc_exp_mm",
+                "Lc_exp_std_mm",
+                "Lc_angle_dependent_n_mm",
+                "Lc_angle_dependent_n_std_mm",
+                "Lc_constant_n_mm",
+                "Lc_constant_n_std_mm",
+                "Lc_angle_dependence_delta_mm",
                 "Lc_pair_mean_mm",
                 "Lc_pair_std_mm",
                 "lc_extrapolation_order",
