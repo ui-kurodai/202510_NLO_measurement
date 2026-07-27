@@ -23,6 +23,39 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
     def __init__(self, analysis):
         super().__init__(analysis)
 
+    @staticmethod
+    def _axis_tuple(axis):
+        """Return a three-component integer Miller-index tuple."""
+        if isinstance(axis, str):
+            text = axis.strip()
+            if len(text) == 3 and text.isdigit():
+                return tuple(int(component) for component in text)
+            raise ValueError(f"Invalid axis string: {axis}")
+
+        try:
+            components = tuple(int(component) for component in axis)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid axis: {axis}")
+        if len(components) != 3:
+            raise ValueError(f"Axis must have length 3: {axis}")
+        return components
+
+    @classmethod
+    def _is_kdp_110_rotation_geometry(cls, meta):
+        return (
+            meta.get("material") == "KH2PO4"
+            and cls._axis_tuple(meta.get("crystal_orientation")) == (1, 1, 0)
+            and cls._axis_tuple(meta.get("rot/trans_axis")) == (0, 0, 1)
+        )
+
+    def _nonprincipal_rotation_index_roles(self, meta):
+        if self._is_kdp_110_rotation_geometry(meta):
+            # KDP is uniaxial with optic axis [001].  For a (110) cut
+            # rotated about [001], both the surface normal [110] and the
+            # in-plane third direction [1 -1 0] are ordinary directions.
+            return {"rot": "e", "cut": "o", "third": "o"}
+        return super()._nonprincipal_rotation_index_roles(meta)
+
     def _theory_n_at_zero(self, pol_deg, wav_nm, meta=None, dn_override=None):
         meta = self.analysis.meta if meta is None else meta
         if np.isclose(pol_deg, 45.0, atol=1e-3):
@@ -190,8 +223,11 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
         def projection_factor(theta):
             meta = self.analysis.meta
             theta_p_w = refraction_angle(theta)["w"]
-            cut_axis = self.normalize_axis(meta["crystal_orientation"])
-            cut_axis_tuple = tuple(int(axis) for axis in cut_axis)
+            if self._is_kdp_110_rotation_geometry(meta):
+                cut_axis_tuple = (1, 1, 0)
+            else:
+                cut_axis = self.normalize_axis(meta["crystal_orientation"])
+                cut_axis_tuple = tuple(int(axis) for axis in cut_axis)
 
             key = (
                 meta["material"],

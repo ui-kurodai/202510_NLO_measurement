@@ -355,39 +355,62 @@ class BaseRotationStrategy(BaseFittingStrategy):
     def __init__(self, analysis=None):
         super().__init__(analysis)
 
+    def _nonprincipal_rotation_index_roles(self, meta):
+        """
+        Return refractive-index labels for a supported non-principal geometry.
+
+        The return value is a mapping with ``rot``, ``cut``, and ``third`` keys
+        (for example ``{"rot": "e", "cut": "o", "third": "o"}``).
+        Subclasses can override this hook; principal-axis geometries return
+        ``None`` and continue through the standard axis handling below.
+        """
+        return None
+
     def n_eff(self, pol_deg, wav_nm, theta_deg=None, meta="auto", aux=False, dn_override=None):
         """Return effective refractive index for rotation Maker fringe geometry."""
         meta = self._resolve_input_info(meta=meta)
         crystal = CRYSTALS[meta["material"]]()
 
-        geometry = {
-            "rot_axis": meta["rot/trans_axis"],
-            "cut_axis": meta["crystal_orientation"],
-        }
-
-        cut_axis = self.normalize_axis(geometry["cut_axis"])
-        rot_axis = self.normalize_axis(geometry["rot_axis"])
-        third_axis = self._third_axis(cut_axis, rot_axis)
-
-        axiality = crystal.axiality
-        if axiality == "uniaxial":
-            index_to_n = self.UNIAXIAL_N
-        elif axiality == "biaxial":
-            index_to_n = self.BIAXIAL_N
-        else:
-            raise FittingConfigurationError(
-                f"Unsupported crystal axiality: {axiality}."
+        nonprincipal_roles = self._nonprincipal_rotation_index_roles(meta)
+        if nonprincipal_roles is not None:
+            principal_n = self._principal_n_with_dn_override(
+                meta,
+                wav_nm,
+                index_to_n=nonprincipal_roles,
+                dn_override=dn_override,
             )
+            n_rot = principal_n["rot"]
+            n_cut = principal_n["cut"]
+            n_third = principal_n["third"]
+        else:
+            geometry = {
+                "rot_axis": meta["rot/trans_axis"],
+                "cut_axis": meta["crystal_orientation"],
+            }
 
-        principal_n = self._principal_n_with_dn_override(
-            meta,
-            wav_nm,
-            index_to_n=index_to_n,
-            dn_override=dn_override,
-        )
-        n_rot = principal_n[rot_axis]
-        n_cut = principal_n[cut_axis]
-        n_third = principal_n[third_axis]
+            cut_axis = self.normalize_axis(geometry["cut_axis"])
+            rot_axis = self.normalize_axis(geometry["rot_axis"])
+            third_axis = self._third_axis(cut_axis, rot_axis)
+
+            axiality = crystal.axiality
+            if axiality == "uniaxial":
+                index_to_n = self.UNIAXIAL_N
+            elif axiality == "biaxial":
+                index_to_n = self.BIAXIAL_N
+            else:
+                raise FittingConfigurationError(
+                    f"Unsupported crystal axiality: {axiality}."
+                )
+
+            principal_n = self._principal_n_with_dn_override(
+                meta,
+                wav_nm,
+                index_to_n=index_to_n,
+                dn_override=dn_override,
+            )
+            n_rot = principal_n[rot_axis]
+            n_cut = principal_n[cut_axis]
+            n_third = principal_n[third_axis]
 
         tol = 1e-3
         theta_is_none = theta_deg is None
