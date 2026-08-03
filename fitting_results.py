@@ -68,6 +68,29 @@ FITTING_CONTAINER_KEY = "fitting"
 FITTING_ACTIVE_STRATEGY_KEY = "fitting_active_strategy"
 FITTING_ACTIVE_RESULT_ID_KEY = "fitting_active_result_id"
 
+ROTATION_LC_RESULT_KEYS: tuple[str, ...] = (
+    "Lc_exp_mm",
+    "Lc_exp_std_mm",
+    "Lc_angle_dependent_n_mm",
+    "Lc_angle_dependent_n_std_mm",
+    "Lc_constant_n_mm",
+    "Lc_constant_n_std_mm",
+    "Lc_angle_dependence_delta_mm",
+    "Lc_pair_mean_mm",
+    "Lc_pair_std_mm",
+    "lc_extrapolation_order",
+    "lc_order_residual_rms",
+    "minima_count",
+    "n_count",
+    "phase_pair_count",
+)
+
+WEDGE_LC_RESULT_KEYS: tuple[str, ...] = (
+    "Lc_theory_mm",
+    "lc_wedge_minima_mm",
+    "lc_wedge_minima_std_mm",
+)
+
 
 def normalize_lc_aliases(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
@@ -80,31 +103,55 @@ def normalize_lc_aliases(payload: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def remove_rotation_lc_keys(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    for key in ROTATION_LC_RESULT_KEYS:
+        normalized.pop(key, None)
+    return normalized
+
+
+def _is_wedge_fit(meta_or_entry: dict[str, Any] | None, strategy_name: str | None = None) -> bool:
+    payload = meta_or_entry if isinstance(meta_or_entry, dict) else {}
+    method = str(payload.get("method") or "").strip().lower()
+    strategy = str(strategy_name or payload.get("strategy") or "").strip().lower()
+    return method == "wedge" or "wedge" in strategy
+
+
+def normalize_wedge_lc_payload(payload: dict[str, Any], *, is_wedge: bool) -> dict[str, Any]:
+    normalized = normalize_lc_aliases(payload)
+    if is_wedge:
+        normalized = remove_rotation_lc_keys(normalized)
+    return normalized
+
+
 def migrate_lc_aliases(meta: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
     payload = dict(meta) if isinstance(meta, dict) else {}
     changed = False
 
-    def apply_aliases(entry: dict[str, Any]) -> dict[str, Any]:
+    root_is_wedge = _is_wedge_fit(payload)
+
+    def apply_aliases(entry: dict[str, Any], *, is_wedge: bool = False) -> dict[str, Any]:
         nonlocal changed
-        updated = normalize_lc_aliases(entry)
+        updated = normalize_wedge_lc_payload(entry, is_wedge=is_wedge)
         if updated != entry:
             changed = True
         return updated
 
-    payload = apply_aliases(payload)
+    payload = apply_aliases(payload, is_wedge=root_is_wedge)
 
     raw = payload.get(FITTING_CONTAINER_KEY)
     if isinstance(raw, list):
         entries = []
         for entry in raw:
-            entries.append(apply_aliases(entry) if isinstance(entry, dict) else entry)
+            entry_is_wedge = root_is_wedge or _is_wedge_fit(entry)
+            entries.append(apply_aliases(entry, is_wedge=entry_is_wedge) if isinstance(entry, dict) else entry)
         payload[FITTING_CONTAINER_KEY] = entries
     elif isinstance(raw, dict):
         if "strategy" in raw:
-            payload[FITTING_CONTAINER_KEY] = apply_aliases(raw)
+            payload[FITTING_CONTAINER_KEY] = apply_aliases(raw, is_wedge=root_is_wedge or _is_wedge_fit(raw))
         else:
             payload[FITTING_CONTAINER_KEY] = {
-                key: apply_aliases(value) if isinstance(value, dict) else value
+                key: apply_aliases(value, is_wedge=root_is_wedge or _is_wedge_fit(value, key)) if isinstance(value, dict) else value
                 for key, value in raw.items()
             }
 
@@ -226,7 +273,10 @@ def upsert_fitting_result(
     payload = dict(meta)
     entries = normalize_fitting_entries(payload)
 
-    result = normalize_lc_aliases(result)
+    result = normalize_wedge_lc_payload(
+        result,
+        is_wedge=_is_wedge_fit(payload, strategy_name),
+    )
     entry = {
         key: value
         for key, value in result.items()

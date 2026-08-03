@@ -679,6 +679,23 @@ class BaseWedgeStrategy(BaseFittingStrategy):
         L_array = t_center + (data["position"] - self.center_pos) * np.tan(np.radians(wedge_angle_deg))
         return np.asarray(L_array, dtype=float)
 
+    def _saved_wedge_minima_indices(self, meta, data_length):
+        raw = meta.get("minima")
+        if not isinstance(raw, list):
+            return None
+
+        indices = []
+        for item in raw:
+            if isinstance(item, dict):
+                item = item.get("index")
+            try:
+                index = int(item)
+            except Exception:
+                continue
+            if 0 <= index < data_length:
+                indices.append(index)
+        return np.asarray(sorted(set(indices)), dtype=int)
+
     def _calc_wedge_minima_lc(self, meta, data, intensity_column="intensity_corrected"):
         x = np.asarray(data["position"], dtype=float)
         y = np.asarray(data[intensity_column], dtype=float)
@@ -688,7 +705,20 @@ class BaseWedgeStrategy(BaseFittingStrategy):
 
         x_fit = x[finite]
         y_fit = y[finite]
-        minima_idx = self.detect_minima(x_fit, y_fit)
+        finite_indices = np.flatnonzero(finite)
+        saved_minima_idx = self._saved_wedge_minima_indices(meta, x.size)
+        if saved_minima_idx is None:
+            minima_idx = self.detect_minima(x_fit, y_fit)
+        else:
+            finite_lookup = {int(original): int(local) for local, original in enumerate(finite_indices)}
+            minima_idx = np.asarray(
+                [
+                    finite_lookup[int(index)]
+                    for index in saved_minima_idx
+                    if int(index) in finite_lookup
+                ],
+                dtype=int,
+            )
         if minima_idx.size < 2:
             return {}
 

@@ -74,6 +74,7 @@ from fitting_results import (
 from widgets.refractive_index_global_fit_widget import RefractiveIndexGlobalFitWidget
 from widgets.standard_fit_widget import MplCanvas, SavedStrategyListWidget, StandardFitWidget
 from widgets.plot_settings_widget import (
+    AnnotationTextSettings,
     ExtraAxisPlotSettings,
     PlotSettingsDialog,
     SeriesPlotSettings,
@@ -1920,6 +1921,23 @@ class FittingAnalysisWidget(QWidget):
         """Show saved fit-oriented values without duplicating the metadata panel."""
         rows = []
         fit_payload = self._fit_payload_for_strategy(meta)
+        is_wedge = str((meta or {}).get("method") or "").strip().lower() == "wedge"
+        wedge_hidden_keys = {
+            "Lc_exp_mm",
+            "Lc_exp_std_mm",
+            "Lc_angle_dependent_n_mm",
+            "Lc_angle_dependent_n_std_mm",
+            "Lc_constant_n_mm",
+            "Lc_constant_n_std_mm",
+            "Lc_angle_dependence_delta_mm",
+            "Lc_pair_mean_mm",
+            "Lc_pair_std_mm",
+            "lc_extrapolation_order",
+            "lc_order_residual_rms",
+            "minima_count",
+            "n_count",
+            "phase_pair_count",
+        }
         for key, label in [
             ("L_mm", "Corrected L [mm]"),
             ("L_mm_std", "Corrected L std [mm]"),
@@ -1972,6 +1990,8 @@ class FittingAnalysisWidget(QWidget):
             ("n_2w_b", "n 2w b"),
             ("n_2w_c", "n 2w c"),
         ]:
+            if is_wedge and key in wedge_hidden_keys:
+                continue
             if key in fit_payload:
                 rows.append((label, fit_payload.get(key)))
 
@@ -2432,6 +2452,10 @@ class FittingAnalysisWidget(QWidget):
                 item.key: item
                 for item in self._plot_extra_axis_defaults(plot_key)
             },
+            annotations={
+                item.key: item
+                for item in self._plot_annotation_defaults(plot_key)
+            },
         )
 
     def _parse_range_bound(self, text: str) -> Optional[float]:
@@ -2536,6 +2560,27 @@ class FittingAnalysisWidget(QWidget):
             )
         return defaults
 
+    def _plot_annotation_defaults(self, plot_key: str) -> List[AnnotationTextSettings]:
+        if plot_key != "fit":
+            return []
+        return [
+            AnnotationTextSettings(
+                key="fit_summary",
+                name="Fit summary",
+                visible=True,
+                text=(
+                    "L = {L_mm:.4f} mm (ΔL= {delta_um:+.1f} um)\n"
+                    "Peak = {peak:.3g}\n"
+                    "Δn = {delta_n:+.6f}"
+                ),
+                digit_count=-1,
+                x=0.02,
+                y=0.98,
+                ha="left",
+                va="top",
+            )
+        ]
+
     def _series_setting(self, plot_key: str, label: str) -> SeriesPlotSettings:
         settings = self._plot_settings[plot_key]
         if label not in settings.series:
@@ -2577,14 +2622,8 @@ class FittingAnalysisWidget(QWidget):
         kwargs["zorder"] = 2 + self._series_order_index(plot_key, label)
         return kwargs
 
-    def _legend_label(
-        self,
-        plot_key: str,
-        label: str,
-        override: Optional[str] = None,
-        context: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        class _LegendValue:
+    def _format_text_template(self, template: str, context: Optional[Dict[str, Any]], digit_count: int = -1) -> str:
+        class _TemplateValue:
             def __init__(self, value: float, digits: int) -> None:
                 self.value = float(value)
                 self.digits = digits
@@ -2596,29 +2635,39 @@ class FittingAnalysisWidget(QWidget):
                     return f"{self.value:.{self.digits}f}"
                 return f"{self.value:g}"
 
+        if not context:
+            return template
+        formatted_context = {
+            key: _TemplateValue(value, digit_count)
+            if isinstance(value, (int, float, np.integer, np.floating))
+            else value
+            for key, value in context.items()
+        }
+
+        def replace_placeholder(match: re.Match[str]) -> str:
+            key = match.group(1)
+            spec = match.group(2) or ""
+            if key not in formatted_context:
+                return match.group(0)
+            try:
+                return format(formatted_context[key], spec)
+            except Exception:
+                return match.group(0)
+
+        return re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)(?::([^{}]+))?\}", replace_placeholder, template)
+
+    def _legend_label(
+        self,
+        plot_key: str,
+        label: str,
+        override: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
         series = self._series_setting(plot_key, label)
         if not series.legend_visible:
             return "_nolegend_"
         template = override or series.legend_label or series.label or label
-        if context:
-            context = {
-                key: _LegendValue(value, series.legend_digits)
-                if isinstance(value, (int, float, np.integer, np.floating))
-                else value
-                for key, value in context.items()
-            }
-            def replace_placeholder(match: re.Match[str]) -> str:
-                key = match.group(1)
-                spec = match.group(2) or ""
-                if key not in context:
-                    return match.group(0)
-                try:
-                    return format(context[key], spec)
-                except Exception:
-                    return match.group(0)
-
-            return re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)(?::([^{}]+))?\}", replace_placeholder, template)
-        return template
+        return self._format_text_template(template, context, series.legend_digits)
 
     def _lc_legend_label(self, label: str, value_mm: float) -> str:
         if not np.isfinite(value_mm):
@@ -2637,6 +2686,22 @@ class FittingAnalysisWidget(QWidget):
                 "value_um": value_um,
             },
         )
+
+    def _annotation_setting(self, plot_key: str, key: str) -> Optional[AnnotationTextSettings]:
+        settings = self._plot_settings[plot_key]
+        if key not in settings.annotations:
+            for item in self._plot_annotation_defaults(plot_key):
+                if item.key == key:
+                    settings.annotations[key] = item
+                    break
+        return settings.annotations.get(key)
+
+    def _annotation_text(self, plot_key: str, key: str, context: Dict[str, Any]) -> Optional[str]:
+        annotation = self._annotation_setting(plot_key, key)
+        if annotation is None or not annotation.visible:
+            return None
+        text = self._format_text_template(annotation.text, context, annotation.digit_count)
+        return text if text.strip() else None
 
     def _parse_manual_values(self, values_text: str) -> List[float]:
         values: List[float] = []
@@ -2772,6 +2837,7 @@ class FittingAnalysisWidget(QWidget):
             title=f"Plot Settings: {tab_label}",
             heatmap=(plot_key == "n_landscape"),
             extra_axis_defaults=self._plot_extra_axis_defaults(plot_key),
+            annotation_defaults=self._plot_annotation_defaults(plot_key),
             parent=self,
         )
         dialog.applied.connect(lambda key=plot_key, active_settings=settings: self._apply_plot_settings_dialog(key, active_settings))
@@ -4480,15 +4546,31 @@ class FittingAnalysisWidget(QWidget):
         nominal_L = self._nominal_thickness_mm()
         delta_um = (float(live["L_value"]) - nominal_L) * 1000.0
         if settings.show_annotation:
+            annotation = self._annotation_setting("fit", "fit_summary")
+            annotation_text = self._annotation_text(
+                "fit",
+                "fit_summary",
+                {
+                    "L": float(live["L_value"]),
+                    "L_mm": float(live["L_value"]),
+                    "delta_L_um": delta_um,
+                    "delta_um": delta_um,
+                    "peak": float(live["peak_value"]),
+                    "peak_value": float(live["peak_value"]),
+                    "delta_n": float(live.get("delta_n", 0.0)),
+                },
+            )
+        else:
+            annotation = None
+            annotation_text = None
+        if annotation_text:
             ax.text(
-                0.02,
-                0.98,
-                f"L = {live['L_value']:.4f} mm (\u0394L= {delta_um:+.1f} um)\n"
-                f"Peak = {self._format_sigfigs(live['peak_value'], 3)}\n"
-                f"\u0394n = {float(live.get('delta_n', 0.0)):+.6f}",
+                annotation.x if annotation is not None else 0.02,
+                annotation.y if annotation is not None else 0.98,
+                annotation_text,
                 transform=ax.transAxes,
-                va="top",
-                ha="left",
+                va=annotation.va if annotation is not None else "top",
+                ha=annotation.ha if annotation is not None else "left",
                 fontfamily=settings.font_family,
                 fontsize=settings.legend_font_size,
             )
