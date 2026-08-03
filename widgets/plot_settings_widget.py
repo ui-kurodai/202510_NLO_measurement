@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QStyledItemDelegate,
@@ -48,6 +49,19 @@ class ManualPlotItemSettings:
     key: str
     kind: str = "point"
     values: str = ""
+
+
+@dataclass
+class AnnotationTextSettings:
+    key: str
+    name: str
+    visible: bool = True
+    text: str = ""
+    digit_count: int = -1
+    x: float = 0.02
+    y: float = 0.98
+    ha: str = "left"
+    va: str = "top"
 
 
 class OpaqueLineEditDelegate(QStyledItemDelegate):
@@ -112,6 +126,7 @@ class SharedPlotSettings:
     series_order: List[str] = field(default_factory=list)
     extra_axes: Dict[str, ExtraAxisPlotSettings] = field(default_factory=dict)
     manual_items: Dict[str, ManualPlotItemSettings] = field(default_factory=dict)
+    annotations: Dict[str, AnnotationTextSettings] = field(default_factory=dict)
 
 
 class ManualPlotItemDialog(QDialog):
@@ -204,6 +219,7 @@ class PlotSettingsDialog(QDialog):
         title: str = "Plot Settings",
         heatmap: bool = False,
         extra_axis_defaults: Optional[List[ExtraAxisPlotSettings]] = None,
+        annotation_defaults: Optional[List[AnnotationTextSettings]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -213,8 +229,10 @@ class PlotSettingsDialog(QDialog):
         self.series_defaults = series_defaults
         self.heatmap = heatmap
         self.extra_axis_defaults = extra_axis_defaults or []
+        self.annotation_defaults = annotation_defaults or []
         self._ensure_series()
         self._ensure_extra_axes()
+        self._ensure_annotations()
         self._accepted_snapshot = copy.deepcopy(self.settings)
 
         layout = QVBoxLayout(self)
@@ -267,6 +285,14 @@ class PlotSettingsDialog(QDialog):
             key: value for key, value in self.settings.extra_axes.items() if key in known
         }
 
+    def _ensure_annotations(self) -> None:
+        for item in self.annotation_defaults:
+            self.settings.annotations.setdefault(item.key, AnnotationTextSettings(**item.__dict__))
+        known = {item.key for item in self.annotation_defaults}
+        self.settings.annotations = {
+            key: value for key, value in self.settings.annotations.items() if key in known
+        }
+
     def _build_general_tab(self) -> QWidget:
         page = QWidget()
         form = QFormLayout(page)
@@ -309,6 +335,34 @@ class PlotSettingsDialog(QDialog):
         form.addRow("Legend size", self.legend_size)
         form.addRow("Ticks size", self.tick_size)
         form.addRow("Additional text", self.annotation)
+
+        self.annotation_widgets: Dict[str, Dict[str, object]] = {}
+        if self.annotation_defaults:
+            form.addRow(QLabel("Additional text templates"))
+        for annotation in self.annotation_defaults:
+            current = self.settings.annotations[annotation.key]
+            group = QGroupBox(current.name)
+            group_layout = QGridLayout(group)
+            enabled = QCheckBox("Show")
+            enabled.setChecked(current.visible)
+            digits = QSpinBox()
+            digits.setRange(-1, 12)
+            digits.setSpecialValueText("Auto")
+            digits.setValue(current.digit_count)
+            text_edit = QPlainTextEdit(current.text)
+            text_edit.setPlaceholderText("Use placeholders such as {value:.2f}")
+            text_edit.setFixedHeight(90)
+            group_layout.addWidget(enabled, 0, 0)
+            group_layout.addWidget(QLabel("Digits"), 0, 1)
+            group_layout.addWidget(digits, 0, 2)
+            group_layout.addWidget(text_edit, 1, 0, 1, 3)
+            group_layout.setColumnStretch(2, 1)
+            form.addRow(group)
+            self.annotation_widgets[annotation.key] = {
+                "enabled": enabled,
+                "digits": digits,
+                "text": text_edit,
+            }
 
         self.extra_axis_text_widgets: Dict[str, Dict[str, object]] = {}
         form.addRow(QLabel("Axis labels"))
@@ -704,6 +758,14 @@ class PlotSettingsDialog(QDialog):
                 axis.label = label.text() if isinstance(label, QLineEdit) else axis.label
                 axis.label_font_size = self.settings.label_font_size
                 axis.tick_font_size = self.settings.tick_font_size
+            for key, widgets in self.annotation_widgets.items():
+                annotation = self.settings.annotations[key]
+                enabled = widgets["enabled"]
+                digits = widgets["digits"]
+                text = widgets["text"]
+                annotation.visible = enabled.isChecked() if isinstance(enabled, QCheckBox) else annotation.visible
+                annotation.digit_count = int(digits.value()) if isinstance(digits, QSpinBox) else annotation.digit_count
+                annotation.text = text.toPlainText() if isinstance(text, QPlainTextEdit) else annotation.text
             for key, widgets in self.extra_axis_axis_widgets.items():
                 axis = self.settings.extra_axes[key]
                 self._read_extra_axis_widgets(axis, widgets)
