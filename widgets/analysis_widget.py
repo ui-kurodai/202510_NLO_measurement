@@ -5139,6 +5139,73 @@ class FittingAnalysisWidget(QWidget):
         else:
             self.lbl_n_landscape_solutions.setText("No local minima found on this grid.")
 
+    def _render_common_n_landscape_plot(self, info: Dict[str, Any]):
+        if "error" in info:
+            self._show_plot_message(
+                self.canvas_common_n_landscape,
+                f"\u0394n-common-offset cost unavailable: {info['error']}",
+            )
+            self.lbl_common_n_landscape_solutions.setText("")
+            return
+
+        self.canvas_common_n_landscape.clear()
+        ax = self.canvas_common_n_landscape.ax
+        settings = self._plot_settings["common_n_landscape"]
+        delta_grid = np.asarray(info["delta_grid"], dtype=float)
+        common_grid = np.asarray(info["common_grid"], dtype=float)
+        cost = np.asarray(info["cost"], dtype=float)
+        finite = np.isfinite(cost)
+        plot_cost = np.full_like(cost, np.nan, dtype=float)
+        min_cost = float(np.nanmin(cost))
+        plot_cost[finite] = np.log10(np.maximum(cost[finite] - min_cost, 0.0) + 1.0)
+        mesh = ax.pcolormesh(delta_grid, common_grid, plot_cost, shading="auto", cmap=settings.colormap)
+        colorbar_axis = self._extra_axis_setting("common_n_landscape", "colorbar")
+        if colorbar_axis is None or colorbar_axis.visible:
+            colorbar = self.canvas_common_n_landscape.figure.colorbar(
+                mesh,
+                ax=ax,
+                label=(colorbar_axis.label if colorbar_axis is not None and colorbar_axis.label else "log$_{10}$(SSR - min + 1)"),
+            )
+            self._apply_extra_axis_settings(
+                colorbar.ax,
+                colorbar_axis,
+                axis="y",
+                default_label="log$_{10}$(SSR - min + 1)",
+                font_family=settings.font_family,
+            )
+        if self._series_visible("common_n_landscape", "Current point"):
+            series = self._series_setting("common_n_landscape", "Current point")
+            ax.scatter(
+                [info["current_delta_n"]], [info["current_common_n_offset"]],
+                color=series.color, edgecolor="black",
+                marker=self._style_to_kwargs(series.style, "common_n_landscape").get("marker") or "o",
+                s=settings.marker_size**2,
+                label=self._legend_label("common_n_landscape", "Current point"), zorder=3,
+            )
+        candidates = list(info.get("candidates") or [])
+        if candidates and self._series_visible("common_n_landscape", "Best grid"):
+            series = self._series_setting("common_n_landscape", "Best grid")
+            ax.scatter(
+                [candidates[0][1]], [candidates[0][2]], color=series.color,
+                marker=self._style_to_kwargs(series.style, "common_n_landscape").get("marker") or "x",
+                s=(settings.marker_size + 3.0) ** 2,
+                label=self._legend_label("common_n_landscape", "Best grid"), zorder=4,
+            )
+        ax.set_xlabel("\u0394n (2\u03c9 offset)", fontfamily=settings.font_family)
+        ax.set_ylabel("Common \u0394n", fontfamily=settings.font_family)
+        self._configure_plot_axes(
+            self.canvas_common_n_landscape, "common_n_landscape", "Common \u0394n"
+        )
+        self._safe_canvas_finish(self.canvas_common_n_landscape)
+        lines = [
+            f"{index + 1}. \u0394n={delta_n:+.7f}, common={common:+.7f}, SSR={value:.4g}"
+            for index, (value, delta_n, common) in enumerate(candidates)
+        ]
+        self.lbl_common_n_landscape_solutions.setText(
+            f"L fixed at {float(info['L_value']):.6f} mm; intensity scale optimized.\n"
+            + ("Lowest grid points:\n" + "\n".join(lines) if lines else "No finite candidates.")
+        )
+
     def _show_plot_message(self, canvas: MplCanvas, message: str):
         canvas.clear()
         canvas.ax.text(
