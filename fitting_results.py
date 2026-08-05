@@ -34,6 +34,7 @@ FITTING_RESULT_KEYS: tuple[str, ...] = (
     "residual_rms",
     "delta_n",
     "delta_n_std",
+    "common_n_offset",
     "delta_n_fit_cost",
     "delta_n_fit_success",
     "minima_count",

@@ -174,7 +174,7 @@ class FittingAnalysisWidget(QWidget):
         self._filter_catalog_map: Dict[str, Dict[str, Any]] = {}
         self._plot_settings: Dict[str, PlotSettings] = {
             key: self._default_plot_settings(key)
-            for key in ("fit", "resid", "centering", "extrema", "lc", "n_landscape")
+            for key in ("fit", "resid", "centering", "extrema", "lc", "n_landscape", "common_n_landscape")
         }
 
         # Build UI
@@ -276,10 +276,15 @@ class FittingAnalysisWidget(QWidget):
             "lbl_lc_hint",
             "canvas_lc",
             "canvas_n_landscape",
+            "canvas_n_landscape_profile",
             "lbl_n_landscape_solutions",
+            "canvas_common_n_landscape",
+            "lbl_common_n_landscape_solutions",
             "lbl_lc_summary",
             "sb_n_landscape_l_points",
             "sb_n_landscape_delta_points",
+            "sb_common_n_delta_points",
+            "sb_common_n_offset_points",
             "plot_setting_buttons",
             "plot_range_edits",
             "plot_canvas_frames",
@@ -853,6 +858,8 @@ class FittingAnalysisWidget(QWidget):
         self.cmb_lc_source.currentIndexChanged.connect(lambda *_args: self._render_analysis_plots())
         self.sb_n_landscape_l_points.valueChanged.connect(lambda *_args: self._render_analysis_plots())
         self.sb_n_landscape_delta_points.valueChanged.connect(lambda *_args: self._render_analysis_plots())
+        self.sb_common_n_delta_points.valueChanged.connect(lambda *_args: self._render_analysis_plots())
+        self.sb_common_n_offset_points.valueChanged.connect(lambda *_args: self._render_analysis_plots())
         self.plot_tabs.currentChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_data.stateChanged.connect(lambda *_args: self._render_analysis_plots())
         self.chk_fit_show_fitting.stateChanged.connect(lambda *_args: self._render_analysis_plots())
@@ -2348,6 +2355,7 @@ class FittingAnalysisWidget(QWidget):
             "extrema": 280,
             "lc": 260,
             "n_landscape": 320,
+            "common_n_landscape": 320,
         }.get(plot_key, 280)
 
     def _canvas_supports_top_axis(self, plot_key: str) -> bool:
@@ -2433,6 +2441,7 @@ class FittingAnalysisWidget(QWidget):
             "extrema": 2.8,
             "lc": 3.6,
             "n_landscape": 3.0,
+            "common_n_landscape": 3.0,
         }
         return PlotSettings(
             font_family="Arial",
@@ -2533,12 +2542,16 @@ class FittingAnalysisWidget(QWidget):
                 SeriesPlotSettings("Best grid", "C3", "x"),
                 SeriesPlotSettings("Measured L", "black", ":"),
             ],
+            "common_n_landscape": [
+                SeriesPlotSettings("Current point", "white", "o"),
+                SeriesPlotSettings("Best grid", "C3", "x"),
+            ],
         }
         return [SeriesPlotSettings(**item.__dict__) for item in defaults.get(plot_key, [])]
 
     def _plot_extra_axis_defaults(self, plot_key: str) -> List[ExtraAxisPlotSettings]:
         defaults: List[ExtraAxisPlotSettings] = []
-        if plot_key == "n_landscape":
+        if plot_key in {"n_landscape", "common_n_landscape"}:
             defaults.append(
                 ExtraAxisPlotSettings(
                     key="colorbar",
@@ -2571,7 +2584,8 @@ class FittingAnalysisWidget(QWidget):
                 text=(
                     "L = {L_mm:.4f} mm (ΔL= {delta_um:+.1f} um)\n"
                     "Peak = {peak:.3g}\n"
-                    "Δn = {delta_n:+.6f}"
+                    "Δn = {delta_n:+.6f}\n"
+                    "Common Δn = {common_n_offset:+.6f}"
                 ),
                 digit_count=-1,
                 x=0.02,
@@ -2835,7 +2849,7 @@ class FittingAnalysisWidget(QWidget):
             settings,
             self._plot_series_defaults(plot_key),
             title=f"Plot Settings: {tab_label}",
-            heatmap=(plot_key == "n_landscape"),
+            heatmap=(plot_key in {"n_landscape", "common_n_landscape"}),
             extra_axis_defaults=self._plot_extra_axis_defaults(plot_key),
             annotation_defaults=self._plot_annotation_defaults(plot_key),
             parent=self,
@@ -2864,6 +2878,7 @@ class FittingAnalysisWidget(QWidget):
             "extrema": "extrema.png",
             "lc": "lc_pairs.png",
             "n_landscape": "L_delta_n_cost.png",
+            "common_n_landscape": "delta_n_common_n_offset_cost.png",
         }[plot_key]
         path, _selected = QFileDialog.getSaveFileName(
             self,
@@ -3154,6 +3169,20 @@ class FittingAnalysisWidget(QWidget):
         self._set_manual_control("L", auto_L - l_span, auto_L + l_span, auto_L)
         self._set_manual_control("peak", 0.0, max(auto_peak + peak_span, peak_span), max(auto_peak, 0.0))
         self._set_manual_control("delta_n", delta_n - delta_n_span, delta_n + delta_n_span, delta_n)
+        rotation_enabled = not self._is_wedge_scan()
+        common_n_offset = self._safe_float(saved_fit.get("common_n_offset"), 0.0) if rotation_enabled else 0.0
+        self._set_manual_control(
+            "common_n_offset",
+            common_n_offset - 0.001,
+            common_n_offset + 0.001,
+            common_n_offset,
+        )
+        for widget in self._manual_controls["common_n_offset"].values():
+            widget.setEnabled(rotation_enabled)
+        common_page = self._plot_pages.get("common_n_landscape")
+        common_tab_index = self.plot_tabs.indexOf(common_page) if common_page is not None else -1
+        if common_tab_index >= 0:
+            self.plot_tabs.setTabEnabled(common_tab_index, rotation_enabled)
         self.sb_manual_centering.setValue(float(centering_value))
 
     def _fit_range_values_from_meta(self, meta: Optional[Dict[str, Any]] = None) -> Tuple[float, float]:
@@ -3513,7 +3542,8 @@ class FittingAnalysisWidget(QWidget):
         L_value = self._manual_value("L")
         peak_value = self._manual_value("peak")
         delta_n = self._manual_value("delta_n")
-        dn_override = self._dn_override_from_delta_n(strategy, delta_n)
+        common_n_offset = self._manual_value("common_n_offset")
+        dn_override = self._dn_override_from_delta_n(strategy, delta_n, common_n_offset)
         if not dn_override:
             dn_override = self._dn_override_from_saved_fit(
                 context.get("saved_fit", {}) if isinstance(context.get("saved_fit"), dict) else {}
@@ -3557,6 +3587,7 @@ class FittingAnalysisWidget(QWidget):
             "L_value": L_value,
             "peak_value": peak_value,
             "delta_n": delta_n,
+            "common_n_offset": common_n_offset,
             "dn_override": dn_override,
             "intensity_scale": intensity_scale,
             "centering_value": self._manual_centering_value(),
@@ -3591,6 +3622,7 @@ class FittingAnalysisWidget(QWidget):
         delta_n = self._safe_float((context.get("saved_fit") or {}).get("delta_n"))
         if not np.isfinite(delta_n):
             delta_n = self._manual_value("delta_n")
+        common_n_offset = self._safe_float((context.get("saved_fit") or {}).get("common_n_offset"), 0.0)
 
         return {
             "x": x,
@@ -3602,7 +3634,8 @@ class FittingAnalysisWidget(QWidget):
             "L_value": L_value,
             "peak_value": peak_value,
             "delta_n": delta_n,
-            "dn_override": self._dn_override_from_delta_n(context.get("strategy"), delta_n),
+            "common_n_offset": common_n_offset,
+            "dn_override": self._dn_override_from_delta_n(context.get("strategy"), delta_n, common_n_offset),
             "intensity_scale": peak_value,
             "centering_value": self._manual_centering_value(),
             "fit_curve_raw": fit_raw,
@@ -3623,7 +3656,8 @@ class FittingAnalysisWidget(QWidget):
         delta_n = self._manual_value("delta_n") if "delta_n" in self._manual_controls else self._safe_float(
             (context.get("saved_fit") or {}).get("delta_n"), 0.0
         )
-        delta_override = self._dn_override_from_delta_n(strategy, delta_n)
+        common_n_offset = self._manual_value("common_n_offset") if "common_n_offset" in self._manual_controls else 0.0
+        delta_override = self._dn_override_from_delta_n(strategy, delta_n, common_n_offset)
         if delta_override:
             dn_override = delta_override
         intensity_scale = self._intensity_scale_from_control(peak_value, strategy)
@@ -3817,16 +3851,113 @@ class FittingAnalysisWidget(QWidget):
                 dn_override[key] = float(value)
         return dn_override
 
-    def _dn_override_from_delta_n(self, strategy: Any, delta_n: float) -> Dict[str, float]:
+    def _compute_common_n_landscape(self) -> Dict[str, Any]:
+        if self._is_wedge_scan():
+            return {"error": "This cost map is available for rotation scans only."}
+        context = self._analysis_context
+        if context.get("error"):
+            return {"error": context["error"]}
+        strategy = context.get("strategy")
+        if strategy is None or not hasattr(strategy, "_delta_n_override"):
+            return {"error": "The selected strategy does not provide delta_n overrides."}
+
+        x, y, prepared = self._current_display_xy()
+        try:
+            fit_mask = self._current_fit_range_mask(x, y, min_points=3)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        x_fit = x[fit_mask]
+        y_fit = y[fit_mask]
+        fit_data = prepared.loc[fit_mask].copy() if isinstance(prepared, pd.DataFrame) else pd.DataFrame()
+
+        L_value = self._manual_value("L")
+        delta_center = self._manual_value("delta_n")
+        common_center = self._manual_value("common_n_offset")
+        delta_grid = np.linspace(
+            delta_center - 0.0001,
+            delta_center + 0.0001,
+            max(int(self.sb_common_n_delta_points.value()), 2),
+        )
+        common_grid = np.linspace(
+            common_center - 0.001,
+            common_center + 0.001,
+            max(int(self.sb_common_n_offset_points.value()), 2),
+        )
+        cost = np.full((common_grid.size, delta_grid.size), np.nan, dtype=float)
+        for i, common_n_offset in enumerate(common_grid):
+            for j, delta_n in enumerate(delta_grid):
+                dn_override = self._dn_override_from_delta_n(
+                    strategy, float(delta_n), float(common_n_offset)
+                )
+                try:
+                    model = np.asarray(
+                        strategy._maker_fringes(
+                            override={
+                                "L": float(L_value),
+                                "data": fit_data,
+                                "theta_deg": x_fit,
+                                **({"dn_override": dn_override} if dn_override else {}),
+                            }
+                        ),
+                        dtype=float,
+                    )
+                    valid = np.isfinite(model) & np.isfinite(y_fit)
+                    if np.count_nonzero(valid) < 3:
+                        continue
+                    denom = float(np.dot(model[valid], model[valid]))
+                    if denom <= 0.0:
+                        continue
+                    scale = float(np.dot(model[valid], y_fit[valid]) / denom)
+                    residual = scale * model[valid] - y_fit[valid]
+                    cost[i, j] = float(np.dot(residual, residual))
+                except Exception:
+                    continue
+
+        finite_cost = np.isfinite(cost)
+        if not np.any(finite_cost):
+            return {"error": "No finite \u0394n-common-offset cost values could be computed."}
+        coords = np.argwhere(finite_cost)
+        ranked = np.argsort(cost[finite_cost])[:5]
+        candidates = [
+            (
+                float(cost[tuple(coords[index])]),
+                float(delta_grid[coords[index][1]]),
+                float(common_grid[coords[index][0]]),
+            )
+            for index in ranked
+        ]
+        return {
+            "delta_grid": delta_grid,
+            "common_grid": common_grid,
+            "cost": cost,
+            "candidates": candidates,
+            "current_delta_n": delta_center,
+            "current_common_n_offset": common_center,
+            "L_value": L_value,
+            "cost_data_label": self._fit_range_label(),
+        }
+
+    def _dn_override_from_delta_n(
+        self, strategy: Any, delta_n: float, common_n_offset: float = 0.0
+    ) -> Dict[str, float]:
         if strategy is None or not hasattr(strategy, "_delta_n_override"):
             return {}
         try:
             delta_n = float(delta_n)
-            if not np.isfinite(delta_n):
+            common_n_offset = float(common_n_offset)
+            if not (np.isfinite(delta_n) and np.isfinite(common_n_offset)):
                 return {}
+            if hasattr(strategy, "_delta_n_common_offset_override"):
+                values = strategy._delta_n_common_offset_override(
+                    self._meta, delta_n, common_n_offset
+                )
+            else:
+                values = strategy._delta_n_override(self._meta, delta_n)
+                for key in tuple(values):
+                    values[key] = float(values[key]) + common_n_offset
             return {
                 str(key): float(value)
-                for key, value in strategy._delta_n_override(self._meta, delta_n).items()
+                for key, value in values.items()
                 if np.isfinite(float(value))
             }
         except Exception:
@@ -4423,9 +4554,10 @@ class FittingAnalysisWidget(QWidget):
         if self._analysis_context.get("error"):
             message = str(self._analysis_context["error"])
             self._render_fit_data_only_plot(message)
-            for canvas in [self.canvas_resid, self.canvas_centering, self.canvas_lc, self.canvas_n_landscape]:
+            for canvas in [self.canvas_resid, self.canvas_centering, self.canvas_lc, self.canvas_n_landscape, self.canvas_n_landscape_profile, self.canvas_common_n_landscape]:
                 self._show_plot_message(canvas, message)
             self.lbl_n_landscape_solutions.setText("")
+            self.lbl_common_n_landscape_solutions.setText("")
             self.extrema_widget.show_message(message)
             self._clear_nfit_measurements(message)
             self.btn_apply_manual.setEnabled(False)
@@ -4436,9 +4568,10 @@ class FittingAnalysisWidget(QWidget):
         if "error" in live:
             message = str(live["error"])
             self._render_fit_data_only_plot(message)
-            for canvas in [self.canvas_resid, self.canvas_centering, self.canvas_lc, self.canvas_n_landscape]:
+            for canvas in [self.canvas_resid, self.canvas_centering, self.canvas_lc, self.canvas_n_landscape, self.canvas_n_landscape_profile, self.canvas_common_n_landscape]:
                 self._show_plot_message(canvas, message)
             self.lbl_n_landscape_solutions.setText("")
+            self.lbl_common_n_landscape_solutions.setText("")
             self.extrema_widget.show_message(message)
             self._clear_nfit_measurements(message)
             self.btn_apply_manual.setEnabled(False)
@@ -4465,6 +4598,11 @@ class FittingAnalysisWidget(QWidget):
             if current_plot == "n_landscape"
             else {"error": "Open the L-\u0394n Cost tab to compute the map."}
         )
+        common_n_landscape = (
+            self._compute_common_n_landscape()
+            if current_plot == "common_n_landscape"
+            else {"error": "Open the \u0394n-Common \u0394n Cost tab to compute the map."}
+        )
 
         self._render_fit_plot(live)
         self._render_residual_plot(live)
@@ -4474,15 +4612,17 @@ class FittingAnalysisWidget(QWidget):
             self._render_lc_plot(lc_info)
         if current_plot == "n_landscape":
             self._render_n_landscape_plot(n_landscape)
+        if current_plot == "common_n_landscape":
+            self._render_common_n_landscape_plot(common_n_landscape)
         if self._current_page_key == "nfit":
             self._render_nfit_page()
         self.btn_apply_manual.setEnabled("error" not in live)
 
         notes = self._analysis_context.get("notes") or []
         self.lbl_manual_hint.setText(
-            "The live overlay uses the current L, Peak, \u0394n, and Centering values. Overwrite updates saved fit values."
+            "The live overlay uses the current L, Peak, \u0394n, Common \u0394n, and Centering values. Overwrite updates saved fit values."
             if not notes else
-            "The live overlay uses the current L, Peak, \u0394n, and Centering values. " + " | ".join(str(note) for note in notes)
+            "The live overlay uses the current L, Peak, \u0394n, Common \u0394n, and Centering values. " + " | ".join(str(note) for note in notes)
         )
 
     def _render_fit_data_only_plot(self, error_message: str):
@@ -4558,6 +4698,7 @@ class FittingAnalysisWidget(QWidget):
                     "peak": float(live["peak_value"]),
                     "peak_value": float(live["peak_value"]),
                     "delta_n": float(live.get("delta_n", 0.0)),
+                    "common_n_offset": float(live.get("common_n_offset", 0.0)),
                 },
             )
         else:
@@ -4995,6 +5136,7 @@ class FittingAnalysisWidget(QWidget):
             fit_result = {
                 "L_mm": float(live["L_value"]),
                 "delta_n": float(live.get("delta_n", 0.0)),
+                "common_n_offset": float(live.get("common_n_offset", 0.0)),
                 "centering_pos": self._manual_centering_value(),
                 "d_rel_abs": float(np.sqrt(linear_coeff)),
                 "d_component": str((self._analysis_context.get("saved_fit") or {}).get("d_component") or meta.get("d_component", "")),
@@ -5005,6 +5147,7 @@ class FittingAnalysisWidget(QWidget):
                 "L_mm_std": 0.0,
                 "delta_n": float(live.get("delta_n", 0.0)),
                 "delta_n_std": 0.0,
+                "common_n_offset": float(live.get("common_n_offset", 0.0)),
                 "centering_pos": self._manual_centering_value(),
                 "k_scale": float(live["peak_value"]),
                 "k_scale_std": 0.0,
@@ -5081,13 +5224,14 @@ class FittingAnalysisWidget(QWidget):
         self.extrema_widget.mark_saved()
         self._refresh_saved_strategy_list(meta)
         self._populate_table_from_json(meta)
-        QMessageBox.information(self, "Saved", "Current L, Peak, \u0394n, and Centering values were written to JSON/CSV.")
+        QMessageBox.information(self, "Saved", "Current L, Peak, \u0394n, Common \u0394n, and Centering values were written to JSON/CSV.")
 
     def _clear_plots(self):
-        for canvas in [self.canvas_fit, self.canvas_resid, self.canvas_centering, self.canvas_lc, self.canvas_n_landscape]:
+        for canvas in [self.canvas_fit, self.canvas_resid, self.canvas_centering, self.canvas_lc, self.canvas_n_landscape, self.canvas_n_landscape_profile, self.canvas_common_n_landscape]:
             canvas.clear()
             canvas.draw()
         self.lbl_n_landscape_solutions.setText("")
+        self.lbl_common_n_landscape_solutions.setText("")
         if hasattr(self, "lbl_lc_summary"):
             self.lbl_lc_summary.setText("")
         self.extrema_widget.clear_plot()
@@ -5106,6 +5250,8 @@ class FittingAnalysisWidget(QWidget):
                 "extrema.png": self.extrema_widget.canvas.figure,
                 "lc_pairs.png": self.canvas_lc.figure,
                 "L_delta_n_cost.png": self.canvas_n_landscape.figure,
+                "delta_n_best_ssr.png": self.canvas_n_landscape_profile.figure,
+                "delta_n_common_n_offset_cost.png": self.canvas_common_n_landscape.figure,
             }
             for filename, figure in figures.items():
                 figure.savefig(output_dir / filename, dpi=200, bbox_inches="tight")

@@ -456,12 +456,44 @@ class StandardFitWidget(QWidget):
         n_landscape_toolbar.addWidget(self.plot_setting_buttons["n_landscape"])
         n_landscape_layout.addLayout(n_landscape_toolbar)
         self.canvas_n_landscape = MplCanvas(n_landscape_tab, width=6.0, height=3.0)
+        self.canvas_n_landscape_profile = MplCanvas(n_landscape_tab, width=6.0, height=2.3)
         self.lbl_n_landscape_solutions = QLabel("")
         self.lbl_n_landscape_solutions.setWordWrap(True)
         self.lbl_n_landscape_solutions.setStyleSheet("color: gray;")
         self._add_canvas_with_range_controls(n_landscape_layout, "n_landscape", self.canvas_n_landscape)
         n_landscape_layout.addWidget(self.lbl_n_landscape_solutions)
         self.plot_tabs.addTab(n_landscape_tab, "L-\u0394n Cost")
+
+        common_n_tab = QWidget()
+        common_n_layout = QVBoxLayout(common_n_tab)
+        common_n_layout.setContentsMargins(0, 4, 0, 0)
+        common_n_layout.setSpacing(4)
+        common_n_toolbar = QHBoxLayout()
+        self.sb_common_n_delta_points = QSpinBox()
+        self.sb_common_n_delta_points.setRange(5, 401)
+        self.sb_common_n_delta_points.setSingleStep(2)
+        self.sb_common_n_delta_points.setValue(61)
+        self.sb_common_n_offset_points = QSpinBox()
+        self.sb_common_n_offset_points.setRange(5, 401)
+        self.sb_common_n_offset_points.setSingleStep(2)
+        self.sb_common_n_offset_points.setValue(61)
+        common_n_toolbar.addWidget(QLabel("\u0394n points:"))
+        common_n_toolbar.addWidget(self.sb_common_n_delta_points)
+        common_n_toolbar.addWidget(QLabel("Common points:"))
+        common_n_toolbar.addWidget(self.sb_common_n_offset_points)
+        common_n_toolbar.addStretch(1)
+        self.plot_setting_buttons["common_n_landscape"] = QPushButton("Plot Settings")
+        common_n_toolbar.addWidget(self.plot_setting_buttons["common_n_landscape"])
+        common_n_layout.addLayout(common_n_toolbar)
+        self.canvas_common_n_landscape = MplCanvas(common_n_tab, width=6.0, height=3.0)
+        self.lbl_common_n_landscape_solutions = QLabel("")
+        self.lbl_common_n_landscape_solutions.setWordWrap(True)
+        self.lbl_common_n_landscape_solutions.setStyleSheet("color: gray;")
+        self._add_canvas_with_range_controls(
+            common_n_layout, "common_n_landscape", self.canvas_common_n_landscape
+        )
+        common_n_layout.addWidget(self.lbl_common_n_landscape_solutions)
+        self.plot_tabs.addTab(common_n_tab, "\u0394n-Common \u0394n Cost")
 
         plot_toolbar = QHBoxLayout()
         self.btn_plot_settings = QPushButton("Plot Settings")
@@ -542,9 +574,18 @@ class StandardFitWidget(QWidget):
         self._create_manual_control_row(
             form=form,
             key="delta_n",
-            label="\u0394n:",
+            label="\u0394n (2\u03c9 offset):",
             minimum=-0.001,
             maximum=0.001,
+            decimals=7,
+            step=0.000001,
+        )
+        self._create_manual_control_row(
+            form=form,
+            key="common_n_offset",
+            label="Common \u0394n:",
+            minimum=-0.01,
+            maximum=0.01,
             decimals=7,
             step=0.000001,
         )
@@ -566,7 +607,7 @@ class StandardFitWidget(QWidget):
         layout.addLayout(buttons)
 
         self.lbl_manual_hint = QLabel(
-            "The live overlay uses the current L, Peak, \u0394n, and Centering values. Overwrite updates saved fit values."
+            "The live overlay uses the current L, Peak, \u0394n, Common \u0394n, and Centering values. Overwrite updates saved fit values."
         )
         self.lbl_manual_hint.setWordWrap(True)
         self.lbl_manual_hint.setStyleSheet("color: gray;")

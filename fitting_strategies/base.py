@@ -153,6 +153,21 @@ class BaseFittingStrategy:
             dn_override[f"dn_2w_{axis}"] = delta_n if axis in axes else 0.0
         return dn_override
 
+    def _delta_n_common_offset_override(self, meta, delta_n, common_n_offset=0.0):
+        """Offset the relevant fundamental and SH indices while preserving delta_n."""
+        delta_n = float(delta_n)
+        common_n_offset = float(common_n_offset)
+        roles = self._delta_n_axis_roles(meta)
+        w_axes = tuple(roles.get("w_axes") or ("a", "b", "c"))
+        two_w_axes = tuple(roles.get("two_w_axes") or ("a", "b", "c"))
+        dn_override = {}
+        for axis in ("a", "b", "c"):
+            dn_override[f"dn_w_{axis}"] = common_n_offset if axis in w_axes else 0.0
+            dn_override[f"dn_2w_{axis}"] = (
+                common_n_offset + delta_n if axis in two_w_axes else 0.0
+            )
+        return dn_override
+
     def _resolve_frequency_tag(self, meta, wav_nm):
         """
         Map the model wavelength onto the fundamental / SH tags used by dn_override.
