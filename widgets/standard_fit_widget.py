@@ -461,6 +461,8 @@ class StandardFitWidget(QWidget):
         self.lbl_n_landscape_solutions.setWordWrap(True)
         self.lbl_n_landscape_solutions.setStyleSheet("color: gray;")
         self._add_canvas_with_range_controls(n_landscape_layout, "n_landscape", self.canvas_n_landscape)
+        n_landscape_layout.addWidget(QLabel("Best SSR at each Δn (minimum over L)"))
+        n_landscape_layout.addWidget(self.canvas_n_landscape_profile)
         n_landscape_layout.addWidget(self.lbl_n_landscape_solutions)
         self.plot_tabs.addTab(n_landscape_tab, "L-\u0394n Cost")
 
@@ -519,6 +521,7 @@ class StandardFitWidget(QWidget):
             "extrema": extrema_tab,
             "lc": lc_tab,
             "n_landscape": n_landscape_tab,
+            "common_n_landscape": common_n_tab,
         }
         self._plot_canvases = {
             "fit": self.canvas_fit,
@@ -527,6 +530,7 @@ class StandardFitWidget(QWidget):
             "extrema": self.extrema_widget.canvas,
             "lc": self.canvas_lc,
             "n_landscape": self.canvas_n_landscape,
+            "common_n_landscape": self.canvas_common_n_landscape,
         }
 
     def set_metadata_edit_enabled(self, enabled: bool) -> None:

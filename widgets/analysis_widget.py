@@ -5051,6 +5051,7 @@ class FittingAnalysisWidget(QWidget):
     def _render_n_landscape_plot(self, info: Dict[str, Any]):
         if "error" in info:
             self._show_plot_message(self.canvas_n_landscape, f"L-\u0394n cost unavailable: {info['error']}")
+            self._show_plot_message(self.canvas_n_landscape_profile, f"SSR profile unavailable: {info['error']}")
             self.lbl_n_landscape_solutions.setText("")
             return
 
@@ -5129,6 +5130,28 @@ class FittingAnalysisWidget(QWidget):
         ax.set_ylabel("\u0394n", fontfamily=settings.font_family)
         self._configure_plot_axes(self.canvas_n_landscape, "n_landscape", "\u0394n")
         self._safe_canvas_finish(self.canvas_n_landscape)
+
+        self.canvas_n_landscape_profile.clear()
+        profile_ax = self.canvas_n_landscape_profile.ax
+        best_ssr = np.full(delta_grid.shape, np.nan, dtype=float)
+        for index, row in enumerate(cost):
+            finite_row = row[np.isfinite(row)]
+            if finite_row.size:
+                best_ssr[index] = float(np.min(finite_row))
+        finite_profile = np.isfinite(best_ssr)
+        profile_ax.plot(delta_grid[finite_profile], best_ssr[finite_profile], color="C0", marker=".", linewidth=1.5)
+        positive_profile = best_ssr[finite_profile] > 0.0
+        if np.any(finite_profile) and np.all(positive_profile):
+            profile_ax.set_yscale("log")
+        if np.any(finite_profile):
+            best_index = int(np.nanargmin(best_ssr))
+            profile_ax.scatter(
+                [delta_grid[best_index]], [best_ssr[best_index]], color="C3", marker="x", s=64, zorder=3
+            )
+        profile_ax.set_xlabel("\u0394n", fontfamily=settings.font_family)
+        profile_ax.set_ylabel("Best SSR over L", fontfamily=settings.font_family)
+        profile_ax.grid(True, which="both", alpha=0.25)
+        self._safe_canvas_finish(self.canvas_n_landscape_profile)
 
         if candidates:
             lines = [
