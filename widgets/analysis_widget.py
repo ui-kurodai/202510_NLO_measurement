@@ -1840,6 +1840,7 @@ class FittingAnalysisWidget(QWidget):
             return False, f"Failed to read JSON: {e}"
 
         meta = self._collect_metadata_from_editors(meta)
+        meta = self._refresh_wedge_lc_fit_payload(meta, preferred_strategy_name)
 
         try:
             with open(self.json_path, "w", encoding="utf-8") as f:
@@ -1860,6 +1861,63 @@ class FittingAnalysisWidget(QWidget):
         if show_message:
             QMessageBox.information(self, "Updated", "JSON metadata updated.")
         return True, "OK"
+
+    def _refresh_wedge_lc_fit_payload(self, meta: Dict[str, Any], strategy_name: Optional[str]) -> Dict[str, Any]:
+        if str((meta or {}).get("method") or "").strip().lower() != "wedge":
+            return meta
+        if self._df is None:
+            return meta
+
+        selected = self._get_selected_strategy()
+        if selected is None:
+            return meta
+        if strategy_name and selected.class_name != strategy_name:
+            return meta
+
+        fit_payload = self._fit_payload_for_strategy(meta, selected)
+        if not fit_payload:
+            return meta
+
+        strategy = None
+        if isinstance(self._analysis_context, dict):
+            strategy = self._analysis_context.get("strategy")
+        if strategy is None or strategy.__class__.__name__ != selected.class_name:
+            try:
+                mod = importlib.import_module(selected.qualname)
+                strategy_cls = getattr(mod, selected.class_name)
+                analysis = SHGDataAnalysis(str(self._current_dir))
+                analysis.meta = dict(meta)
+                analysis.data = self._df.copy()
+                strategy = strategy_cls(analysis)
+            except Exception:
+                return meta
+
+        refreshed = dict(fit_payload)
+        if hasattr(strategy, "_calc_wedge_minima_lc"):
+            try:
+                refreshed.update(strategy._calc_wedge_minima_lc(meta, self._df))
+            except Exception:
+                pass
+        if hasattr(strategy, "_calc_theoretical_lc"):
+            try:
+                refreshed.update(
+                    strategy._calc_theoretical_lc(
+                        meta,
+                        dn_override=self._dn_override_from_saved_fit(fit_payload),
+                    )
+                )
+            except Exception:
+                pass
+
+        return upsert_fitting_result(
+            meta,
+            selected.class_name,
+            refreshed,
+            strategy_module=selected.qualname,
+            strategy_display_name=selected.display_name,
+            result_id=str(fit_payload.get("result_id") or self._selected_result_id() or "").strip() or None,
+            result_label=str(fit_payload.get("result_label") or "").strip() or None,
+        )
 
     # -------------------------------- Run fit --------------------------------
     def _run_fit_clicked(self):
