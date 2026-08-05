@@ -352,10 +352,13 @@ class PlotSettingsDialog(QDialog):
             text_edit = QPlainTextEdit(current.text)
             text_edit.setPlaceholderText("Use placeholders such as {value:.2f}")
             text_edit.setFixedHeight(90)
+            reset_button = QPushButton("Reset")
+            reset_button.clicked.connect(lambda _checked=False, key=annotation.key: self._reset_annotation_widgets(key))
             group_layout.addWidget(enabled, 0, 0)
             group_layout.addWidget(QLabel("Digits"), 0, 1)
             group_layout.addWidget(digits, 0, 2)
-            group_layout.addWidget(text_edit, 1, 0, 1, 3)
+            group_layout.addWidget(reset_button, 0, 3)
+            group_layout.addWidget(text_edit, 1, 0, 1, 4)
             group_layout.setColumnStretch(2, 1)
             form.addRow(group)
             self.annotation_widgets[annotation.key] = {
@@ -389,6 +392,22 @@ class PlotSettingsDialog(QDialog):
                 "label": label,
             }
         return page
+
+    def _reset_annotation_widgets(self, key: str) -> None:
+        defaults = {item.key: item for item in self.annotation_defaults}
+        default = defaults.get(key)
+        widgets = self.annotation_widgets.get(key)
+        if default is None or widgets is None:
+            return
+        enabled = widgets["enabled"]
+        digits = widgets["digits"]
+        text = widgets["text"]
+        if isinstance(enabled, QCheckBox):
+            enabled.setChecked(default.visible)
+        if isinstance(digits, QSpinBox):
+            digits.setValue(default.digit_count)
+        if isinstance(text, QPlainTextEdit):
+            text.setPlainText(default.text)
 
     def _font_spin(self, value: float) -> QDoubleSpinBox:
         spin = QDoubleSpinBox()
