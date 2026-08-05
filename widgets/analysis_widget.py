@@ -2641,7 +2641,7 @@ class FittingAnalysisWidget(QWidget):
                 visible=True,
                 text=(
                     "L = {L_mm:.4f} mm (ΔL= {delta_um:+.1f} um)\n"
-                    "Peak = {peak:.3g}\n"
+                    "${P_{env}}$ = {peak:.3g}\n"
                     "Δn = {delta_n:+.6f}\n"
                     "Common Δn = {common_n_offset:+.6f}"
                 ),
@@ -2845,6 +2845,104 @@ class FittingAnalysisWidget(QWidget):
             except Exception:
                 continue
 
+    def _line_has_axes_y_coordinates(self, line: Any) -> bool:
+        try:
+            x_data = np.asarray(line.get_xdata(orig=False), dtype=float)
+            y_data = np.asarray(line.get_ydata(orig=False), dtype=float)
+        except Exception:
+            return False
+        return (
+            x_data.size == 2
+            and y_data.size == 2
+            and np.isfinite(x_data).all()
+            and np.isfinite(y_data).all()
+            and np.isclose(x_data[0], x_data[1])
+            and np.allclose(y_data, [0.0, 1.0])
+        )
+
+    def _normalizable_y_values(self, ax: Any) -> np.ndarray:
+        chunks: List[np.ndarray] = []
+        for line in ax.lines:
+            if self._line_has_axes_y_coordinates(line):
+                continue
+            try:
+                y = np.asarray(line.get_ydata(orig=False), dtype=float)
+            except Exception:
+                continue
+            if y.size:
+                chunks.append(y.reshape(-1))
+        for collection in ax.collections:
+            get_offsets = getattr(collection, "get_offsets", None)
+            if get_offsets is None:
+                continue
+            try:
+                offsets = np.asarray(get_offsets(), dtype=float)
+            except Exception:
+                continue
+            if offsets.ndim == 2 and offsets.shape[1] >= 2 and offsets.size:
+                chunks.append(offsets[:, 1])
+        if not chunks:
+            return np.array([], dtype=float)
+        values = np.concatenate(chunks).astype(float)
+        return values[np.isfinite(values)]
+
+    def _evaluate_y_normalization(self, plot_key: str, y_values: np.ndarray) -> Optional[float]:
+        settings = self._plot_settings[plot_key]
+        expr = str(settings.y_normalize_expr or "").strip()
+        if not settings.y_normalize or not expr:
+            return None
+        finite_y = np.asarray(y_values, dtype=float)
+        finite_y = finite_y[np.isfinite(finite_y)]
+        if finite_y.size == 0:
+            return None
+        stats = {
+            "y": finite_y,
+            "max": float(np.nanmax(finite_y)),
+            "min": float(np.nanmin(finite_y)),
+            "mean": float(np.nanmean(finite_y)),
+            "median": float(np.nanmedian(finite_y)),
+            "std": float(np.nanstd(finite_y)),
+            "absmax": float(np.nanmax(np.abs(finite_y))),
+            "rms": float(np.sqrt(np.nanmean(finite_y**2))),
+            "ptp": float(np.nanmax(finite_y) - np.nanmin(finite_y)),
+            "np": np,
+        }
+        try:
+            value = float(eval(expr, {"__builtins__": {}}, stats))
+        except Exception as exc:
+            print(f"Invalid y normalization expression for {plot_key}: {expr!r}: {exc}", file=sys.stderr)
+            return None
+        if not np.isfinite(value) or abs(value) < 1e-300:
+            print(f"Invalid y normalization value for {plot_key}: {value}", file=sys.stderr)
+            return None
+        return value
+
+    def _apply_y_normalization(self, ax: Any, plot_key: str) -> None:
+        factor = self._evaluate_y_normalization(plot_key, self._normalizable_y_values(ax))
+        if factor is None:
+            return
+        for line in ax.lines:
+            if self._line_has_axes_y_coordinates(line):
+                continue
+            try:
+                y_data = np.asarray(line.get_ydata(orig=False), dtype=float)
+            except Exception:
+                continue
+            line.set_ydata(y_data / factor)
+        for collection in ax.collections:
+            get_offsets = getattr(collection, "get_offsets", None)
+            set_offsets = getattr(collection, "set_offsets", None)
+            if get_offsets is None or set_offsets is None:
+                continue
+            try:
+                offsets = np.asarray(get_offsets(), dtype=float)
+            except Exception:
+                continue
+            if offsets.ndim == 2 and offsets.shape[1] >= 2 and offsets.size:
+                offsets = offsets.copy()
+                offsets[:, 1] = offsets[:, 1] / factor
+                set_offsets(offsets)
+
     def _extra_axis_setting(self, plot_key: str, key: str) -> Optional[ExtraAxisPlotSettings]:
         settings = self._plot_settings[plot_key]
         if key not in settings.extra_axes:
@@ -3005,9 +3103,13 @@ class FittingAnalysisWidget(QWidget):
         is_wedge = self._is_wedge_scan()
         rcParams["font.family"] = settings.font_family
         canvas.figure.set_size_inches(settings.figure_width, settings.figure_height, forward=False)
+        self._plot_manual_items(ax, plot_key)
+        self._apply_y_normalization(ax, plot_key)
 
         if plot_key == "n_landscape":
             bottom_label = "L (mm)"
+        elif plot_key == "common_n_landscape":
+            bottom_label = "\u0394n (2\u03c9 offset)"
         else:
             bottom_label = "position (mm)" if is_wedge else "Incidence angle (deg.)"
         ax.set_title(settings.title, fontfamily=settings.font_family, fontsize=settings.label_font_size)
@@ -3048,7 +3150,6 @@ class FittingAnalysisWidget(QWidget):
             ax.locator_params(axis="y", nbins=settings.y_tick_count)
         self._apply_tick_formatter(ax.xaxis, settings.x_digit_count, settings.x_scientific)
         self._apply_tick_formatter(ax.yaxis, settings.y_digit_count, settings.y_scientific)
-        self._plot_manual_items(ax, plot_key)
 
         handles, labels = ax.get_legend_handles_labels()
         if settings.show_legend and handles:

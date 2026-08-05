@@ -121,6 +121,8 @@ class SharedPlotSettings:
     y_tick_count: int = 0
     x_ticks_text: str = ""
     y_ticks_text: str = ""
+    y_normalize: bool = False
+    y_normalize_expr: str = ""
     colormap: str = "viridis"
     series: Dict[str, SeriesPlotSettings] = field(default_factory=dict)
     series_order: List[str] = field(default_factory=list)
@@ -642,6 +644,8 @@ class PlotSettingsDialog(QDialog):
         )
         layout.addWidget(self.x_axis_widgets["group"])
         layout.addWidget(self.y_axis_widgets["group"])
+        self.y_normalize_widgets = self._make_y_normalize_group()
+        layout.addWidget(self.y_normalize_widgets["group"])
         self.extra_axis_axis_widgets: Dict[str, Dict[str, object]] = {}
         for axis in self.extra_axis_defaults:
             current = self.settings.extra_axes[axis.key]
@@ -659,6 +663,26 @@ class PlotSettingsDialog(QDialog):
             layout.addWidget(widgets["group"])
         layout.addStretch(1)
         return page
+
+    def _make_y_normalize_group(self) -> Dict[str, object]:
+        group = QGroupBox("Y normalization")
+        layout = QGridLayout(group)
+        enabled = QCheckBox("Normalize y values")
+        enabled.setChecked(self.settings.y_normalize)
+        expr = QLineEdit(self.settings.y_normalize_expr)
+        expr.setPlaceholderText("number or expression, e.g. 1e-6, max, mean, np.max(y)")
+        hint = QLabel("Available names: y, max, min, mean, median, std, absmax, rms, ptp, np")
+        hint.setStyleSheet("color: gray;")
+        layout.addWidget(enabled, 0, 0)
+        layout.addWidget(QLabel("Divide by"), 0, 1)
+        layout.addWidget(expr, 0, 2)
+        layout.addWidget(hint, 1, 0, 1, 3)
+        layout.setColumnStretch(2, 1)
+        return {
+            "group": group,
+            "enabled": enabled,
+            "expr": expr,
+        }
 
     def _make_axis_group(
         self,
@@ -812,6 +836,18 @@ class PlotSettingsDialog(QDialog):
         self.settings.y_scientific = y_axis["scientific"]
         self.settings.y_tick_count = y_axis["tick_count"]
         self.settings.y_ticks_text = y_axis["ticks_text"]
+        normalize_enabled = self.y_normalize_widgets["enabled"]
+        normalize_expr = self.y_normalize_widgets["expr"]
+        self.settings.y_normalize = (
+            normalize_enabled.isChecked()
+            if isinstance(normalize_enabled, QCheckBox)
+            else False
+        )
+        self.settings.y_normalize_expr = (
+            normalize_expr.text().strip()
+            if isinstance(normalize_expr, QLineEdit)
+            else ""
+        )
         self.settings.digit_count = max(self.settings.x_digit_count, self.settings.y_digit_count)
 
     def _read_extra_axis_widgets(self, axis: ExtraAxisPlotSettings, widgets: Dict[str, object]) -> None:
