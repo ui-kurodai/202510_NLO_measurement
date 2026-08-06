@@ -2641,7 +2641,7 @@ class FittingAnalysisWidget(QWidget):
                 visible=True,
                 text=(
                     "L = {L_mm:.4f} mm (ΔL= {delta_um:+.1f} um)\n"
-                    "${P_{env}}$ = {peak:.3g}\n"
+                    "${P_\\mathrm{env}(0)}$ = {peak:.3g}\n"
                     "Δn = {delta_n:+.6f}\n"
                     "Common Δn = {common_n_offset:+.6f}"
                 ),
