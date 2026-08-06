@@ -2654,6 +2654,8 @@ class FittingAnalysisWidget(QWidget):
                 text=(
                     "L = {L_mm:.4f} mm (ΔL= {delta_um:+.1f} um)\n"
                     "${P_\\mathrm{env}(0)}$ = {peak:.3g}\n"
+                    "${\\Delta n_{\\omega}}$ = {common_n_offset:+.5f}\n"
+                    "${\\Delta n_{2\\omega}}$ = {common_n_offset + delta_n:+.5f}\n"
                     "Δn = {delta_n:+.6f}\n"
                     "Common Δn = {common_n_offset:+.6f}"
                 ),
@@ -2707,38 +2709,31 @@ class FittingAnalysisWidget(QWidget):
         return kwargs
 
     def _format_text_template(self, template: str, context: Optional[Dict[str, Any]], digit_count: int = -1) -> str:
-        class _TemplateValue:
-            def __init__(self, value: float, digits: int) -> None:
-                self.value = float(value)
-                self.digits = digits
-
-            def __format__(self, spec: str) -> str:
-                if spec:
-                    return format(self.value, spec)
-                if self.digits >= 0:
-                    return f"{self.value:.{self.digits}f}"
-                return f"{self.value:g}"
-
         if not context:
             return template
-        formatted_context = {
-            key: _TemplateValue(value, digit_count)
-            if isinstance(value, (int, float, np.integer, np.floating))
-            else value
-            for key, value in context.items()
-        }
+        eval_context = dict(context)
+        eval_context["np"] = np
 
         def replace_placeholder(match: re.Match[str]) -> str:
-            key = match.group(1)
-            spec = match.group(2) or ""
-            if key not in formatted_context:
-                return match.group(0)
+            body = match.group(1).strip()
+            expr = body
+            spec = ""
+            if ":" in body:
+                expr, spec = body.rsplit(":", 1)
+                expr = expr.strip()
+                spec = spec.strip()
             try:
-                return format(formatted_context[key], spec)
+                value = eval(expr, {"__builtins__": {}}, eval_context)
+            except Exception:
+                return match.group(0)
+            if isinstance(value, (int, float, np.integer, np.floating)) and not spec and digit_count >= 0:
+                spec = f".{digit_count}f"
+            try:
+                return format(value, spec)
             except Exception:
                 return match.group(0)
 
-        return re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)(?::([^{}]+))?\}", replace_placeholder, template)
+        return re.sub(r"\{([^{}]+)\}", replace_placeholder, template)
 
     def _legend_label(
         self,
@@ -3127,7 +3122,10 @@ class FittingAnalysisWidget(QWidget):
         ax.set_title(settings.title, fontfamily=settings.font_family, fontsize=settings.label_font_size)
         ax.set_xlabel(settings.x_label or bottom_label, fontfamily=settings.font_family)
         ax.set_ylabel(settings.y_label or y_label, fontfamily=settings.font_family)
-        ax.grid(settings.show_grid, which="both", alpha=0.25)
+        if settings.show_grid:
+            ax.grid(True, which="both", alpha=0.25)
+        else:
+            ax.grid(False)
 
         label_size = settings.label_font_size
         tick_size = settings.tick_font_size
@@ -3135,6 +3133,8 @@ class FittingAnalysisWidget(QWidget):
         ax.xaxis.label.set_size(label_size)
         ax.yaxis.label.set_size(label_size)
         ax.tick_params(axis="both", labelsize=tick_size)
+        ax.tick_params(axis="x", top=settings.x_opposite_ticks, labeltop=False)
+        ax.tick_params(axis="y", right=settings.y_opposite_ticks, labelright=False)
         for tick_label in ax.get_xticklabels() + ax.get_yticklabels():
             tick_label.set_fontfamily(settings.font_family)
         ax.set_xscale("log" if settings.x_log else "linear")
@@ -3172,8 +3172,9 @@ class FittingAnalysisWidget(QWidget):
             legend = ax.legend(
                 list(unique.values()),
                 list(unique.keys()),
-                loc="best",
+                loc=settings.legend_loc or "best",
                 fontsize=legend_size,
+                frameon=settings.show_legend_frame,
                 prop={"family": settings.font_family, "size": legend_size},
             )
             if legend is not None:
@@ -3263,6 +3264,7 @@ class FittingAnalysisWidget(QWidget):
             axis_obj.xaxis.label.set_size(label_size)
             axis_obj.xaxis.label.set_fontfamily(font_family)
             axis_obj.tick_params(axis="x", labelsize=tick_size)
+            axis_obj.tick_params(axis="x", bottom=axis_settings.opposite_ticks, labelbottom=False)
             labels = axis_obj.get_xticklabels()
             target_axis = axis_obj.xaxis
             if axis_settings.axis_min is not None or axis_settings.axis_max is not None:
@@ -3277,6 +3279,7 @@ class FittingAnalysisWidget(QWidget):
             axis_obj.yaxis.label.set_size(label_size)
             axis_obj.yaxis.label.set_fontfamily(font_family)
             axis_obj.tick_params(axis="y", labelsize=tick_size)
+            axis_obj.tick_params(axis="y", left=axis_settings.opposite_ticks, labelleft=False)
             labels = axis_obj.get_yticklabels()
             target_axis = axis_obj.yaxis
             if axis_settings.axis_min is not None or axis_settings.axis_max is not None:

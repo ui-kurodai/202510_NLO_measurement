@@ -88,6 +88,7 @@ class ExtraAxisPlotSettings:
     scientific: bool = False
     tick_count: int = 0
     ticks_text: str = ""
+    opposite_ticks: bool = False
 
 
 @dataclass
@@ -95,6 +96,8 @@ class SharedPlotSettings:
     figure_width: float = 6.0
     figure_height: float = 2.8
     show_legend: bool = True
+    show_legend_frame: bool = True
+    legend_loc: str = "best"
     show_grid: bool = True
     title: str = ""
     x_label: str = ""
@@ -121,6 +124,8 @@ class SharedPlotSettings:
     y_tick_count: int = 0
     x_ticks_text: str = ""
     y_ticks_text: str = ""
+    x_opposite_ticks: bool = False
+    y_opposite_ticks: bool = False
     y_normalize: bool = False
     y_normalize_expr: str = ""
     colormap: str = "viridis"
@@ -211,6 +216,19 @@ class PlotSettingsDialog(QDialog):
         ("Gray", "0.3"),
         ("Black", "black"),
         ("White", "white"),
+    ]
+    LEGEND_LOC_OPTIONS = [
+        "best",
+        "upper right",
+        "upper left",
+        "lower left",
+        "lower right",
+        "right",
+        "center left",
+        "center right",
+        "lower center",
+        "upper center",
+        "center",
     ]
 
     def __init__(
@@ -329,12 +347,20 @@ class PlotSettingsDialog(QDialog):
         self.label_size = self._font_spin(self.settings.label_font_size)
         self.legend_size = self._font_spin(self.settings.legend_font_size)
         self.tick_size = self._font_spin(self.settings.tick_font_size)
+        self.legend_frame = QCheckBox()
+        self.legend_frame.setChecked(self.settings.show_legend_frame)
+        self.legend_loc = QComboBox()
+        self.legend_loc.addItems(self.LEGEND_LOC_OPTIONS)
+        loc_index = self.legend_loc.findText(self.settings.legend_loc)
+        self.legend_loc.setCurrentIndex(loc_index if loc_index >= 0 else 0)
         self.annotation = QCheckBox()
         self.annotation.setChecked(self.settings.show_annotation)
         form.addRow("Title", self.title_edit)
         form.addRow("Font", self.font_family)
         form.addRow("Label size", self.label_size)
         form.addRow("Legend size", self.legend_size)
+        form.addRow("Legend frame", self.legend_frame)
+        form.addRow("Legend position", self.legend_loc)
         form.addRow("Ticks size", self.tick_size)
         form.addRow("Additional text", self.annotation)
 
@@ -351,6 +377,24 @@ class PlotSettingsDialog(QDialog):
             digits.setRange(-1, 12)
             digits.setSpecialValueText("Auto")
             digits.setValue(current.digit_count)
+            x_pos = QDoubleSpinBox()
+            x_pos.setRange(-5.0, 5.0)
+            x_pos.setDecimals(3)
+            x_pos.setSingleStep(0.02)
+            x_pos.setValue(current.x)
+            y_pos = QDoubleSpinBox()
+            y_pos.setRange(-5.0, 5.0)
+            y_pos.setDecimals(3)
+            y_pos.setSingleStep(0.02)
+            y_pos.setValue(current.y)
+            ha = QComboBox()
+            ha.addItems(["left", "center", "right"])
+            ha_index = ha.findText(current.ha)
+            ha.setCurrentIndex(ha_index if ha_index >= 0 else 0)
+            va = QComboBox()
+            va.addItems(["top", "center", "bottom", "baseline"])
+            va_index = va.findText(current.va)
+            va.setCurrentIndex(va_index if va_index >= 0 else 0)
             text_edit = QPlainTextEdit(current.text)
             text_edit.setPlaceholderText("Use placeholders such as {value:.2f}")
             text_edit.setFixedHeight(90)
@@ -360,12 +404,24 @@ class PlotSettingsDialog(QDialog):
             group_layout.addWidget(QLabel("Digits"), 0, 1)
             group_layout.addWidget(digits, 0, 2)
             group_layout.addWidget(reset_button, 0, 3)
-            group_layout.addWidget(text_edit, 1, 0, 1, 4)
-            group_layout.setColumnStretch(2, 1)
+            group_layout.addWidget(QLabel("X"), 1, 0)
+            group_layout.addWidget(x_pos, 1, 1)
+            group_layout.addWidget(QLabel("Y"), 1, 2)
+            group_layout.addWidget(y_pos, 1, 3)
+            group_layout.addWidget(QLabel("H align"), 2, 0)
+            group_layout.addWidget(ha, 2, 1)
+            group_layout.addWidget(QLabel("V align"), 2, 2)
+            group_layout.addWidget(va, 2, 3)
+            group_layout.addWidget(text_edit, 3, 0, 1, 4)
+            group_layout.setColumnStretch(3, 1)
             form.addRow(group)
             self.annotation_widgets[annotation.key] = {
                 "enabled": enabled,
                 "digits": digits,
+                "x": x_pos,
+                "y": y_pos,
+                "ha": ha,
+                "va": va,
                 "text": text_edit,
             }
 
@@ -403,11 +459,25 @@ class PlotSettingsDialog(QDialog):
             return
         enabled = widgets["enabled"]
         digits = widgets["digits"]
+        x_pos = widgets["x"]
+        y_pos = widgets["y"]
+        ha = widgets["ha"]
+        va = widgets["va"]
         text = widgets["text"]
         if isinstance(enabled, QCheckBox):
             enabled.setChecked(default.visible)
         if isinstance(digits, QSpinBox):
             digits.setValue(default.digit_count)
+        if isinstance(x_pos, QDoubleSpinBox):
+            x_pos.setValue(default.x)
+        if isinstance(y_pos, QDoubleSpinBox):
+            y_pos.setValue(default.y)
+        if isinstance(ha, QComboBox):
+            index = ha.findText(default.ha)
+            ha.setCurrentIndex(index if index >= 0 else 0)
+        if isinstance(va, QComboBox):
+            index = va.findText(default.va)
+            va.setCurrentIndex(index if index >= 0 else 0)
         if isinstance(text, QPlainTextEdit):
             text.setPlainText(default.text)
 
@@ -631,6 +701,7 @@ class PlotSettingsDialog(QDialog):
             scientific=self.settings.x_scientific,
             tick_count=self.settings.x_tick_count,
             ticks_text=self.settings.x_ticks_text,
+            opposite_ticks=self.settings.x_opposite_ticks,
         )
         self.y_axis_widgets = self._make_axis_group(
             "Y axis",
@@ -641,6 +712,7 @@ class PlotSettingsDialog(QDialog):
             scientific=self.settings.y_scientific,
             tick_count=self.settings.y_tick_count,
             ticks_text=self.settings.y_ticks_text,
+            opposite_ticks=self.settings.y_opposite_ticks,
         )
         layout.addWidget(self.x_axis_widgets["group"])
         layout.addWidget(self.y_axis_widgets["group"])
@@ -658,6 +730,7 @@ class PlotSettingsDialog(QDialog):
                 scientific=current.scientific,
                 tick_count=current.tick_count,
                 ticks_text=current.ticks_text,
+                opposite_ticks=current.opposite_ticks,
             )
             self.extra_axis_axis_widgets[axis.key] = widgets
             layout.addWidget(widgets["group"])
@@ -695,6 +768,7 @@ class PlotSettingsDialog(QDialog):
         scientific: bool,
         tick_count: int,
         ticks_text: str,
+        opposite_ticks: bool,
     ) -> Dict[str, object]:
         group = QGroupBox(title)
         layout = QGridLayout(group)
@@ -712,6 +786,8 @@ class PlotSettingsDialog(QDialog):
         tick_count_box.setRange(0, 30)
         tick_count_box.setSpecialValueText("Auto")
         tick_count_box.setValue(tick_count)
+        opposite_box = QCheckBox("opposite ticks")
+        opposite_box.setChecked(opposite_ticks)
         ticks_edit = QLineEdit(ticks_text)
         ticks_edit.setPlaceholderText("optional: 0, 1, 2")
 
@@ -725,6 +801,7 @@ class PlotSettingsDialog(QDialog):
         layout.addWidget(scientific_box, 1, 2, 1, 2)
         layout.addWidget(QLabel("Ticks count"), 2, 0)
         layout.addWidget(tick_count_box, 2, 1)
+        layout.addWidget(opposite_box, 2, 2, 1, 2)
         layout.addWidget(QLabel("Ticks list"), 3, 0)
         layout.addWidget(ticks_edit, 3, 1, 1, 4)
         layout.setColumnStretch(3, 1)
@@ -736,6 +813,7 @@ class PlotSettingsDialog(QDialog):
             "digits": digits,
             "scientific": scientific_box,
             "tick_count": tick_count_box,
+            "opposite_ticks": opposite_box,
             "ticks_text": ticks_edit,
         }
 
@@ -786,6 +864,8 @@ class PlotSettingsDialog(QDialog):
             self.settings.font_family = self.font_family.currentText() or "Arial"
             self.settings.label_font_size = float(self.label_size.value())
             self.settings.legend_font_size = float(self.legend_size.value())
+            self.settings.show_legend_frame = self.legend_frame.isChecked()
+            self.settings.legend_loc = self.legend_loc.currentText() or "best"
             self.settings.tick_font_size = float(self.tick_size.value())
             self.settings.show_annotation = self.annotation.isChecked()
             self.settings.marker_size = float(self.marker_size.value())
@@ -805,9 +885,17 @@ class PlotSettingsDialog(QDialog):
                 annotation = self.settings.annotations[key]
                 enabled = widgets["enabled"]
                 digits = widgets["digits"]
+                x_pos = widgets["x"]
+                y_pos = widgets["y"]
+                ha = widgets["ha"]
+                va = widgets["va"]
                 text = widgets["text"]
                 annotation.visible = enabled.isChecked() if isinstance(enabled, QCheckBox) else annotation.visible
                 annotation.digit_count = int(digits.value()) if isinstance(digits, QSpinBox) else annotation.digit_count
+                annotation.x = float(x_pos.value()) if isinstance(x_pos, QDoubleSpinBox) else annotation.x
+                annotation.y = float(y_pos.value()) if isinstance(y_pos, QDoubleSpinBox) else annotation.y
+                annotation.ha = ha.currentText() if isinstance(ha, QComboBox) else annotation.ha
+                annotation.va = va.currentText() if isinstance(va, QComboBox) else annotation.va
                 annotation.text = text.toPlainText() if isinstance(text, QPlainTextEdit) else annotation.text
             for key, widgets in self.extra_axis_axis_widgets.items():
                 axis = self.settings.extra_axes[key]
@@ -829,6 +917,7 @@ class PlotSettingsDialog(QDialog):
         self.settings.x_scientific = x_axis["scientific"]
         self.settings.x_tick_count = x_axis["tick_count"]
         self.settings.x_ticks_text = x_axis["ticks_text"]
+        self.settings.x_opposite_ticks = x_axis["opposite_ticks"]
         self.settings.y_min = y_axis["min"]
         self.settings.y_max = y_axis["max"]
         self.settings.y_log = y_axis["log"]
@@ -836,6 +925,7 @@ class PlotSettingsDialog(QDialog):
         self.settings.y_scientific = y_axis["scientific"]
         self.settings.y_tick_count = y_axis["tick_count"]
         self.settings.y_ticks_text = y_axis["ticks_text"]
+        self.settings.y_opposite_ticks = y_axis["opposite_ticks"]
         normalize_enabled = self.y_normalize_widgets["enabled"]
         normalize_expr = self.y_normalize_widgets["expr"]
         self.settings.y_normalize = (
@@ -859,6 +949,7 @@ class PlotSettingsDialog(QDialog):
         axis.scientific = values["scientific"]
         axis.tick_count = values["tick_count"]
         axis.ticks_text = values["ticks_text"]
+        axis.opposite_ticks = values["opposite_ticks"]
 
     def _read_axis_widgets(self, widgets: Dict[str, object]) -> Dict[str, object]:
         min_edit = widgets["min"]
@@ -867,6 +958,7 @@ class PlotSettingsDialog(QDialog):
         digits = widgets["digits"]
         scientific = widgets["scientific"]
         tick_count = widgets["tick_count"]
+        opposite_ticks = widgets["opposite_ticks"]
         ticks_text = widgets["ticks_text"]
         return {
             "min": self._parse_bound(min_edit.text()) if isinstance(min_edit, QLineEdit) else None,
@@ -875,6 +967,7 @@ class PlotSettingsDialog(QDialog):
             "digits": int(digits.value()) if isinstance(digits, QSpinBox) else 4,
             "scientific": scientific.isChecked() if isinstance(scientific, QCheckBox) else False,
             "tick_count": int(tick_count.value()) if isinstance(tick_count, QSpinBox) else 0,
+            "opposite_ticks": opposite_ticks.isChecked() if isinstance(opposite_ticks, QCheckBox) else False,
             "ticks_text": ticks_text.text() if isinstance(ticks_text, QLineEdit) else "",
         }
 
