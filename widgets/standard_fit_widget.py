@@ -600,6 +600,16 @@ class StandardFitWidget(QWidget):
         self.sb_manual_centering.setSingleStep(0.0001)
         self.sb_manual_centering.setKeyboardTracking(False)
         form.addRow("Centering:", self.sb_manual_centering)
+        self.sb_peak_uncertainty = QDoubleSpinBox()
+        self.sb_peak_uncertainty.setLocale(QLocale.c())
+        self.sb_peak_uncertainty.setRange(0.0, 1e9)
+        self.sb_peak_uncertainty.setDecimals(6)
+        self.sb_peak_uncertainty.setSingleStep(0.001)
+        self.sb_peak_uncertainty.setKeyboardTracking(False)
+        self.sb_peak_uncertainty.setToolTip(
+            "Absolute uncertainty of the fitted peak, in the same units as Peak."
+        )
+        form.addRow("Peak uncertainty (±):", self.sb_peak_uncertainty)
         layout.addLayout(form)
 
         buttons = QHBoxLayout()
@@ -611,7 +621,8 @@ class StandardFitWidget(QWidget):
         layout.addLayout(buttons)
 
         self.lbl_manual_hint = QLabel(
-            "The live overlay uses the current L, Peak, \u0394n, Common \u0394n, and Centering values. Overwrite updates saved fit values."
+            "The live overlay uses the current L, Peak, \u0394n, Common \u0394n, and Centering values. "
+            "Peak uncertainty is saved as an absolute value for d uncertainty propagation."
         )
         self.lbl_manual_hint.setWordWrap(True)
         self.lbl_manual_hint.setStyleSheet("color: gray;")

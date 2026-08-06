@@ -11,6 +11,7 @@ FITTING_RESULT_KEYS: tuple[str, ...] = (
     "k_scale_std",
     "Pm0",
     "Pm0_stderr",
+    "peak_intensity_uncertainty",
     "d_rel_abs",
     "d_component",
     "d_factor",
@@ -300,6 +301,8 @@ def upsert_fitting_result(
         if same_strategy and same_result:
             if "centering_pos" not in entry and "centering_pos" in existing:
                 entry["centering_pos"] = existing["centering_pos"]
+            if "peak_intensity_uncertainty" not in entry and "peak_intensity_uncertainty" in existing:
+                entry["peak_intensity_uncertainty"] = existing["peak_intensity_uncertainty"]
             entries[index] = entry
             replaced = True
             break

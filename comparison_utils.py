@@ -31,6 +31,8 @@ class ComparisonResult:
     calculation_mode: str = "peak_d_factor"
     peak_ref: float | None = None
     peak_target: float | None = None
+    peak_uncertainty_ref: float | None = None
+    peak_uncertainty_target: float | None = None
     d_factor_ref: float | None = None
     d_factor_target: float | None = None
     boxcar_label_ref: str = ""
@@ -45,6 +47,10 @@ class ComparisonResult:
     d_scale_target: float | None = None
     d_ratio: float | None = None
     calculated_d: float | None = None
+    coherence_length_target_mm: float | None = None
+    coherence_length_uncertainty_mm: float = 0.0
+    relative_d_uncertainty: float | None = None
+    calculated_d_uncertainty: float | None = None
     differing_filters_text: str = ""
     differing_filters_missing_csv: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -85,6 +91,7 @@ def compare_experiment_folders(
     reference_root: Path,
     target_root: Path,
     reference_d_value: float,
+    coherence_length_uncertainty_mm: float = 0.0,
 ) -> tuple[list[ComparisonResult], list[str]]:
     warnings: list[str] = []
     reference_meta, reference_json_path, reference_warnings = load_single_measurement_json(reference_root)
@@ -102,6 +109,7 @@ def compare_experiment_folders(
         reference_json_path=reference_json_path,
         target_json_path=target_json_path,
         reference_d_value=reference_d_value,
+        coherence_length_uncertainty_mm=coherence_length_uncertainty_mm,
     )
     return results, warnings
 
@@ -110,6 +118,7 @@ def compare_reference_folder_to_target_json(
     reference_root: Path,
     target_json_path: Path,
     reference_d_value: float,
+    coherence_length_uncertainty_mm: float = 0.0,
 ) -> tuple[list[ComparisonResult], list[str]]:
     warnings: list[str] = []
     reference_meta, reference_json_path, reference_warnings = load_single_measurement_json(reference_root)
@@ -130,6 +139,7 @@ def compare_reference_folder_to_target_json(
         reference_json_path=reference_json_path,
         target_json_path=target_json_path,
         reference_d_value=reference_d_value,
+        coherence_length_uncertainty_mm=coherence_length_uncertainty_mm,
     )
     return results, warnings
 
@@ -141,6 +151,7 @@ def compare_measurement_pair(
     reference_json_path: Path,
     target_json_path: Path,
     reference_d_value: float,
+    coherence_length_uncertainty_mm: float = 0.0,
 ) -> list[ComparisonResult]:
     del reference_root, target_root
     reference_meta = _load_json(reference_json_path)
@@ -218,6 +229,12 @@ def compare_measurement_pair(
         target_payload = target_variant.get("payload", {})
         peak_ref = _extract_peak_from_payload(reference_payload)
         peak_target = _extract_peak_from_payload(target_payload)
+        peak_uncertainty_ref = _extract_nonnegative_float(
+            reference_payload.get("peak_intensity_uncertainty")
+        )
+        peak_uncertainty_target = _extract_nonnegative_float(
+            target_payload.get("peak_intensity_uncertainty")
+        )
         reference_is_braun = (
             _is_braun_strategy(result.reference_strategy)
             or _extract_positive_float(reference_payload.get("d_rel_abs")) is not None
@@ -252,6 +269,8 @@ def compare_measurement_pair(
         else:
             result.peak_ref = peak_ref
             result.peak_target = peak_target
+            result.peak_uncertainty_ref = peak_uncertainty_ref or 0.0
+            result.peak_uncertainty_target = peak_uncertainty_target or 0.0
         result.d_factor_ref = d_factor_ref
         result.d_factor_target = d_factor_target
         result.boxcar_label_ref = label_ref
@@ -311,6 +330,31 @@ def compare_measurement_pair(
         result.d_ratio = result.d_scale_target / result.d_scale_ref
         result.calculated_d = reference_d_value * result.d_ratio
 
+        if not uses_braun_pseudo_d:
+            lc_target = _extract_positive_float(target_payload.get("Lc_theory_mm"))
+            lc_uncertainty = max(float(coherence_length_uncertainty_mm), 0.0)
+            result.coherence_length_target_mm = lc_target
+            result.coherence_length_uncertainty_mm = lc_uncertainty
+            peak_ref_relative = float(result.peak_uncertainty_ref or 0.0) / peak_ref
+            peak_target_relative = float(result.peak_uncertainty_target or 0.0) / peak_target
+            lc_relative = 0.0
+            if lc_uncertainty > 0.0:
+                if lc_target is None:
+                    result.warnings.append(
+                        "Lc uncertainty was provided, but target Lc_theory_mm is missing; d uncertainty was not calculated."
+                    )
+                else:
+                    lc_relative = lc_uncertainty / lc_target
+            if lc_uncertainty <= 0.0 or lc_target is not None:
+                result.relative_d_uncertainty = math.sqrt(
+                    0.25 * peak_ref_relative**2
+                    + 0.25 * peak_target_relative**2
+                    + lc_relative**2
+                )
+                result.calculated_d_uncertainty = (
+                    abs(result.calculated_d) * result.relative_d_uncertainty
+                )
+
         if result.reference_method.lower() != result.target_method.lower():
             result.warnings.append(
                 f"Method differs: ref={result.reference_method or '?'} / target={result.target_method or '?'}"
@@ -362,6 +406,27 @@ def write_comparison_results(reference_root: Path, results: list[ComparisonResul
                     "d_target/d_ref": round(float(result.d_ratio), 6),
                     "calculated_d": round(float(result.calculated_d), 6),
                 }
+                if result.calculated_d_uncertainty is not None:
+                    comparison_entry["peak_uncertainty_ref"] = round(
+                        float(result.peak_uncertainty_ref or 0.0), 9
+                    )
+                    comparison_entry["peak_uncertainty_target"] = round(
+                        float(result.peak_uncertainty_target or 0.0), 9
+                    )
+                    comparison_entry["calculated_d_uncertainty"] = round(
+                        float(result.calculated_d_uncertainty), 6
+                    )
+                    comparison_entry["relative_d_uncertainty"] = round(
+                        float(result.relative_d_uncertainty), 6
+                    )
+                    comparison_entry["coherence_length_target_mm"] = (
+                        round(float(result.coherence_length_target_mm), 9)
+                        if result.coherence_length_target_mm is not None
+                        else None
+                    )
+                    comparison_entry["coherence_length_uncertainty_mm"] = round(
+                        float(result.coherence_length_uncertainty_mm), 9
+                    )
                 if result.calculation_mode == "braun_pseudo_d":
                     comparison_entry["pseudo_d_ref_corrected"] = round(float(result.d_scale_ref), 6)
                     comparison_entry["pseudo_d_target_corrected"] = round(float(result.d_scale_target), 6)
@@ -379,6 +444,13 @@ def write_comparison_results(reference_root: Path, results: list[ComparisonResul
                     payload["I_target/I_ref"] = round(float(result.intensity_ratio), 6)
                     payload["d_target/d_ref"] = round(float(result.d_ratio), 6)
                     payload["calculated_d"] = round(float(result.calculated_d), 6)
+                    if result.calculated_d_uncertainty is not None:
+                        payload["calculated_d_uncertainty"] = round(
+                            float(result.calculated_d_uncertainty), 6
+                        )
+                        payload["relative_d_uncertainty"] = round(
+                            float(result.relative_d_uncertainty), 6
+                        )
                 written += 1
 
             if comparison_entries:
@@ -472,6 +544,16 @@ def _extract_peak_from_payload(payload: dict[str, Any]) -> float | None:
         if value is not None:
             return value
     return None
+
+
+def _extract_nonnegative_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or parsed < 0.0:
+        return None
+    return parsed
 
 
 def _is_braun_strategy(strategy_name: str) -> bool:

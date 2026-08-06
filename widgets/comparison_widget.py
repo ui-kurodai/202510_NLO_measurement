@@ -247,10 +247,21 @@ class ReferenceSelectionGroup(QGroupBox):
         self.sb_reference_d.setSingleStep(0.01)
         self.sb_reference_d.setValue(0.3)
 
+        self.sb_target_lc_uncertainty_um = QDoubleSpinBox()
+        self.sb_target_lc_uncertainty_um.setRange(0.0, 1e9)
+        self.sb_target_lc_uncertainty_um.setDecimals(3)
+        self.sb_target_lc_uncertainty_um.setSingleStep(0.1)
+        self.sb_target_lc_uncertainty_um.setSuffix(" µm")
+        self.sb_target_lc_uncertainty_um.setToolTip(
+            "Absolute uncertainty ±ΔLc applied to targets in this reference set. "
+            "Each target's central Lc is read from Lc_theory_mm."
+        )
+
         form.addRow("Reference:", self.lbl_reference_folder)
         form.addRow("Info:", self.lbl_reference_info)
         form.addRow("Targets:", self.lbl_target_folders)
         form.addRow("Reference d:", self.sb_reference_d)
+        form.addRow("Target coherence length uncertainty (±):", self.sb_target_lc_uncertainty_um)
         layout.addLayout(form)
 
     def set_index(self, index: int) -> None:
@@ -268,6 +279,9 @@ class ReferenceSelectionGroup(QGroupBox):
 
     def reference_d_value(self) -> float:
         return float(self.sb_reference_d.value())
+
+    def target_lc_uncertainty_mm(self) -> float:
+        return float(self.sb_target_lc_uncertainty_um.value()) * 1e-3
 
     def reference_name(self) -> str:
         return self.reference_root.name if self.reference_root is not None else f"Reference {self._index}"
@@ -408,7 +422,7 @@ class ComparisonWidget(QWidget):
         self.fixed_table.verticalHeader().setSectionsMovable(True)
         self.fixed_table.verticalHeader().sectionMoved.connect(self._sync_row_move_from_fixed)
 
-        self.table = DraggableTableWidget(0, 13)
+        self.table = DraggableTableWidget(0, 15)
         self.table.setHorizontalHeaderLabels(
             [
                 "Reference",
@@ -423,6 +437,8 @@ class ComparisonWidget(QWidget):
                 "I_target/I_ref",
                 "d_target/d_ref",
                 "calculated_d",
+                "d uncertainty",
+                "relative uncertainty",
                 "Status",
             ]
         )
@@ -625,12 +641,14 @@ class ComparisonWidget(QWidget):
                 continue
 
             reference_d = group.reference_d_value()
+            lc_uncertainty_mm = group.target_lc_uncertainty_mm()
             total_targets += len(group.target_roots)
             for target_root in group.target_roots:
                 results, warnings = compare_experiment_folders(
                     reference_root=reference_root,
                     target_root=target_root,
                     reference_d_value=reference_d,
+                    coherence_length_uncertainty_mm=lc_uncertainty_mm,
                 )
                 all_results.extend(results)
                 for warning in warnings:
@@ -724,6 +742,8 @@ class ComparisonWidget(QWidget):
                 self._fmt(result.intensity_ratio),
                 self._fmt(result.d_ratio),
                 self._fmt(result.calculated_d),
+                self._fmt(result.calculated_d_uncertainty),
+                self._fmt_percent(result.relative_d_uncertainty),
                 self._status_text(result, enabled),
             ]
             for column_index, value in enumerate(values):
@@ -807,6 +827,11 @@ class ComparisonWidget(QWidget):
         if value is None:
             return ""
         return f"{value:.6g}"
+
+    def _fmt_percent(self, value: float | None) -> str:
+        if value is None:
+            return ""
+        return f"{100.0 * value:.3g}%"
 
     def _strategy_text(self, result: ComparisonResult) -> str:
         strategy = result.target_strategy or "(legacy)"

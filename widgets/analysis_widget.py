@@ -294,6 +294,7 @@ class FittingAnalysisWidget(QWidget):
             "_main_splitter",
             "_left_panel",
             "sb_manual_centering",
+            "sb_peak_uncertainty",
             "btn_reset_manual",
             "btn_apply_manual",
             "lbl_manual_hint",
@@ -587,6 +588,16 @@ class FittingAnalysisWidget(QWidget):
         self.sb_manual_centering.setSingleStep(0.0001)
         self.sb_manual_centering.setKeyboardTracking(False)
         form.addRow("Centering:", self.sb_manual_centering)
+        self.sb_peak_uncertainty = QDoubleSpinBox()
+        self.sb_peak_uncertainty.setLocale(QLocale.c())
+        self.sb_peak_uncertainty.setRange(0.0, 1e9)
+        self.sb_peak_uncertainty.setDecimals(6)
+        self.sb_peak_uncertainty.setSingleStep(0.001)
+        self.sb_peak_uncertainty.setKeyboardTracking(False)
+        self.sb_peak_uncertainty.setToolTip(
+            "Absolute uncertainty of the fitted peak, in the same units as Peak."
+        )
+        form.addRow("Peak uncertainty (±):", self.sb_peak_uncertainty)
         layout.addLayout(form)
 
         buttons = QHBoxLayout()
@@ -598,7 +609,8 @@ class FittingAnalysisWidget(QWidget):
         layout.addLayout(buttons)
 
         self.lbl_manual_hint = QLabel(
-            "The live overlay uses the current L, Peak, and Centering values. Overwrite updates saved fit values."
+            "The live overlay uses the current L, Peak, and Centering values. Peak uncertainty is saved "
+            "as an absolute value for d uncertainty propagation. Overwrite updates saved fit values."
         )
         self.lbl_manual_hint.setWordWrap(True)
         self.lbl_manual_hint.setStyleSheet("color: gray;")
@@ -3289,7 +3301,11 @@ class FittingAnalysisWidget(QWidget):
     def _manual_controls_ready(self) -> bool:
         if not self._manual_controls:
             return False
-        return all(np.isfinite(float(controls["value"].value())) for controls in self._manual_controls.values()) and np.isfinite(float(self.sb_manual_centering.value()))
+        return (
+            all(np.isfinite(float(controls["value"].value())) for controls in self._manual_controls.values())
+            and np.isfinite(float(self.sb_manual_centering.value()))
+            and np.isfinite(float(self.sb_peak_uncertainty.value()))
+        )
 
     def _initialize_manual_controls_from_context(self):
         context = self._analysis_context
@@ -3324,6 +3340,9 @@ class FittingAnalysisWidget(QWidget):
                 centering_value = self._safe_float(centering_info.get("c_best"))
         if not np.isfinite(centering_value):
             centering_value = 0.0
+        peak_uncertainty = self._safe_float(saved_fit.get("peak_intensity_uncertainty"), 0.0)
+        if not np.isfinite(peak_uncertainty) or peak_uncertainty < 0.0:
+            peak_uncertainty = 0.0
 
         self._set_manual_control("L", auto_L - l_span, auto_L + l_span, auto_L)
         self._set_manual_control("peak", 0.0, max(auto_peak + peak_span, peak_span), max(auto_peak, 0.0))
@@ -3343,6 +3362,7 @@ class FittingAnalysisWidget(QWidget):
         if common_tab_index >= 0:
             self.plot_tabs.setTabEnabled(common_tab_index, rotation_enabled)
         self.sb_manual_centering.setValue(float(centering_value))
+        self.sb_peak_uncertainty.setValue(float(peak_uncertainty))
 
     def _fit_range_values_from_meta(self, meta: Optional[Dict[str, Any]] = None) -> Tuple[float, float]:
         raw = (meta if meta is not None else self._meta or {}).get("fit_range")
@@ -5389,6 +5409,7 @@ class FittingAnalysisWidget(QWidget):
                 "centering_pos": self._manual_centering_value(),
                 "d_rel_abs": float(np.sqrt(linear_coeff)),
                 "d_component": str((self._analysis_context.get("saved_fit") or {}).get("d_component") or meta.get("d_component", "")),
+                "peak_intensity_uncertainty": float(self.sb_peak_uncertainty.value()),
             }
         else:
             fit_result = {
@@ -5402,6 +5423,7 @@ class FittingAnalysisWidget(QWidget):
                 "k_scale_std": 0.0,
                 "Pm0": float(live["peak_value"]),
                 "Pm0_stderr": 0.0,
+                "peak_intensity_uncertainty": float(self.sb_peak_uncertainty.value()),
                 "residual_rms": self._residual_rms_for_fit_range(live),
             }
         existing_fit = self._fit_payload_for_strategy(meta, selected)
