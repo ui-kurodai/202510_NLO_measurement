@@ -380,7 +380,7 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
     def _fit_L_small_angle(self, meta, data):
         """III D-1 (a): Fit L at small angles (not specified) to adjust nominal thickness."""
         pos = np.asarray(data.get("position_centered", data["position"]))
-        I = np.asarray(data["offset_corrected"])
+        I = np.asarray(data["intensity_corrected"])
         # Small-angle mask (|θ| < 5 deg)
         mask = np.abs(pos) < 5
         theta_small = pos[mask]
@@ -423,7 +423,7 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
     def _fit_L_delta_n_small_angle(self, meta, data):
         """Fit L and a single delta_n added to the Sellmeier n(2w)."""
         pos = np.asarray(data.get("position_centered", data["position"]), dtype=float)
-        intensity = np.asarray(data["offset_corrected"], dtype=float)
+        intensity = np.asarray(data["intensity_corrected"], dtype=float)
         finite = np.isfinite(pos) & np.isfinite(intensity)
         mask = self._fit_range_mask(data, meta=meta, base_mask=finite & (np.abs(pos) < 5.0), min_points=3)
         if np.count_nonzero(mask) < 3:
@@ -509,7 +509,7 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
     def _fit_L_delta_n_all_angle(self, meta, data):
         """Fit L and delta_n against the full finite trace for app use."""
         pos = np.asarray(data.get("position_centered", data["position"]), dtype=float)
-        intensity = np.asarray(data["offset_corrected"], dtype=float)
+        intensity = np.asarray(data["intensity_corrected"], dtype=float)
         finite = np.isfinite(pos) & np.isfinite(intensity)
         mask = self._fit_range_mask(data, meta=meta, base_mask=finite, min_points=3)
         if np.count_nonzero(mask) < 3:
@@ -895,7 +895,7 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
             }
         """
         theta_deg = np.asarray(data.get("position_centered", data["position"]))
-        I_meas = np.asarray(data.get("offset_corrected", data["intensity_corrected"]))
+        I_meas = np.asarray(data["intensity_corrected"])
 
         # Find local maxima (peaks)
         th_step = self.analysis.meta["step"]
@@ -952,7 +952,7 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
     def fit_all(self):
         """Run full Jerphagnon1970 fitting pipeline and return results."""
         data, _centering = self._position_centering(self.analysis.data)
-        data, _offset = self._subtract_offset(data)
+        _offset = {"offset": 0.0}
         L_fit = self._fit_L_delta_n_all_angle(self.analysis.meta, data)
         delta_n = float(L_fit.get("delta_n", 0.0))
         dn_override = self._delta_n_override(self.analysis.meta, delta_n)

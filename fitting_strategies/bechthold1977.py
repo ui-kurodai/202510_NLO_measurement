@@ -659,12 +659,12 @@ class GlobalNFitMixin:
     def _prepare_measurement_bundle(self, analysis, source_dir, *, require_fit_data=True):
         strategy = self._make_measurement_strategy(analysis)
         prepared, centering_info = strategy._position_centering(analysis.data)
-        prepared, offset_info = strategy._subtract_offset(prepared)
+        offset_info = {"minima_idx": np.array([], dtype=int), "offset": 0.0}
 
         minima_idx = self._load_saved_extrema_indices(analysis.meta, prepared, kind="minima")
         if minima_idx is None:
             x = np.asarray(prepared.get("position_centered", prepared["position"]), dtype=float)
-            y = np.asarray(prepared.get("offset_corrected", prepared["intensity_corrected"]), dtype=float)
+            y = np.asarray(prepared["intensity_corrected"], dtype=float)
             minima_idx = np.asarray(strategy.detect_minima(x, y), dtype=int)
 
         theta_deg = np.asarray(prepared.get("position_centered", prepared["position"]), dtype=float)
@@ -919,7 +919,7 @@ class GlobalNFitMixin:
         meta = measurement["meta"]
         data = measurement["data"]
         pos = np.asarray(data.get("position_centered", data["position"]), dtype=float)
-        intensity = np.asarray(data.get("offset_corrected", data["intensity_corrected"]), dtype=float)
+        intensity = np.asarray(data["intensity_corrected"], dtype=float)
         finite = np.isfinite(pos) & np.isfinite(intensity)
         if np.count_nonzero(finite) < 3:
             return []
@@ -1186,7 +1186,7 @@ class GlobalNFitMixin:
         data = measurement["data"]
 
         pos = np.asarray(data.get("position_centered", data["position"]), dtype=float)
-        intensity = np.asarray(data["offset_corrected"], dtype=float)
+        intensity = np.asarray(data["intensity_corrected"], dtype=float)
         finite = np.isfinite(pos) & np.isfinite(intensity)
         mask = finite & (np.abs(pos) < 5.0)
         if np.count_nonzero(mask) < 3:
@@ -1286,7 +1286,7 @@ class GlobalNFitMixin:
         strategy = measurement["strategy"]
         data = measurement["data"]
         pos = np.asarray(data.get("position_centered", data["position"]), dtype=float)
-        intensity = np.asarray(data.get("offset_corrected", data["intensity_corrected"]), dtype=float)
+        intensity = np.asarray(data["intensity_corrected"], dtype=float)
         finite = np.isfinite(pos) & np.isfinite(intensity) & (np.abs(pos) <= 8.0)
         if int(np.sum(finite)) < 3:
             finite = np.isfinite(pos) & np.isfinite(intensity)
@@ -1642,15 +1642,15 @@ class GlobalNFitMixin:
         )
         model = np.asarray(model, dtype=float)
 
-        y_offset_corrected = np.asarray(current["data"].get("offset_corrected", current["data"]["intensity_corrected"]), dtype=float)
-        finite = np.isfinite(model) & np.isfinite(y_offset_corrected)
+        measured_intensity = np.asarray(current["data"]["intensity_corrected"], dtype=float)
+        finite = np.isfinite(model) & np.isfinite(measured_intensity)
         if not np.any(finite):
             raise ValueError("No finite points available to scale the fitted curve.")
 
         denom = float(np.dot(model[finite], model[finite]))
         if denom <= 0.0:
             raise ValueError("The fitted model has zero norm, so scale fitting failed.")
-        k_scale = float(np.dot(model[finite], y_offset_corrected[finite]) / denom)
+        k_scale = float(np.dot(model[finite], measured_intensity[finite]) / denom)
 
         offset = float(current["offset_info"]["offset"])
         fit_curve = k_scale * model + offset

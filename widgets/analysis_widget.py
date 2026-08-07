@@ -2139,7 +2139,7 @@ class FittingAnalysisWidget(QWidget):
             context["error"] = f"Failed to initialize strategy: {e}"
             return context
 
-        prepared = analysis.data.copy()
+        prepared = analysis.data.drop(columns=["offset_corrected"], errors="ignore").copy()
         centering_info = None
         offset_info = {"offset": 0.0}
         notes: List[str] = []
@@ -2150,16 +2150,8 @@ class FittingAnalysisWidget(QWidget):
             except Exception as e:
                 notes.append(f"Centering: {e}")
 
-        if hasattr(strategy, "_subtract_offset"):
-            try:
-                prepared, offset_info = self._unwrap_data_and_aux(strategy._subtract_offset(prepared))
-            except Exception as e:
-                notes.append(f"Offset correction: {e}")
-
         display_x = np.asarray(prepared["position_centered"], dtype=float) if "position_centered" in prepared.columns else np.asarray(prepared["position"], dtype=float)
-        if "offset_corrected" in prepared.columns:
-            display_y = np.asarray(prepared["offset_corrected"], dtype=float)
-        elif "intensity_corrected" in prepared.columns:
+        if "intensity_corrected" in prepared.columns:
             display_y = np.asarray(prepared["intensity_corrected"], dtype=float)
         else:
             display_y = np.asarray(prepared["ch2"], dtype=float)
