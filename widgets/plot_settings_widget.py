@@ -42,6 +42,7 @@ class SeriesPlotSettings:
     legend_visible: bool = True
     legend_label: str = ""
     legend_digits: int = -1
+    y_offset: float = 0.0
 
 
 @dataclass
@@ -506,9 +507,9 @@ class PlotSettingsDialog(QDialog):
         else:
             self.colormap = QComboBox()
 
-        self.series_table = QTableWidget(len(self.settings.series_order), 7)
+        self.series_table = QTableWidget(len(self.settings.series_order), 8)
         self.series_table.setHorizontalHeaderLabels(
-            ["Data", "Legend label", "Digits", "Color", "Style", "Show", "Legend"]
+            ["Data", "Legend label", "Digits", "Y offset", "Color", "Style", "Show", "Legend"]
         )
         self.series_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.series_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -517,6 +518,7 @@ class PlotSettingsDialog(QDialog):
         self.series_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.series_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.series_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        self.series_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
         self.series_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.series_table.customContextMenuRequested.connect(self._show_series_context_menu)
         text_delegate = OpaqueLineEditDelegate(self.series_table)
@@ -571,23 +573,30 @@ class PlotSettingsDialog(QDialog):
         digits.setValue(series.legend_digits)
         self.series_table.setCellWidget(row, 2, digits)
 
+        y_offset = QDoubleSpinBox()
+        y_offset.setRange(-1e12, 1e12)
+        y_offset.setDecimals(8)
+        y_offset.setSingleStep(0.1)
+        y_offset.setValue(series.y_offset)
+        self.series_table.setCellWidget(row, 3, y_offset)
+
         color_button = QPushButton(series.color)
         color_button.clicked.connect(lambda _checked=False, r=row: self._choose_color(r))
         self._paint_color_button(color_button, series.color)
-        self.series_table.setCellWidget(row, 3, color_button)
+        self.series_table.setCellWidget(row, 4, color_button)
 
         style = QComboBox()
         style.addItems(self.STYLE_OPTIONS)
         style.setCurrentText(series.style if series.style in self.STYLE_OPTIONS else "*")
-        self.series_table.setCellWidget(row, 4, style)
+        self.series_table.setCellWidget(row, 5, style)
 
         show = QCheckBox()
         show.setChecked(series.visible)
-        self.series_table.setCellWidget(row, 5, show)
+        self.series_table.setCellWidget(row, 6, show)
 
         legend = QCheckBox()
         legend.setChecked(series.legend_visible)
-        self.series_table.setCellWidget(row, 6, legend)
+        self.series_table.setCellWidget(row, 7, legend)
 
     def _paint_color_button(self, button: QPushButton, color: str) -> None:
         button.setText(color)
@@ -597,7 +606,7 @@ class PlotSettingsDialog(QDialog):
         button.setStyleSheet(f"background-color: {QColor(color).name()};")
 
     def _choose_color(self, row: int) -> None:
-        button = self.series_table.cellWidget(row, 3)
+        button = self.series_table.cellWidget(row, 4)
         if not isinstance(button, QPushButton):
             return
         current = button.text() or "black"
@@ -836,10 +845,11 @@ class PlotSettingsDialog(QDialog):
             legend_label = legend_item.text().strip() if legend_item is not None else data_label
             order.append(key)
             digits_box = self.series_table.cellWidget(row, 2)
-            color_button = self.series_table.cellWidget(row, 3)
-            style_combo = self.series_table.cellWidget(row, 4)
-            show_box = self.series_table.cellWidget(row, 5)
-            legend_box = self.series_table.cellWidget(row, 6)
+            y_offset_box = self.series_table.cellWidget(row, 3)
+            color_button = self.series_table.cellWidget(row, 4)
+            style_combo = self.series_table.cellWidget(row, 5)
+            show_box = self.series_table.cellWidget(row, 6)
+            legend_box = self.series_table.cellWidget(row, 7)
             self.settings.series[key] = SeriesPlotSettings(
                 label=data_label,
                 color=color_button.text() if isinstance(color_button, QPushButton) else "C0",
@@ -848,6 +858,7 @@ class PlotSettingsDialog(QDialog):
                 legend_visible=legend_box.isChecked() if isinstance(legend_box, QCheckBox) else True,
                 legend_label=legend_label,
                 legend_digits=int(digits_box.value()) if isinstance(digits_box, QSpinBox) else -1,
+                y_offset=float(y_offset_box.value()) if isinstance(y_offset_box, QDoubleSpinBox) else 0.0,
             )
         self.settings.series_order = order
 

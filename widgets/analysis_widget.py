@@ -2697,8 +2697,12 @@ class FittingAnalysisWidget(QWidget):
         kwargs = self._style_to_kwargs(series.style, plot_key)
         kwargs["color"] = series.color
         kwargs["label"] = self._legend_label(plot_key, label)
+        kwargs["gid"] = self._series_artist_gid(plot_key, label)
         kwargs["zorder"] = 2 + self._series_order_index(plot_key, label)
         return kwargs
+
+    def _series_artist_gid(self, plot_key: str, label: str) -> str:
+        return f"series:{plot_key}:{label}"
 
     def _format_text_template(self, template: str, context: Optional[Dict[str, Any]], digit_count: int = -1) -> str:
         if not context:
@@ -2809,6 +2813,7 @@ class FittingAnalysisWidget(QWidget):
                         linestyle="none",
                         markersize=settings.marker_size,
                         label=label,
+                        gid=self._series_artist_gid(plot_key, key),
                         zorder=zorder,
                     )
                 elif item.kind == "vline" and values:
@@ -2818,6 +2823,7 @@ class FittingAnalysisWidget(QWidget):
                         linestyle=line_style,
                         linewidth=settings.line_width,
                         label=label,
+                        gid=self._series_artist_gid(plot_key, key),
                         zorder=zorder,
                     )
                 elif item.kind == "hline" and values:
@@ -2827,6 +2833,7 @@ class FittingAnalysisWidget(QWidget):
                         linestyle=line_style,
                         linewidth=settings.line_width,
                         label=label,
+                        gid=self._series_artist_gid(plot_key, key),
                         zorder=zorder,
                     )
                 elif item.kind == "line" and len(values) >= 4:
@@ -2839,6 +2846,7 @@ class FittingAnalysisWidget(QWidget):
                         markersize=settings.marker_size,
                         linewidth=settings.line_width,
                         label=label,
+                        gid=self._series_artist_gid(plot_key, key),
                         zorder=zorder,
                     )
             except Exception:
@@ -2940,6 +2948,63 @@ class FittingAnalysisWidget(QWidget):
             if offsets.ndim == 2 and offsets.shape[1] >= 2 and offsets.size:
                 offsets = offsets.copy()
                 offsets[:, 1] = offsets[:, 1] / factor
+                set_offsets(offsets)
+
+    def _artist_series_key(self, artist: Any, plot_key: str) -> Optional[str]:
+        gid = str(getattr(artist, "get_gid", lambda: "")() or "")
+        prefix = f"series:{plot_key}:"
+        if gid.startswith(prefix):
+            return gid[len(prefix):]
+        label = str(getattr(artist, "get_label", lambda: "")() or "")
+        if not label or label.startswith("_"):
+            return None
+        settings = self._plot_settings[plot_key]
+        for key in settings.series_order:
+            series = self._series_setting(plot_key, key)
+            possible_labels = {
+                key,
+                series.label,
+                series.legend_label,
+                self._legend_label(plot_key, key),
+            }
+            if label in possible_labels:
+                return key
+        return None
+
+    def _apply_y_offsets(self, ax: Any, plot_key: str) -> None:
+        settings = self._plot_settings[plot_key]
+        for line in ax.lines:
+            if self._line_has_axes_y_coordinates(line):
+                continue
+            key = self._artist_series_key(line, plot_key)
+            if key is None:
+                continue
+            offset = float(settings.series.get(key, SeriesPlotSettings(key)).y_offset)
+            if offset == 0.0:
+                continue
+            try:
+                y_data = np.asarray(line.get_ydata(orig=False), dtype=float)
+            except Exception:
+                continue
+            line.set_ydata(y_data + offset)
+        for collection in ax.collections:
+            key = self._artist_series_key(collection, plot_key)
+            if key is None:
+                continue
+            offset = float(settings.series.get(key, SeriesPlotSettings(key)).y_offset)
+            if offset == 0.0:
+                continue
+            get_offsets = getattr(collection, "get_offsets", None)
+            set_offsets = getattr(collection, "set_offsets", None)
+            if get_offsets is None or set_offsets is None:
+                continue
+            try:
+                offsets = np.asarray(get_offsets(), dtype=float)
+            except Exception:
+                continue
+            if offsets.ndim == 2 and offsets.shape[1] >= 2 and offsets.size:
+                offsets = offsets.copy()
+                offsets[:, 1] = offsets[:, 1] + offset
                 set_offsets(offsets)
 
     def _extra_axis_setting(self, plot_key: str, key: str) -> Optional[ExtraAxisPlotSettings]:
@@ -3104,6 +3169,7 @@ class FittingAnalysisWidget(QWidget):
         canvas.figure.set_size_inches(settings.figure_width, settings.figure_height, forward=False)
         self._plot_manual_items(ax, plot_key)
         self._apply_y_normalization(ax, plot_key)
+        self._apply_y_offsets(ax, plot_key)
 
         if plot_key == "n_landscape":
             bottom_label = "L (mm)"
