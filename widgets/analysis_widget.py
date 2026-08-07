@@ -3350,20 +3350,13 @@ class FittingAnalysisWidget(QWidget):
         self._set_manual_control("L", auto_L - l_span, auto_L + l_span, auto_L)
         self._set_manual_control("peak", 0.0, max(auto_peak + peak_span, peak_span), max(auto_peak, 0.0))
         self._set_manual_control("delta_n", delta_n - delta_n_span, delta_n + delta_n_span, delta_n)
-        rotation_enabled = not self._is_wedge_scan()
-        common_n_offset = self._safe_float(saved_fit.get("common_n_offset"), 0.0) if rotation_enabled else 0.0
+        common_n_offset = self._safe_float(saved_fit.get("common_n_offset"), 0.0)
         self._set_manual_control(
             "common_n_offset",
             common_n_offset - 0.001,
             common_n_offset + 0.001,
             common_n_offset,
         )
-        for widget in self._manual_controls["common_n_offset"].values():
-            widget.setEnabled(rotation_enabled)
-        common_page = self._plot_pages.get("common_n_landscape")
-        common_tab_index = self.plot_tabs.indexOf(common_page) if common_page is not None else -1
-        if common_tab_index >= 0:
-            self.plot_tabs.setTabEnabled(common_tab_index, rotation_enabled)
         self.sb_manual_centering.setValue(float(centering_value))
         self.sb_peak_uncertainty.setValue(float(peak_uncertainty))
 
@@ -4034,8 +4027,6 @@ class FittingAnalysisWidget(QWidget):
         return dn_override
 
     def _compute_common_n_landscape(self) -> Dict[str, Any]:
-        if self._is_wedge_scan():
-            return {"error": "This cost map is available for rotation scans only."}
         context = self._analysis_context
         if context.get("error"):
             return {"error": context["error"]}
