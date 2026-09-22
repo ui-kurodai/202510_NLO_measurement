@@ -3239,6 +3239,8 @@ class FittingAnalysisWidget(QWidget):
             ax.locator_params(axis="y", nbins=settings.y_tick_count)
         self._apply_tick_formatter(ax.xaxis, settings.x_digit_count, settings.x_scientific)
         self._apply_tick_formatter(ax.yaxis, settings.y_digit_count, settings.y_scientific)
+        self._style_axis_offset_text(ax.xaxis, tick_size, settings.font_family)
+        self._style_axis_offset_text(ax.yaxis, tick_size, settings.font_family)
 
         handles, labels = ax.get_legend_handles_labels()
         if settings.show_legend and handles:
@@ -3322,6 +3324,11 @@ class FittingAnalysisWidget(QWidget):
         mantissa = value / (10.0 ** exponent)
         return rf"${mantissa:.{digits}f}\times10^{{{exponent}}}$"
 
+    def _style_axis_offset_text(self, axis_obj: Any, font_size: float, font_family: str) -> None:
+        offset_text = axis_obj.get_offset_text()
+        offset_text.set_fontsize(font_size)
+        offset_text.set_fontfamily(font_family)
+
     def _apply_extra_axis_settings(
         self,
         axis_obj: Any,
@@ -3377,6 +3384,7 @@ class FittingAnalysisWidget(QWidget):
         elif axis_settings.tick_count > 0:
             axis_obj.locator_params(axis=axis, nbins=axis_settings.tick_count)
         self._apply_tick_formatter(target_axis, axis_settings.digit_count, axis_settings.scientific)
+        self._style_axis_offset_text(target_axis, tick_size, font_family)
 
     def _manual_controls_ready(self) -> bool:
         if not self._manual_controls:
