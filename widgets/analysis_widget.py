@@ -2644,10 +2644,10 @@ class FittingAnalysisWidget(QWidget):
                 name="Fit summary",
                 visible=True,
                 text=(
-                    "L = {L_mm:.4f} mm (ΔL= {delta_um:+.1f} um)\n"
-                    "${P_\\mathrm{env}(0)}$ = {peak:.3g}\n"
-                    "${\\Delta n_{\\omega}}$ = {common_n_offset:+.5f}\n"
-                    "${\\Delta n_{2\\omega}}$ = {common_n_offset + delta_n:+.5f}\n"
+                    "L = {L_mm:.3f} mm (ΔL= {delta_um:+.0f} um)\n"
+                    "${I_\\mathrm{env}(0)}$ = {peak:.3g}\n"
+                    "{delta_n_w_labels} = {common_n_offset:+.4f}\n"
+                    "{delta_n_2w_labels} = {common_n_offset + delta_n:+.4f}\n"
                     "Δn = {delta_n:+.6f}\n"
                     "Common Δn = {common_n_offset:+.6f}"
                 ),
@@ -2777,6 +2777,25 @@ class FittingAnalysisWidget(QWidget):
             return None
         text = self._format_text_template(annotation.text, context, annotation.digit_count)
         return text if text.strip() else None
+
+    def _delta_n_axis_labels(self, strategy: Any) -> Tuple[str, str]:
+        roles: Dict[str, Any] = {}
+        if strategy is not None and hasattr(strategy, "_delta_n_axis_roles"):
+            try:
+                roles = strategy._delta_n_axis_roles(self._meta) or {}
+            except Exception:
+                roles = {}
+
+        def labels(frequency: str, role_name: str) -> str:
+            axes = tuple(roles.get(role_name) or ("a", "b", "c"))
+            valid_axes = [str(axis).lower() for axis in axes if str(axis).lower() in {"a", "b", "c"}]
+            if not valid_axes:
+                valid_axes = ["a", "b", "c"]
+            return " = ".join(
+                f"${{\\Delta n_{{{frequency},{axis}}}}}$" for axis in valid_axes
+            )
+
+        return labels("\\omega", "w_axes"), labels("2\\omega", "two_w_axes")
 
     def _parse_manual_values(self, values_text: str) -> List[float]:
         values: List[float] = []
@@ -4918,6 +4937,7 @@ class FittingAnalysisWidget(QWidget):
         delta_um = (float(live["L_value"]) - nominal_L) * 1000.0
         if settings.show_annotation:
             annotation = self._annotation_setting("fit", "fit_summary")
+            delta_n_w_labels, delta_n_2w_labels = self._delta_n_axis_labels(live.get("strategy"))
             annotation_text = self._annotation_text(
                 "fit",
                 "fit_summary",
@@ -4930,6 +4950,8 @@ class FittingAnalysisWidget(QWidget):
                     "peak_value": float(live["peak_value"]),
                     "delta_n": float(live.get("delta_n", 0.0)),
                     "common_n_offset": float(live.get("common_n_offset", 0.0)),
+                    "delta_n_w_labels": delta_n_w_labels,
+                    "delta_n_2w_labels": delta_n_2w_labels,
                 },
             )
         else:
