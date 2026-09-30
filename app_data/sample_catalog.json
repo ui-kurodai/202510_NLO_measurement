@@ -24,7 +24,7 @@
       "material": "BaMgF4",
       "crystal_orientation": "010",
       "thickness_info": {
-        "wedge_angle_deg": 0.536,
+        "wedge_angle_deg": 0.535,
         "t_center_mm": 1.8
       }
     },
@@ -33,7 +33,7 @@
       "material": "BaMgF4",
       "crystal_orientation": "010",
       "thickness_info": {
-        "wedge_angle_deg": 0.534,
+        "wedge_angle_deg": 0.533,
         "t_center_mm": 1.603
       }
     },
@@ -42,7 +42,7 @@
       "material": "BaMgF4",
       "crystal_orientation": "010",
       "thickness_info": {
-        "wedge_angle_deg": 0.541,
+        "wedge_angle_deg": 0.5439,
         "t_center_mm": 1.433
       }
     },
@@ -80,6 +80,15 @@
       "thickness_info": {
         "wedge_angle_deg": 0.0,
         "t_center_mm": 1.389
+      }
+    },
+    {
+      "sample": "BMF44-B-1",
+      "material": "BaMgF4",
+      "crystal_orientation": "010",
+      "thickness_info": {
+        "wedge_angle_deg": 0.0,
+        "t_center_mm": 0.768
       }
     },
     {
