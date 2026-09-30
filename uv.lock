@@ -176,7 +176,7 @@ wheels = [
 [[package]]
 name = "crystaldatabase"
 version = "0.1"
-source = { git = "https://github.com/ui-kurodai/202508_crystal_database#4922d9b0cc617f3265c4b88d4a6ec4056d24b3b4" }
+source = { git = "https://github.com/ui-kurodai/202508_crystal_database#3c4176629081235b9e57fd60aff7016a033d8de2" }
 
 [[package]]
 name = "cycler"
