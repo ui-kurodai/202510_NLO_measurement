@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -23,6 +24,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QStyledItemDelegate,
     QTabWidget,
@@ -90,15 +92,29 @@ class ExtraAxisPlotSettings:
     tick_count: int = 0
     ticks_text: str = ""
     opposite_ticks: bool = False
+    can_swap_sides: bool = False
+    swap_sides: bool = False
+    main_axis_visible: bool = True
 
 
 @dataclass
 class SharedPlotSettings:
     figure_width: float = 6.0
     figure_height: float = 2.8
+    use_plot_area_size: bool = False
+    plot_area_width: float = 5.0
+    plot_area_height: float = 3.0
+    auto_padding: bool = True
+    padding_left: float = 0.8
+    padding_right: float = 0.3
+    padding_bottom: float = 0.7
+    padding_top: float = 0.3
     show_legend: bool = True
     show_legend_frame: bool = True
     legend_loc: str = "best"
+    legend_use_coordinates: bool = False
+    legend_x: float = 1.0
+    legend_y: float = 1.0
     show_grid: bool = True
     title: str = ""
     x_label: str = ""
@@ -317,6 +333,13 @@ class PlotSettingsDialog(QDialog):
     def _build_general_tab(self) -> QWidget:
         page = QWidget()
         form = QFormLayout(page)
+        self.figure_size_mode = QRadioButton("Figure size")
+        self.plot_area_size_mode = QRadioButton("Plot area size")
+        self.size_mode_group = QButtonGroup(self)
+        self.size_mode_group.addButton(self.figure_size_mode)
+        self.size_mode_group.addButton(self.plot_area_size_mode)
+        self.plot_area_size_mode.setChecked(self.settings.use_plot_area_size)
+        self.figure_size_mode.setChecked(not self.settings.use_plot_area_size)
         self.figure_width = QDoubleSpinBox()
         self.figure_width.setRange(2.0, 24.0)
         self.figure_width.setSingleStep(0.2)
@@ -325,15 +348,89 @@ class PlotSettingsDialog(QDialog):
         self.figure_height.setRange(1.5, 18.0)
         self.figure_height.setSingleStep(0.2)
         self.figure_height.setValue(self.settings.figure_height)
+        self.plot_area_width = QDoubleSpinBox()
+        self.plot_area_width.setRange(1.0, 24.0)
+        self.plot_area_width.setSingleStep(0.2)
+        self.plot_area_width.setValue(self.settings.plot_area_width)
+        self.plot_area_height = QDoubleSpinBox()
+        self.plot_area_height.setRange(1.0, 18.0)
+        self.plot_area_height.setSingleStep(0.2)
+        self.plot_area_height.setValue(self.settings.plot_area_height)
+
+        figure_size_row = QWidget()
+        figure_size_layout = QHBoxLayout(figure_size_row)
+        figure_size_layout.setContentsMargins(0, 0, 0, 0)
+        figure_size_layout.addWidget(self.figure_size_mode)
+        figure_size_layout.addWidget(QLabel("Width"))
+        figure_size_layout.addWidget(self.figure_width)
+        figure_size_layout.addWidget(QLabel("Height"))
+        figure_size_layout.addWidget(self.figure_height)
+        figure_size_layout.addStretch(1)
+
+        plot_area_size_row = QWidget()
+        plot_area_size_layout = QHBoxLayout(plot_area_size_row)
+        plot_area_size_layout.setContentsMargins(0, 0, 0, 0)
+        plot_area_size_layout.addWidget(self.plot_area_size_mode)
+        plot_area_size_layout.addWidget(QLabel("Width"))
+        plot_area_size_layout.addWidget(self.plot_area_width)
+        plot_area_size_layout.addWidget(QLabel("Height"))
+        plot_area_size_layout.addWidget(self.plot_area_height)
+        plot_area_size_layout.addStretch(1)
+
+        self.auto_padding = QCheckBox("Auto padding")
+        self.auto_padding.setChecked(self.settings.auto_padding)
+        self.padding_left = self._padding_spin(self.settings.padding_left)
+        self.padding_right = self._padding_spin(self.settings.padding_right)
+        self.padding_bottom = self._padding_spin(self.settings.padding_bottom)
+        self.padding_top = self._padding_spin(self.settings.padding_top)
+        padding_row = QWidget()
+        padding_layout = QHBoxLayout(padding_row)
+        padding_layout.setContentsMargins(0, 0, 0, 0)
+        padding_layout.addWidget(self.auto_padding)
+        for label, widget in (
+            ("Left", self.padding_left),
+            ("Right", self.padding_right),
+            ("Bottom", self.padding_bottom),
+            ("Top", self.padding_top),
+        ):
+            padding_layout.addWidget(QLabel(label))
+            padding_layout.addWidget(widget)
+        padding_layout.addStretch(1)
+
+        self.figure_size_mode.toggled.connect(self._update_size_mode_controls)
+        self.plot_area_size_mode.toggled.connect(self._update_size_mode_controls)
+        self.auto_padding.toggled.connect(self._update_size_mode_controls)
         self.legend = QCheckBox()
         self.legend.setChecked(self.settings.show_legend)
         self.grid = QCheckBox()
         self.grid.setChecked(self.settings.show_grid)
-        form.addRow("Width", self.figure_width)
-        form.addRow("Height", self.figure_height)
+        form.addRow(figure_size_row)
+        form.addRow(plot_area_size_row)
+        form.addRow("Outer padding (inch)", padding_row)
         form.addRow("Legend", self.legend)
         form.addRow("Grid", self.grid)
+        self._update_size_mode_controls()
         return page
+
+    def _padding_spin(self, value: float) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(0.0, 10.0)
+        spin.setDecimals(2)
+        spin.setSingleStep(0.05)
+        spin.setSuffix(" in")
+        spin.setValue(value)
+        return spin
+
+    def _update_size_mode_controls(self) -> None:
+        use_plot_area = self.plot_area_size_mode.isChecked()
+        self.figure_width.setEnabled(not use_plot_area)
+        self.figure_height.setEnabled(not use_plot_area)
+        self.plot_area_width.setEnabled(use_plot_area)
+        self.plot_area_height.setEnabled(use_plot_area)
+        self.auto_padding.setEnabled(use_plot_area)
+        manual_padding = use_plot_area and not self.auto_padding.isChecked()
+        for spin in (self.padding_left, self.padding_right, self.padding_bottom, self.padding_top):
+            spin.setEnabled(manual_padding)
 
     def _build_text_tab(self) -> QWidget:
         page = QWidget()
@@ -354,6 +451,31 @@ class PlotSettingsDialog(QDialog):
         self.legend_loc.addItems(self.LEGEND_LOC_OPTIONS)
         loc_index = self.legend_loc.findText(self.settings.legend_loc)
         self.legend_loc.setCurrentIndex(loc_index if loc_index >= 0 else 0)
+        self.legend_use_coordinates = QCheckBox("Use axes coordinates")
+        self.legend_use_coordinates.setChecked(self.settings.legend_use_coordinates)
+        self.legend_x = QDoubleSpinBox()
+        self.legend_x.setRange(-5.0, 5.0)
+        self.legend_x.setDecimals(3)
+        self.legend_x.setSingleStep(0.02)
+        self.legend_x.setValue(self.settings.legend_x)
+        self.legend_y = QDoubleSpinBox()
+        self.legend_y.setRange(-5.0, 5.0)
+        self.legend_y.setDecimals(3)
+        self.legend_y.setSingleStep(0.02)
+        self.legend_y.setValue(self.settings.legend_y)
+        self.legend_x.setEnabled(self.settings.legend_use_coordinates)
+        self.legend_y.setEnabled(self.settings.legend_use_coordinates)
+        self.legend_use_coordinates.toggled.connect(self.legend_x.setEnabled)
+        self.legend_use_coordinates.toggled.connect(self.legend_y.setEnabled)
+        legend_coordinates = QWidget()
+        legend_coordinates_layout = QHBoxLayout(legend_coordinates)
+        legend_coordinates_layout.setContentsMargins(0, 0, 0, 0)
+        legend_coordinates_layout.addWidget(self.legend_use_coordinates)
+        legend_coordinates_layout.addWidget(QLabel("X"))
+        legend_coordinates_layout.addWidget(self.legend_x)
+        legend_coordinates_layout.addWidget(QLabel("Y"))
+        legend_coordinates_layout.addWidget(self.legend_y)
+        legend_coordinates_layout.addStretch(1)
         self.annotation = QCheckBox()
         self.annotation.setChecked(self.settings.show_annotation)
         form.addRow("Title", self.title_edit)
@@ -362,6 +484,7 @@ class PlotSettingsDialog(QDialog):
         form.addRow("Legend size", self.legend_size)
         form.addRow("Legend frame", self.legend_frame)
         form.addRow("Legend position", self.legend_loc)
+        form.addRow("Legend coordinates", legend_coordinates)
         form.addRow("Ticks size", self.tick_size)
         form.addRow("Additional text", self.annotation)
 
@@ -740,7 +863,16 @@ class PlotSettingsDialog(QDialog):
                 tick_count=current.tick_count,
                 ticks_text=current.ticks_text,
                 opposite_ticks=current.opposite_ticks,
+                visible=current.visible,
+                can_swap_sides=current.can_swap_sides,
+                swap_sides=current.swap_sides,
+                main_axis_visible=current.main_axis_visible,
             )
+            text_enabled = self.extra_axis_text_widgets.get(axis.key, {}).get("enabled")
+            axis_enabled = widgets.get("visible")
+            if isinstance(text_enabled, QCheckBox) and isinstance(axis_enabled, QCheckBox):
+                text_enabled.toggled.connect(axis_enabled.setChecked)
+                axis_enabled.toggled.connect(text_enabled.setChecked)
             self.extra_axis_axis_widgets[axis.key] = widgets
             layout.addWidget(widgets["group"])
         layout.addStretch(1)
@@ -778,6 +910,10 @@ class PlotSettingsDialog(QDialog):
         tick_count: int,
         ticks_text: str,
         opposite_ticks: bool,
+        visible: Optional[bool] = None,
+        can_swap_sides: bool = False,
+        swap_sides: bool = False,
+        main_axis_visible: bool = True,
     ) -> Dict[str, object]:
         group = QGroupBox(title)
         layout = QGridLayout(group)
@@ -800,6 +936,14 @@ class PlotSettingsDialog(QDialog):
         ticks_edit = QLineEdit(ticks_text)
         ticks_edit.setPlaceholderText("optional: 0, 1, 2")
 
+        visible_box = QCheckBox("Show secondary axis")
+        if visible is not None:
+            visible_box.setChecked(visible)
+        swap_box = QCheckBox("Swap with main axis")
+        swap_box.setChecked(swap_sides)
+        main_visible_box = QCheckBox("Show main axis")
+        main_visible_box.setChecked(main_axis_visible)
+
         layout.addWidget(QLabel("Range"), 0, 0)
         layout.addWidget(min_edit, 0, 1)
         layout.addWidget(QLabel("-"), 0, 2)
@@ -813,6 +957,11 @@ class PlotSettingsDialog(QDialog):
         layout.addWidget(opposite_box, 2, 2, 1, 2)
         layout.addWidget(QLabel("Ticks list"), 3, 0)
         layout.addWidget(ticks_edit, 3, 1, 1, 4)
+        if visible is not None:
+            layout.addWidget(visible_box, 4, 0, 1, 2)
+        if can_swap_sides:
+            layout.addWidget(swap_box, 4, 2, 1, 3)
+            layout.addWidget(main_visible_box, 5, 0, 1, 2)
         layout.setColumnStretch(3, 1)
         return {
             "group": group,
@@ -824,6 +973,9 @@ class PlotSettingsDialog(QDialog):
             "tick_count": tick_count_box,
             "opposite_ticks": opposite_box,
             "ticks_text": ticks_edit,
+            "visible": visible_box if visible is not None else None,
+            "swap_sides": swap_box if can_swap_sides else None,
+            "main_axis_visible": main_visible_box if can_swap_sides else None,
         }
 
     def _format_bound(self, value: Optional[float]) -> str:
@@ -867,6 +1019,14 @@ class PlotSettingsDialog(QDialog):
             self._read_series_table()
             self.settings.figure_width = float(self.figure_width.value())
             self.settings.figure_height = float(self.figure_height.value())
+            self.settings.use_plot_area_size = self.plot_area_size_mode.isChecked()
+            self.settings.plot_area_width = float(self.plot_area_width.value())
+            self.settings.plot_area_height = float(self.plot_area_height.value())
+            self.settings.auto_padding = self.auto_padding.isChecked()
+            self.settings.padding_left = float(self.padding_left.value())
+            self.settings.padding_right = float(self.padding_right.value())
+            self.settings.padding_bottom = float(self.padding_bottom.value())
+            self.settings.padding_top = float(self.padding_top.value())
             self.settings.show_legend = self.legend.isChecked()
             self.settings.show_grid = self.grid.isChecked()
             self.settings.title = self.title_edit.text()
@@ -877,6 +1037,9 @@ class PlotSettingsDialog(QDialog):
             self.settings.legend_font_size = float(self.legend_size.value())
             self.settings.show_legend_frame = self.legend_frame.isChecked()
             self.settings.legend_loc = self.legend_loc.currentText() or "best"
+            self.settings.legend_use_coordinates = self.legend_use_coordinates.isChecked()
+            self.settings.legend_x = float(self.legend_x.value())
+            self.settings.legend_y = float(self.legend_y.value())
             self.settings.tick_font_size = float(self.tick_size.value())
             self.settings.show_annotation = self.annotation.isChecked()
             self.settings.marker_size = float(self.marker_size.value())
@@ -961,6 +1124,15 @@ class PlotSettingsDialog(QDialog):
         axis.tick_count = values["tick_count"]
         axis.ticks_text = values["ticks_text"]
         axis.opposite_ticks = values["opposite_ticks"]
+        visible = widgets.get("visible")
+        swap_sides = widgets.get("swap_sides")
+        main_axis_visible = widgets.get("main_axis_visible")
+        if isinstance(visible, QCheckBox):
+            axis.visible = visible.isChecked()
+        if isinstance(swap_sides, QCheckBox):
+            axis.swap_sides = swap_sides.isChecked()
+        if isinstance(main_axis_visible, QCheckBox):
+            axis.main_axis_visible = main_axis_visible.isChecked()
 
     def _read_axis_widgets(self, widgets: Dict[str, object]) -> Dict[str, object]:
         min_edit = widgets["min"]

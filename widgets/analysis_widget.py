@@ -2090,6 +2090,7 @@ class FittingAnalysisWidget(QWidget):
             self._clear_plots()
             self._clear_nfit_measurements("Load a result folder first.")
             return
+        self._sync_fit_annotation_default()
         self._analysis_context = self._prepare_analysis_context()
         self._live_curve_cache = {}
         if reset_manual or not self._manual_controls_ready():
@@ -2552,7 +2553,7 @@ class FittingAnalysisWidget(QWidget):
     def _plot_series_defaults(self, plot_key: str) -> List[SeriesPlotSettings]:
         defaults = {
             "fit": [
-                SeriesPlotSettings("Data", "C0", "*"),
+                SeriesPlotSettings("Data", "C0", "."),
                 SeriesPlotSettings("Fit", "C1", "-"),
                 SeriesPlotSettings("Envelope", "C2", "--"),
             ],
@@ -2627,10 +2628,11 @@ class FittingAnalysisWidget(QWidget):
             defaults.append(
                 ExtraAxisPlotSettings(
                     key="top_x",
-                    name="Top X axis",
+                    name="Secondary X axis",
                     label="Sample thickness (mm)",
                     label_font_size=10.0,
                     tick_font_size=10.0,
+                    can_swap_sides=True,
                 )
             )
         return defaults
@@ -2643,14 +2645,7 @@ class FittingAnalysisWidget(QWidget):
                 key="fit_summary",
                 name="Fit summary",
                 visible=True,
-                text=(
-                    "L = {L_mm:.3f} mm (ΔL= {delta_um:+.0f} um)\n"
-                    "${I_\\mathrm{env}(0)}$ = {peak:.3g}\n"
-                    "{delta_n_w_labels} = {common_n_offset:+.4f}\n"
-                    "{delta_n_2w_labels} = {common_n_offset + delta_n:+.4f}\n"
-                    "Δn = {delta_n:+.6f}\n"
-                    "Common Δn = {common_n_offset:+.6f}"
-                ),
+                text=self._fit_annotation_default_text(self._is_wedge_scan()),
                 digit_count=-1,
                 x=0.02,
                 y=0.98,
@@ -2658,6 +2653,36 @@ class FittingAnalysisWidget(QWidget):
                 va="top",
             )
         ]
+
+    def _fit_annotation_default_text(self, is_wedge: bool) -> str:
+        if is_wedge:
+            return (
+                "L = {L_mm:.4f} mm (ΔL= {delta_um:+.1f} um)\n"
+                "Peak intensity = {peak:.3g}\n"
+                "${\\Delta (n_{\\omega} - n_{2\\omega})}$ = {-delta_n:+.4f}"
+            )
+        return (
+            "L = {L_mm:.3f} mm (ΔL= {delta_um:+.0f} um)\n"
+            "${I_\\mathrm{env}(0)}$ = {peak:.3g}\n"
+            "{delta_n_w_labels} = {common_n_offset:+.4f}\n"
+            "{delta_n_2w_labels} = {common_n_offset + delta_n:+.4f}\n"
+            "Δn = {delta_n:+.6f}\n"
+            "Common Δn = {common_n_offset:+.6f}"
+        )
+
+    def _sync_fit_annotation_default(self) -> None:
+        settings = self._plot_settings.get("fit")
+        if settings is None:
+            return
+        annotation = settings.annotations.get("fit_summary")
+        if annotation is None:
+            return
+        known_defaults = {
+            self._fit_annotation_default_text(False),
+            self._fit_annotation_default_text(True),
+        }
+        if annotation.text in known_defaults:
+            annotation.text = self._fit_annotation_default_text(self._is_wedge_scan())
 
     def _series_setting(self, plot_key: str, label: str) -> SeriesPlotSettings:
         settings = self._plot_settings[plot_key]
@@ -3128,7 +3153,11 @@ class FittingAnalysisWidget(QWidget):
         if not path:
             return
         try:
-            self._current_plot_canvas().figure.savefig(path, dpi=200, bbox_inches="tight")
+            canvas = self._current_plot_canvas()
+            settings = self._plot_settings[plot_key]
+            if settings.use_plot_area_size:
+                self._layout_fixed_plot_area(canvas, settings)
+            canvas.figure.savefig(path, dpi=200, bbox_inches="tight")
         except Exception as e:
             QMessageBox.critical(self, "Save failed", str(e))
             return
@@ -3140,7 +3169,12 @@ class FittingAnalysisWidget(QWidget):
             return
         try:
             buffer = BytesIO()
-            self._current_plot_canvas().figure.savefig(buffer, format="png", dpi=200, bbox_inches="tight")
+            plot_key = self._current_plot_key()
+            canvas = self._current_plot_canvas()
+            settings = self._plot_settings[plot_key]
+            if settings.use_plot_area_size:
+                self._layout_fixed_plot_area(canvas, settings)
+            canvas.figure.savefig(buffer, format="png", dpi=200, bbox_inches="tight")
             image = QImage()
             if not image.loadFromData(buffer.getvalue(), "PNG"):
                 raise RuntimeError("Could not render the current plot as a clipboard image.")
@@ -3168,17 +3202,96 @@ class FittingAnalysisWidget(QWidget):
                     text.set_text(self._plain_plot_text(text.get_text()))
 
     def _safe_canvas_finish(self, canvas: MplCanvas) -> None:
+        settings = next(
+            (
+                self._plot_settings[key]
+                for key, plot_canvas in getattr(self, "_plot_canvases", {}).items()
+                if plot_canvas is canvas
+            ),
+            None,
+        )
         try:
-            canvas.figure.tight_layout()
+            if settings is not None and settings.use_plot_area_size:
+                self._layout_fixed_plot_area(canvas, settings)
+            else:
+                canvas.figure.tight_layout()
             canvas.draw()
         except Exception as exc:
             print(f"Plot draw failed; retrying with plain text labels: {exc}", file=sys.stderr)
             try:
                 self._sanitize_mathtext_labels(canvas)
-                canvas.figure.tight_layout()
+                if settings is not None and settings.use_plot_area_size:
+                    self._layout_fixed_plot_area(canvas, settings)
+                else:
+                    canvas.figure.tight_layout()
                 canvas.draw()
             except Exception as retry_exc:
                 print(f"Plot draw retry failed: {retry_exc}", file=sys.stderr)
+
+    def _layout_fixed_plot_area(self, canvas: MplCanvas, settings: PlotSettings) -> None:
+        figure = canvas.figure
+        main_axis = canvas.ax
+        plot_width = max(float(settings.plot_area_width), 0.1)
+        plot_height = max(float(settings.plot_area_height), 0.1)
+        axes = list(figure.axes)
+        main_position = main_axis.get_position().frozen()
+        if main_position.width <= 0.0 or main_position.height <= 0.0:
+            return
+
+        relative_positions: Dict[Any, Tuple[float, float, float, float]] = {}
+        for axis_obj in axes:
+            position = axis_obj.get_position().frozen()
+            relative_positions[axis_obj] = (
+                (position.x0 - main_position.x0) / main_position.width,
+                (position.y0 - main_position.y0) / main_position.height,
+                position.width / main_position.width,
+                position.height / main_position.height,
+            )
+
+        def apply_layout(left: float, right: float, bottom: float, top: float) -> None:
+            figure_width = left + plot_width + right
+            figure_height = bottom + plot_height + top
+            figure.set_size_inches(figure_width, figure_height, forward=False)
+            for axis_obj, (rel_x, rel_y, rel_width, rel_height) in relative_positions.items():
+                axis_obj.set_position(
+                    [
+                        (left + rel_x * plot_width) / figure_width,
+                        (bottom + rel_y * plot_height) / figure_height,
+                        rel_width * plot_width / figure_width,
+                        rel_height * plot_height / figure_height,
+                    ]
+                )
+
+        if settings.auto_padding:
+            apply_layout(0.8, 0.4, 0.7, 0.4)
+            canvas.draw()
+            renderer = canvas.get_renderer()
+            tight_boxes = [
+                axis_obj.get_tightbbox(renderer)
+                for axis_obj in axes
+                if axis_obj.get_visible()
+            ]
+            tight_boxes = [box for box in tight_boxes if box is not None]
+            if tight_boxes:
+                main_box = main_axis.get_window_extent(renderer)
+                tight_left = min(box.x0 for box in tight_boxes)
+                tight_right = max(box.x1 for box in tight_boxes)
+                tight_bottom = min(box.y0 for box in tight_boxes)
+                tight_top = max(box.y1 for box in tight_boxes)
+                dpi = float(figure.dpi or 100.0)
+                breathing_room = 0.08
+                left = max(0.0, (main_box.x0 - tight_left) / dpi) + breathing_room
+                right = max(0.0, (tight_right - main_box.x1) / dpi) + breathing_room
+                bottom = max(0.0, (main_box.y0 - tight_bottom) / dpi) + breathing_room
+                top = max(0.0, (tight_top - main_box.y1) / dpi) + breathing_room
+                apply_layout(left, right, bottom, top)
+        else:
+            apply_layout(
+                max(float(settings.padding_left), 0.0),
+                max(float(settings.padding_right), 0.0),
+                max(float(settings.padding_bottom), 0.0),
+                max(float(settings.padding_top), 0.0),
+            )
 
     def _configure_plot_axes(self, canvas: MplCanvas, plot_key: str, y_label: str, top_axis_L_mm: Optional[float] = None):
         settings = self._plot_settings[plot_key]
@@ -3248,6 +3361,12 @@ class FittingAnalysisWidget(QWidget):
             for handle, label in zip(handles, labels):
                 if label and label not in unique:
                     unique[label] = handle
+            legend_position_kwargs: Dict[str, Any] = {}
+            if settings.legend_use_coordinates:
+                legend_position_kwargs = {
+                    "bbox_to_anchor": (settings.legend_x, settings.legend_y),
+                    "bbox_transform": ax.transAxes,
+                }
             legend = ax.legend(
                 list(unique.values()),
                 list(unique.keys()),
@@ -3255,6 +3374,7 @@ class FittingAnalysisWidget(QWidget):
                 fontsize=legend_size,
                 frameon=settings.show_legend_frame,
                 prop={"family": settings.font_family, "size": legend_size},
+                **legend_position_kwargs,
             )
             if legend is not None:
                 legend.set_title(None)
@@ -3262,8 +3382,6 @@ class FittingAnalysisWidget(QWidget):
         if not is_wedge or top_axis_L_mm is None:
             return
         top_axis_settings = self._extra_axis_setting(plot_key, "top_x")
-        if top_axis_settings is not None and not top_axis_settings.visible:
-            return
 
         strategy = self._analysis_context.get("strategy")
         tinfo = self._meta.get("thickness_info") or {}
@@ -3271,6 +3389,26 @@ class FittingAnalysisWidget(QWidget):
         slope = math.tan(math.radians(wedge_deg))
         center_pos = float(getattr(strategy, "center_pos", 18.05))
         if abs(slope) < 1e-12:
+            return
+
+        if top_axis_settings is None:
+            top_axis_settings = ExtraAxisPlotSettings(
+                key="top_x",
+                name="Secondary X axis",
+                label="Sample thickness (mm)",
+                can_swap_sides=True,
+            )
+
+        secondary_side = "bottom" if top_axis_settings.swap_sides else "top"
+        main_side = "top" if top_axis_settings.swap_sides else "bottom"
+        self._set_main_axis_side(
+            ax,
+            axis="x",
+            side=main_side,
+            visible=top_axis_settings.main_axis_visible,
+            opposite_ticks=settings.x_opposite_ticks,
+        )
+        if not top_axis_settings.visible:
             return
 
         def pos_to_thickness(position):
@@ -3281,13 +3419,80 @@ class FittingAnalysisWidget(QWidget):
             arr = np.asarray(thickness, dtype=float)
             return center_pos + (arr - top_axis_L_mm) / slope
 
-        secax = ax.secondary_xaxis("top", functions=(pos_to_thickness, thickness_to_pos))
+        self._apply_secondary_axis_range(
+            ax,
+            top_axis_settings,
+            axis="x",
+            secondary_to_primary=thickness_to_pos,
+        )
+        secax = ax.secondary_xaxis(secondary_side, functions=(pos_to_thickness, thickness_to_pos))
         self._apply_extra_axis_settings(
             secax,
             top_axis_settings,
             axis="x",
+            side=secondary_side,
             default_label="Sample thickness (mm)",
             font_family=settings.font_family,
+            apply_range=False,
+        )
+
+    def _apply_secondary_axis_range(
+        self,
+        parent_axis: Any,
+        axis_settings: ExtraAxisPlotSettings,
+        *,
+        axis: str,
+        secondary_to_primary: Any,
+    ) -> None:
+        if axis_settings.axis_min is None and axis_settings.axis_max is None:
+            return
+
+        def convert(value: Optional[float]) -> Optional[float]:
+            if value is None:
+                return None
+            converted = np.asarray(secondary_to_primary(float(value)), dtype=float).reshape(-1)
+            if converted.size == 0 or not np.isfinite(converted[0]):
+                raise ValueError("Secondary-axis range could not be converted to the main axis.")
+            return float(converted[0])
+
+        lower = convert(axis_settings.axis_min)
+        upper = convert(axis_settings.axis_max)
+        if axis == "x":
+            parent_axis.set_xlim(left=lower, right=upper)
+        else:
+            parent_axis.set_ylim(bottom=lower, top=upper)
+
+    def _set_main_axis_side(
+        self,
+        axis_obj: Any,
+        *,
+        axis: str,
+        side: str,
+        visible: bool,
+        opposite_ticks: bool,
+    ) -> None:
+        if axis == "x":
+            on_top = side == "top"
+            axis_obj.xaxis.set_label_position("top" if on_top else "bottom")
+            axis_obj.xaxis.label.set_visible(visible)
+            axis_obj.tick_params(
+                axis="x",
+                top=visible and (on_top or opposite_ticks),
+                labeltop=visible and on_top,
+                bottom=visible and ((not on_top) or opposite_ticks),
+                labelbottom=visible and not on_top,
+            )
+            return
+
+        on_right = side == "right"
+        axis_obj.yaxis.set_label_position("right" if on_right else "left")
+        axis_obj.yaxis.label.set_visible(visible)
+        axis_obj.tick_params(
+            axis="y",
+            right=visible and (on_right or opposite_ticks),
+            labelright=visible and on_right,
+            left=visible and ((not on_right) or opposite_ticks),
+            labelleft=visible and not on_right,
         )
 
     def _parse_ticks_text(self, text: str) -> Optional[List[float]]:
@@ -3335,8 +3540,10 @@ class FittingAnalysisWidget(QWidget):
         axis_settings: Optional[ExtraAxisPlotSettings],
         *,
         axis: str,
+        side: Optional[str] = None,
         default_label: str,
         font_family: str,
+        apply_range: bool = True,
     ) -> None:
         if axis_settings is None:
             axis_settings = ExtraAxisPlotSettings(key="", name="", label=default_label)
@@ -3348,10 +3555,21 @@ class FittingAnalysisWidget(QWidget):
             axis_obj.xaxis.label.set_size(label_size)
             axis_obj.xaxis.label.set_fontfamily(font_family)
             axis_obj.tick_params(axis="x", labelsize=tick_size)
-            axis_obj.tick_params(axis="x", bottom=axis_settings.opposite_ticks, labelbottom=False)
+            if side is None:
+                axis_obj.tick_params(axis="x", bottom=axis_settings.opposite_ticks, labelbottom=False)
+            else:
+                on_top = side == "top"
+                axis_obj.xaxis.set_label_position("top" if on_top else "bottom")
+                axis_obj.tick_params(
+                    axis="x",
+                    top=on_top or axis_settings.opposite_ticks,
+                    labeltop=on_top,
+                    bottom=(not on_top) or axis_settings.opposite_ticks,
+                    labelbottom=not on_top,
+                )
             labels = axis_obj.get_xticklabels()
             target_axis = axis_obj.xaxis
-            if axis_settings.axis_min is not None or axis_settings.axis_max is not None:
+            if apply_range and (axis_settings.axis_min is not None or axis_settings.axis_max is not None):
                 axis_obj.set_xlim(
                     left=axis_settings.axis_min if axis_settings.axis_min is not None else None,
                     right=axis_settings.axis_max if axis_settings.axis_max is not None else None,
@@ -3363,10 +3581,21 @@ class FittingAnalysisWidget(QWidget):
             axis_obj.yaxis.label.set_size(label_size)
             axis_obj.yaxis.label.set_fontfamily(font_family)
             axis_obj.tick_params(axis="y", labelsize=tick_size)
-            axis_obj.tick_params(axis="y", left=axis_settings.opposite_ticks, labelleft=False)
+            if side is None:
+                axis_obj.tick_params(axis="y", left=axis_settings.opposite_ticks, labelleft=False)
+            else:
+                on_right = side == "right"
+                axis_obj.yaxis.set_label_position("right" if on_right else "left")
+                axis_obj.tick_params(
+                    axis="y",
+                    right=on_right or axis_settings.opposite_ticks,
+                    labelright=on_right,
+                    left=(not on_right) or axis_settings.opposite_ticks,
+                    labelleft=not on_right,
+                )
             labels = axis_obj.get_yticklabels()
             target_axis = axis_obj.yaxis
-            if axis_settings.axis_min is not None or axis_settings.axis_max is not None:
+            if apply_range and (axis_settings.axis_min is not None or axis_settings.axis_max is not None):
                 axis_obj.set_ylim(
                     bottom=axis_settings.axis_min if axis_settings.axis_min is not None else None,
                     top=axis_settings.axis_max if axis_settings.axis_max is not None else None,
