@@ -113,7 +113,19 @@ class Jerphagnon1970Strategy(BaseRotationStrategy):
         ("BaMgF4", (0,1,0), "001", 0, 0): lambda _:1.0,
 
         # BMF d33
-        ("BaMgF4", (1,0,0), "001", 0, 0): lambda _:1.0
+        ("BaMgF4", (1,0,0), "001", 0, 0): lambda _:1.0,
+
+        # SAF d31
+        ("SrAlF5", (1,0,0), "010", 0, 90): lambda theta_p_2w: np.cos(theta_p_2w),
+        ("SrAlF5", (0,1,0), "100", 0, 90): lambda theta_p_2w: np.cos(theta_p_2w),
+
+        # SAF d33
+        ("SrAlF5", (1,0,0), "001", 0, 0): lambda _:1.0,
+        ("SrAlF5", (0,1,0), "001", 0, 0): lambda _:1.0,
+
+        #SAF d15
+        ("SrAlF5", (1,0,0), "001", 45, 90): lambda _:1.0
+
     }
 
     def _maker_fringes(self, override: dict = {}, envelope=False, return_aux=False):
