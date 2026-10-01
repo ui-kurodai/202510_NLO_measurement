@@ -2657,12 +2657,12 @@ class FittingAnalysisWidget(QWidget):
     def _fit_annotation_default_text(self, is_wedge: bool) -> str:
         if is_wedge:
             return (
-                "L = {L_mm:.4f} mm (ΔL= {delta_um:+.1f} um)\n"
+                "L = {L_mm:.4f} mm (ΔL= {delta_um:+.1f} $\\mathrm{\\mu m}$)\n"
                 "Peak intensity = {peak:.3g}\n"
                 "${\\Delta (n_{\\omega} - n_{2\\omega})}$ = {-delta_n:+.4f}"
             )
         return (
-            "L = {L_mm:.3f} mm (ΔL= {delta_um:+.0f} um)\n"
+            "L = {L_mm:.3f} mm (ΔL= {delta_um:+.0f} $\\mathrm{\\mu m}$)\n"
             "${I_\\mathrm{env}(0)}$ = {peak:.3g}\n"
             "{delta_n_w_labels} = {common_n_offset:+.4f}\n"
             "{delta_n_2w_labels} = {common_n_offset + delta_n:+.4f}\n"
